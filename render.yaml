@@ -1,0 +1,58 @@
+services:
+  # Painel principal do Chatwoot (a tela que você acessa no navegador)
+  - type: web
+    name: chatwoot-app
+    runtime: image
+    image:
+      url: docker.io/chatwoot/chatwoot:latest
+    plan: free
+    region: oregon
+    # Prepara o banco (cria as tabelas) automaticamente antes de ligar o servidor.
+    # É isto que resolve o erro de "banco não preparado" sem precisar de Shell.
+    preDeployCommand: "bundle exec rails db:chatwoot_prepare"
+    dockerCommand: "bundle exec rails s -b 0.0.0.0 -p 3000"
+    envVars:
+      - key: RAILS_ENV
+        value: production
+      - key: NODE_ENV
+        value: production
+      - key: INSTALLATION_ENV
+        value: docker
+      - key: RAILS_SERVE_STATIC_FILES
+        value: "true"
+      - key: ENABLE_ACCOUNT_SIGNUP
+        value: "false"
+      - key: SECRET_KEY_BASE
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+  # Sidekiq — processa e-mails e mensagens em segundo plano.
+  # Este é o único serviço pago (plano starter, ~US$7/mês).
+  - type: worker
+    name: chatwoot-worker
+    runtime: image
+    image:
+      url: docker.io/chatwoot/chatwoot:latest
+    plan: starter
+    region: oregon
+    dockerCommand: "bundle exec sidekiq -C config/sidekiq.yml"
+    envVars:
+      - key: RAILS_ENV
+        value: production
+      - key: NODE_ENV
+        value: production
+      - key: INSTALLATION_ENV
+        value: docker
+      - key: SECRET_KEY_BASE
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
