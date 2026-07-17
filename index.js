@@ -1,81 +1,60 @@
 // ============================================================
 //  ZORVIN by Ropelimi — Ponte (middleware)
-//  Recebe as mensagens do WhatsApp (via Uazapi) e guarda no
-//  banco de dados do Zorvin (Supabase).
+//  Liga o WhatsApp (via Uazapi) ao banco do Zorvin (Supabase).
 //
-//  Esta é a versão 1: cuida de RECEBER mensagens (texto e o
-//  registro de mídias). O ENVIO de respostas e a decodificação
-//  completa das mídias entram numa próxima versão.
+//  Faz duas coisas:
+//   1) RECEBE mensagens do WhatsApp e guarda no banco.
+//   2) ENVIA respostas: lê a "fila de envio" que o painel preenche
+//      e manda cada mensagem pela Uazapi.
 // ============================================================
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-// As mensagens da Uazapi podem trazer miniaturas embutidas, então
-// aumentamos um pouco o limite de tamanho do corpo da requisição.
 app.use(express.json({ limit: '15mb' }));
 
-// Conexão com o banco do Zorvin. Os dois valores abaixo vêm das
-// "variáveis de ambiente" que você configura no Render (não ficam
-// escritos aqui, por segurança).
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
 // ------------------------------------------------------------
-//  Verificação de saúde: usada pelo cronjob para manter a ponte
-//  acordada no plano gratuito do Render. Ao acessar a URL raiz,
-//  responde uma mensagem simples.
+//  Verificação de saúde (usada pelo cronjob para não "dormir").
 // ------------------------------------------------------------
 app.get('/', (req, res) => {
   res.status(200).send('Zorvin bridge online');
 });
 
-// ------------------------------------------------------------
-//  O coração da ponte: recebe cada mensagem que a Uazapi envia.
-// ------------------------------------------------------------
+// ============================================================
+//  PARTE 1 — RECEBER mensagens
+// ============================================================
 app.post('/webhook', async (req, res) => {
-  // Responde 200 imediatamente para a Uazapi não ficar reenviando.
-  res.status(200).send('OK');
+  res.status(200).send('OK'); // responde rápido para a Uazapi não reenviar
 
   try {
     const body = req.body;
-
-    // Só nos interessam eventos de mensagem que tenham conteúdo.
     if (body.EventType !== 'messages' || !body.message) return;
 
     const m = body.message;
 
-    // 1) Descobrir de qual ADVOGADO é esta conversa.
-    //    Na Uazapi, "owner" é o número do dono da instância (o advogado).
+    // De qual ADVOGADO é esta conversa (owner = número do dono da instância).
     const advogadoNumero = body.owner || m.owner;
     const { data: adv, error: advErro } = await supabase
       .from('advogados')
       .select('id')
       .eq('numero', advogadoNumero)
       .maybeSingle();
-
     if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
-    if (!adv) {
-      console.log('Mensagem de um número não cadastrado em "advogados":', advogadoNumero);
-      return;
-    }
+    if (!adv) { console.log('Número não cadastrado em advogados:', advogadoNumero); return; }
 
-    // 2) Identificar o CONTATO (a pessoa que está do outro lado).
-    //    Usamos o telefone real (chat.phone / sender_pn), não o "@lid".
+    // Quem é o CONTATO (usa o telefone real, não o @lid).
     const contatoNumero =
-      (body.chat && body.chat.phone) ||
-      (m.sender_pn || '').split('@')[0];
+      (body.chat && body.chat.phone) || (m.sender_pn || '').split('@')[0];
     const contatoNome =
-      (body.chat && body.chat.wa_name) ||
-      m.senderName ||
-      null;
-
+      (body.chat && body.chat.wa_name) || m.senderName || null;
     if (!contatoNumero) { console.log('Sem número de contato; ignorando.'); return; }
 
-    // Cria o contato se ainda não existir; se já existir, mantém.
     const { data: contato, error: contErro } = await supabase
       .from('contatos')
       .upsert({ numero: contatoNumero, nome: contatoNome }, { onConflict: 'numero' })
@@ -83,7 +62,7 @@ app.post('/webhook', async (req, res) => {
       .single();
     if (contErro) { console.error('Erro no contato:', contErro.message); return; }
 
-    // 3) Encontrar (ou criar) a CONVERSA entre este advogado e este contato.
+    // A CONVERSA entre este advogado e este contato.
     const { data: conversa, error: convErro } = await supabase
       .from('conversas')
       .upsert(
@@ -94,7 +73,7 @@ app.post('/webhook', async (req, res) => {
       .single();
     if (convErro) { console.error('Erro na conversa:', convErro.message); return; }
 
-    // 4) Descobrir o TIPO da mensagem (texto, imagem, áudio, etc.).
+    // TIPO da mensagem.
     let tipo = 'texto';
     if (m.type === 'media') {
       if (m.mediaType === 'image') tipo = 'imagem';
@@ -103,28 +82,17 @@ app.post('/webhook', async (req, res) => {
       else tipo = 'documento';
     }
 
-    // De quem partiu: se "fromMe" é falso, veio do contato (recebida);
-    // se verdadeiro, foi o próprio advogado que enviou (pelo celular dele).
     const origem = m.fromMe ? 'advogado' : 'contato';
-
-    // Texto da mensagem (ou legenda de uma mídia).
     const texto =
-      m.text ||
-      (typeof m.content === 'string' ? m.content : '') ||
-      null;
+      m.text || (typeof m.content === 'string' ? m.content : '') || null;
 
-    // Para imagens, a Uazapi manda uma miniatura embutida (JPEGThumbnail).
-    // Guardamos como prévia para o painel já mostrar algo, enquanto a
-    // versão em alta resolução fica para a próxima etapa (decodificação).
+    // Miniatura embutida da imagem (prévia imediata).
     let midiaUrl = null;
     if (tipo === 'imagem' && m.content && m.content.JPEGThumbnail) {
       midiaUrl = 'data:image/jpeg;base64,' + m.content.JPEGThumbnail;
     }
-
     const midiaMime = (m.content && m.content.mimetype) || null;
 
-    // 5) Guardar a MENSAGEM. Se já existir (mesmo id da Uazapi), ignora
-    //    para não duplicar.
     const { error: msgErro } = await supabase
       .from('mensagens')
       .upsert(
@@ -142,11 +110,103 @@ app.post('/webhook', async (req, res) => {
       );
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
 
-    console.log(`Mensagem (${tipo}) de ${contatoNumero} para o advogado ${advogadoNumero} salva.`);
+    console.log(`Recebida (${tipo}) de ${contatoNumero} p/ advogado ${advogadoNumero}.`);
   } catch (e) {
     console.error('Erro inesperado no webhook:', e.message);
   }
 });
+
+// ============================================================
+//  PARTE 2 — ENVIAR respostas (processa a fila_envio)
+// ============================================================
+//  A cada poucos segundos, a ponte olha a fila de mensagens que o
+//  painel quer enviar, e manda cada uma pela Uazapi.
+// ------------------------------------------------------------
+async function processarFilaDeEnvio() {
+  try {
+    // Pega até 10 mensagens pendentes de cada vez.
+    const { data: pendentes, error } = await supabase
+      .from('fila_envio')
+      .select('id, conversa_id, texto')
+      .eq('status', 'pendente')
+      .order('criado_em', { ascending: true })
+      .limit(10);
+
+    if (error) { console.error('Erro ao ler fila:', error.message); return; }
+    if (!pendentes || pendentes.length === 0) return;
+
+    for (const item of pendentes) {
+      // Marca como "enviando" para não processar duas vezes.
+      await supabase.from('fila_envio')
+        .update({ status: 'enviando', tentativas: 1 })
+        .eq('id', item.id);
+
+      // Descobre para qual número enviar e por qual advogado (token/servidor).
+      const { data: conv } = await supabase
+        .from('conversas')
+        .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor)')
+        .eq('id', item.conversa_id)
+        .single();
+
+      if (!conv || !conv.advogado || !conv.contato) {
+        await supabase.from('fila_envio')
+          .update({ status: 'erro', erro_detalhe: 'Conversa/advogado/contato não encontrado' })
+          .eq('id', item.id);
+        continue;
+      }
+
+      const servidor = (conv.advogado.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+      const token = conv.advogado.token;
+      const numeroDestino = conv.contato.numero;
+
+      try {
+        // Chama a Uazapi para enviar o texto.
+        const resposta = await fetch(`${servidor}/send/text`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'token': token
+          },
+          body: JSON.stringify({
+            number: numeroDestino,
+            text: item.texto,
+            readchat: true
+          })
+        });
+
+        if (!resposta.ok) {
+          const detalhe = await resposta.text();
+          throw new Error(`Uazapi respondeu ${resposta.status}: ${detalhe}`);
+        }
+
+        // Deu certo: marca como enviada e registra a mensagem no histórico.
+        await supabase.from('fila_envio')
+          .update({ status: 'enviada', enviado_em: new Date().toISOString() })
+          .eq('id', item.id);
+
+        await supabase.from('mensagens').insert({
+          conversa_id: item.conversa_id,
+          origem: 'advogado',
+          tipo: 'texto',
+          texto: item.texto,
+          status: 'enviada'
+        });
+
+        console.log(`Enviada para ${numeroDestino}.`);
+      } catch (envioErro) {
+        await supabase.from('fila_envio')
+          .update({ status: 'erro', erro_detalhe: envioErro.message })
+          .eq('id', item.id);
+        console.error(`Falha ao enviar (${item.id}):`, envioErro.message);
+      }
+    }
+  } catch (e) {
+    console.error('Erro ao processar fila:', e.message);
+  }
+}
+
+// Roda a verificação da fila a cada 3 segundos.
+setInterval(processarFilaDeEnvio, 3000);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
