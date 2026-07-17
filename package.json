@@ -1,0 +1,13 @@
+{
+  "name": "zorvin-bridge",
+  "version": "1.0.0",
+  "description": "Ponte entre a Uazapi (WhatsApp) e o banco de dados do Zorvin (Supabase)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2"
+  }
+}
