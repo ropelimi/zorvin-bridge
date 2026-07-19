@@ -213,17 +213,22 @@ async function tratarStatusMensagem(body, evento) {
 async function tratarPresenca(body, evento) {
   try {
     const bruto = JSON.stringify(body).toLowerCase();
-    const digitando = bruto.includes('composing');
+    // "digitando" = composing/recording; "parou" = paused/available/unavailable.
+    const digitando = bruto.includes('composing') || bruto.includes('recording');
     const parou = bruto.includes('paused') || bruto.includes('available');
     if (!digitando && !parou) return;
 
-    const advogadoNumero = body.owner || (body.message && body.message.owner);
+    // O número do contato (e do advogado) pode vir em vários campos, dependendo
+    // da versão da Uazapi. Tentamos todos os lugares comuns.
+    const d = body.data || body.presence || body.chat || {};
+    const advogadoNumero = body.owner || d.owner || (body.message && body.message.owner) || null;
     const contatoBruto =
-      (body.chat && body.chat.phone) || body.phone || body.sender ||
-      (body.presence && (body.presence.phone || body.presence.id)) || body.id || '';
+      (body.chat && body.chat.phone) || body.number || body.phone || body.chatId || body.chat_id ||
+      body.sender || body.sender_pn || d.phone || d.number || d.chatId || d.chat_id || d.id || body.id || '';
     const contatoNumero = String(contatoBruto).split('@')[0].replace(/\D/g, '');
     if (!advogadoNumero || !contatoNumero) {
-      console.log('Presença sem dados suficientes:', evento, bruto.slice(0, 200));
+      // Não achamos os números: loga o corpo INTEIRO para eu ver os campos reais.
+      console.log('Presença: não localizei os números. Corpo:', JSON.stringify(body).slice(0, 500));
       return;
     }
 
