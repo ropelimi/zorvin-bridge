@@ -361,37 +361,42 @@ async function processarFilaDeEnvio() {
             item.tipo === 'video' ? 'video' :
             item.tipo === 'audio' ? 'ptt' : 'document';
 
-          // Baixa o arquivo do Storage com a chave de serviço e manda como
-          // base64. Assim não depende do bucket ser público nem de a Uazapi
-          // conseguir alcançar a URL. Se não conseguir baixar, manda a URL.
-          let fileParam = item.midia_url;
-          let via = 'url';
-          try {
-            const caminho = caminhoDoStorage(item.midia_url);
-            if (caminho) {
-              const { data: blob, error: dlErr } = await supabase.storage.from('anexos').download(caminho);
-              if (dlErr) {
-                console.error('Erro ao baixar anexo do Storage:', dlErr.message);
-              } else {
-                const buff = Buffer.from(await blob.arrayBuffer());
-                const mime = item.midia_mime || 'application/octet-stream';
-                fileParam = `data:${mime};base64,${buff.toString('base64')}`;
-                via = 'base64';
-              }
-            }
-          } catch (prepErro) {
-            console.error('Falha ao preparar o anexo:', prepErro.message);
-          }
+          // Chama /send/media com um "file" (URL pública ou base64).
+          const enviarMidia = async (fileParam, via) => {
+            const corpoM = { number: numeroDestino, type: tipoUaz, file: fileParam, text: item.texto || '' };
+            if (item.midia_nome) corpoM.docName = item.midia_nome;
+            if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
+            console.log(`Enviando mídia (${tipoUaz}) via ${via} para ${numeroDestino}.`);
+            return fetch(`${servidor}/send/media`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'token': token },
+              body: JSON.stringify(corpoM)
+            });
+          };
 
-          const corpoM = { number: numeroDestino, type: tipoUaz, file: fileParam, text: item.texto || '' };
-          if (item.midia_nome) corpoM.docName = item.midia_nome;
-          if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
-          console.log(`Enviando mídia (${tipoUaz}) via ${via} para ${numeroDestino}.`);
-          resposta = await fetch(`${servidor}/send/media`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'token': token },
-            body: JSON.stringify(corpoM)
-          });
+          // 1ª tentativa: URL pública do Storage (bucket público).
+          resposta = await enviarMidia(item.midia_url, 'url');
+
+          // Se falhar, 2ª tentativa: baixa o arquivo e envia como base64.
+          if (!resposta.ok) {
+            const det = await resposta.text().catch(() => '');
+            console.log(`Envio por URL falhou (${resposta.status}): ${det.slice(0, 200)}`);
+            try {
+              const caminho = caminhoDoStorage(item.midia_url);
+              if (caminho) {
+                const { data: blob, error: dlErr } = await supabase.storage.from('anexos').download(caminho);
+                if (dlErr) {
+                  console.error('Erro ao baixar anexo do Storage:', dlErr.message);
+                } else {
+                  const buff = Buffer.from(await blob.arrayBuffer());
+                  const mime = item.midia_mime || 'application/octet-stream';
+                  resposta = await enviarMidia(`data:${mime};base64,${buff.toString('base64')}`, 'base64');
+                }
+              }
+            } catch (prepErro) {
+              console.error('Falha na 2ª tentativa (base64):', prepErro.message);
+            }
+          }
         } else {
           // Envia texto. Se é uma RESPOSTA, passa o replyid para citar.
           const corpo = { number: numeroDestino, text: item.texto, readchat: true };
