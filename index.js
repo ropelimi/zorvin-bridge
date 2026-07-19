@@ -34,6 +34,15 @@ app.post('/webhook', async (req, res) => {
 
   try {
     const body = req.body;
+    const evento = (body.EventType || body.event || '').toLowerCase();
+
+    // Eventos de STATUS das mensagens que ENVIAMOS (entregue / lida) —
+    // são o que faz o "tiquinho" virar azul, igual ao WhatsApp.
+    if (evento && evento !== 'messages') {
+      await tratarStatusMensagem(body, evento);
+      return;
+    }
+
     if (body.EventType !== 'messages' || !body.message) return;
 
     const m = body.message;
@@ -123,6 +132,53 @@ app.post('/webhook', async (req, res) => {
     console.error('Erro inesperado no webhook:', e.message);
   }
 });
+
+// ------------------------------------------------------------
+//  Atualiza o STATUS de uma mensagem que enviamos (entregue/lida).
+//  Isso é o que deixa o "tiquinho" azul quando o contato lê.
+//
+//  ATENÇÃO: o formato exato desses eventos varia entre versões da
+//  Uazapi e ainda não foi confirmado em teste. Por isso a função é
+//  tolerante (tenta vários formatos) e, quando não reconhece, apenas
+//  registra no log — nada quebra. Ao ver no log do Render qual é o
+//  formato real, dá para ajustar com precisão.
+// ------------------------------------------------------------
+async function tratarStatusMensagem(body, evento) {
+  try {
+    const alvo = body.message || body.update || body.data || body;
+    const id =
+      alvo.messageid || alvo.id || (alvo.key && alvo.key.id) || body.messageid || null;
+    const bruto = alvo.status ?? alvo.ack ?? body.status ?? body.ack;
+
+    // Se não achamos id ou status, registramos para referência e saímos.
+    if (!id || bruto === undefined || bruto === null) {
+      console.log('Evento não tratado (p/ referência):', evento, JSON.stringify(body).slice(0, 300));
+      return;
+    }
+
+    const s = String(bruto).toLowerCase();
+    let novo = null;
+    if (s === '3' || s === '4' || s.includes('read') || s.includes('play') || s.includes('lid')) {
+      novo = 'lida';
+    } else if (s === '2' || s.includes('deliver') || s.includes('entreg')) {
+      novo = 'entregue';
+    }
+    if (!novo) {
+      console.log('Status não mapeado (p/ referência):', evento, bruto);
+      return;
+    }
+
+    const { error } = await supabase
+      .from('mensagens')
+      .update({ status: novo })
+      .eq('id_uazapi', id)
+      .eq('origem', 'advogado'); // só marcamos "lida" nas mensagens que enviamos
+    if (error) { console.error('Erro ao atualizar status:', error.message); return; }
+    console.log(`Status "${novo}" aplicado à mensagem ${id}.`);
+  } catch (e) {
+    console.error('Erro ao tratar status de mensagem:', e.message);
+  }
+}
 
 // ============================================================
 //  PARTE 2 — ENVIAR respostas (processa a fila_envio)
