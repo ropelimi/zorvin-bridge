@@ -19,6 +19,18 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// fetch com timeout: evita que uma chamada à Uazapi fique pendurada e
+// segure a fila. Aborta após `ms` milissegundos.
+async function fetchComTimeout(url, opts = {}, ms = 15000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // ------------------------------------------------------------
 //  Verificação de saúde (usada pelo cronjob para não "dormir").
 // ------------------------------------------------------------
@@ -36,9 +48,10 @@ app.post('/webhook', async (req, res) => {
     const body = req.body;
     const evento = (body.EventType || body.event || '').toLowerCase();
 
-    // Eventos de STATUS das mensagens que ENVIAMOS (entregue / lida) —
-    // são o que faz o "tiquinho" virar azul, igual ao WhatsApp.
+    // Eventos que NÃO são mensagens: status (entregue/lida) e presença
+    // ("digitando…"). Tentamos tratar os dois; nada quebra se não reconhecer.
     if (evento && evento !== 'messages') {
+      await tratarPresenca(body, evento);
       await tratarStatusMensagem(body, evento);
       return;
     }
@@ -188,6 +201,51 @@ async function tratarStatusMensagem(body, evento) {
 }
 
 // ------------------------------------------------------------
+//  "Digitando…": detecta eventos de presença (composing) da Uazapi e
+//  marca conversas.digitando_ate com uma janela curta. O painel mostra
+//  "digitando…" enquanto essa data estiver no futuro.
+//
+//  ATENÇÃO: o formato do evento de presença da Uazapi ainda NÃO foi
+//  confirmado. Detectamos "composing"/"paused" de forma tolerante e
+//  registramos no log; nada quebra se não reconhecer ou se a coluna
+//  digitando_ate ainda não existir.
+// ------------------------------------------------------------
+async function tratarPresenca(body, evento) {
+  try {
+    const bruto = JSON.stringify(body).toLowerCase();
+    const digitando = bruto.includes('composing');
+    const parou = bruto.includes('paused') || bruto.includes('available');
+    if (!digitando && !parou) return;
+
+    const advogadoNumero = body.owner || (body.message && body.message.owner);
+    const contatoBruto =
+      (body.chat && body.chat.phone) || body.phone || body.sender ||
+      (body.presence && (body.presence.phone || body.presence.id)) || body.id || '';
+    const contatoNumero = String(contatoBruto).split('@')[0].replace(/\D/g, '');
+    if (!advogadoNumero || !contatoNumero) {
+      console.log('Presença sem dados suficientes:', evento, bruto.slice(0, 200));
+      return;
+    }
+
+    const { data: adv } = await supabase.from('advogados').select('id').eq('numero', advogadoNumero).maybeSingle();
+    if (!adv) return;
+    const { data: cont } = await supabase.from('contatos').select('id').eq('numero', contatoNumero).maybeSingle();
+    if (!cont) return;
+
+    const ate = digitando
+      ? new Date(Date.now() + 8000).toISOString()   // digitando: some em 8s
+      : new Date(Date.now() - 1000).toISOString();  // parou: expira já
+    const { error } = await supabase.from('conversas')
+      .update({ digitando_ate: ate })
+      .eq('advogado_id', adv.id).eq('contato_id', cont.id);
+    if (error) console.log('digitando_ate (coluna?):', error.message);
+    else console.log(`Presença: ${digitando ? 'digitando' : 'parou'} (${contatoNumero}).`);
+  } catch (e) {
+    console.error('Erro em tratarPresenca:', e.message);
+  }
+}
+
+// ------------------------------------------------------------
 //  Baixa a mídia RECEBIDA (imagem/áudio/vídeo/doc) em alta resolução
 //  pela Uazapi e salva no Storage do Supabase. Retorna a URL pública,
 //  ou null se não conseguir (aí mantém a miniatura de antes).
@@ -313,7 +371,10 @@ function extrairResposta(m) {
 //  A cada poucos segundos, a ponte olha a fila de mensagens que o
 //  painel quer enviar, e manda cada uma pela Uazapi.
 // ------------------------------------------------------------
+let filaRodando = false; // impede que dois ciclos processem a fila ao mesmo tempo
 async function processarFilaDeEnvio() {
+  if (filaRodando) return; // o ciclo anterior ainda não terminou
+  filaRodando = true;
   try {
     // Pega até 10 mensagens pendentes de cada vez.
     const { data: pendentes, error } = await supabase
@@ -327,10 +388,14 @@ async function processarFilaDeEnvio() {
     if (!pendentes || pendentes.length === 0) return;
 
     for (const item of pendentes) {
-      // Marca como "enviando" para não processar duas vezes.
-      await supabase.from('fila_envio')
+      // Reivindica o item de forma ATÔMICA: só processa se ainda estava
+      // 'pendente'. Evita envio duplicado se dois ciclos se cruzarem.
+      const { data: claim } = await supabase.from('fila_envio')
         .update({ status: 'enviando', tentativas: 1 })
-        .eq('id', item.id);
+        .eq('id', item.id)
+        .eq('status', 'pendente')
+        .select('id');
+      if (!claim || claim.length === 0) continue; // outro ciclo já pegou este item
 
       // Descobre para qual número enviar e por qual advogado (token/servidor).
       const { data: conv } = await supabase
@@ -367,7 +432,7 @@ async function processarFilaDeEnvio() {
             if (item.midia_nome) corpoM.docName = item.midia_nome;
             if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
             console.log(`Enviando mídia (${tipoUaz}) via ${via} para ${numeroDestino}.`);
-            return fetch(`${servidor}/send/media`, {
+            return fetchComTimeout(`${servidor}/send/media`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'token': token },
               body: JSON.stringify(corpoM)
@@ -401,7 +466,7 @@ async function processarFilaDeEnvio() {
           // Envia texto. Se é uma RESPOSTA, passa o replyid para citar.
           const corpo = { number: numeroDestino, text: item.texto, readchat: true };
           if (item.responder_id_uazapi) corpo.replyid = item.responder_id_uazapi;
-          resposta = await fetch(`${servidor}/send/text`, {
+          resposta = await fetchComTimeout(`${servidor}/send/text`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'token': token },
             body: JSON.stringify(corpo)
@@ -456,6 +521,8 @@ async function processarFilaDeEnvio() {
     }
   } catch (e) {
     console.error('Erro ao processar fila:', e.message);
+  } finally {
+    filaRodando = false;
   }
 }
 
