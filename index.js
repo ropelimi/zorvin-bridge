@@ -38,6 +38,14 @@ app.post('/webhook', async (req, res) => {
 
     const m = body.message;
 
+    // Se a mensagem foi enviada pelo próprio Zorvin (pela API), a ponte já
+    // registrou ela no banco na hora do envio. Este aviso é só um "eco" —
+    // ignoramos para não duplicar.
+    if (m.wasSentByApi === true) {
+      console.log('Eco de mensagem enviada pelo Zorvin; ignorado.');
+      return;
+    }
+
     // De qual ADVOGADO é esta conversa (owner = número do dono da instância).
     const advogadoNumero = body.owner || m.owner;
     const { data: adv, error: advErro } = await supabase
@@ -179,18 +187,31 @@ async function processarFilaDeEnvio() {
           throw new Error(`Uazapi respondeu ${resposta.status}: ${detalhe}`);
         }
 
+        // Tenta capturar o id que a Uazapi deu à mensagem enviada.
+        // Serve como trava extra: se um eco chegar com o mesmo id, o banco
+        // recusa a duplicata automaticamente.
+        let idUazapi = null;
+        try {
+          const dados = await resposta.json();
+          idUazapi = dados?.messageid || dados?.id || dados?.message?.messageid || null;
+        } catch (_) { /* resposta sem JSON: seguimos sem o id */ }
+
         // Deu certo: marca como enviada e registra a mensagem no histórico.
         await supabase.from('fila_envio')
           .update({ status: 'enviada', enviado_em: new Date().toISOString() })
           .eq('id', item.id);
 
-        await supabase.from('mensagens').insert({
-          conversa_id: item.conversa_id,
-          origem: 'advogado',
-          tipo: 'texto',
-          texto: item.texto,
-          status: 'enviada'
-        });
+        await supabase.from('mensagens').upsert(
+          {
+            conversa_id: item.conversa_id,
+            origem: 'advogado',
+            tipo: 'texto',
+            texto: item.texto,
+            id_uazapi: idUazapi,
+            status: 'enviada'
+          },
+          { onConflict: 'id_uazapi', ignoreDuplicates: true }
+        );
 
         console.log(`Enviada para ${numeroDestino}.`);
       } catch (envioErro) {
