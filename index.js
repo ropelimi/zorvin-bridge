@@ -268,20 +268,35 @@ async function processarFilaDeEnvio() {
       const numeroDestino = conv.contato.numero;
 
       try {
-        // Monta o corpo do envio. Se esta mensagem é uma RESPOSTA a outra,
-        // passa o replyid para a Uazapi citar a mensagem original.
-        const corpo = { number: numeroDestino, text: item.texto, readchat: true };
-        if (item.responder_id_uazapi) corpo.replyid = item.responder_id_uazapi;
+        // Esta mensagem é um ANEXO (imagem/documento/áudio/vídeo) ou texto?
+        const ehMidia = item.tipo && item.tipo !== 'texto' && item.midia_url;
 
-        // Chama a Uazapi para enviar o texto.
-        const resposta = await fetch(`${servidor}/send/text`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'token': token
-          },
-          body: JSON.stringify(corpo)
-        });
+        let resposta;
+        if (ehMidia) {
+          // Envia mídia pela Uazapi (formato do body não confirmado em teste;
+          // se falhar, o log traz a resposta da Uazapi para ajuste).
+          const tipoUaz =
+            item.tipo === 'imagem' ? 'image' :
+            item.tipo === 'video' ? 'video' :
+            item.tipo === 'audio' ? 'audio' : 'document';
+          const corpoM = { number: numeroDestino, type: tipoUaz, file: item.midia_url, text: item.texto || '' };
+          if (item.midia_nome) corpoM.docName = item.midia_nome;
+          if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
+          resposta = await fetch(`${servidor}/send/media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify(corpoM)
+          });
+        } else {
+          // Envia texto. Se é uma RESPOSTA, passa o replyid para citar.
+          const corpo = { number: numeroDestino, text: item.texto, readchat: true };
+          if (item.responder_id_uazapi) corpo.replyid = item.responder_id_uazapi;
+          resposta = await fetch(`${servidor}/send/text`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify(corpo)
+          });
+        }
 
         if (!resposta.ok) {
           const detalhe = await resposta.text();
@@ -305,8 +320,10 @@ async function processarFilaDeEnvio() {
         const base = {
           conversa_id: item.conversa_id,
           origem: 'advogado',
-          tipo: 'texto',
-          texto: item.texto,
+          tipo: item.tipo || 'texto',
+          texto: item.texto || null,
+          midia_url: ehMidia ? item.midia_url : null,
+          midia_mime: ehMidia ? (item.midia_mime || null) : null,
           id_uazapi: idUazapi,
           status: 'enviada'
         };
@@ -319,7 +336,7 @@ async function processarFilaDeEnvio() {
           : null;
         await salvarMensagem(base, extras);
 
-        console.log(`Enviada para ${numeroDestino}.`);
+        console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
         await supabase.from('fila_envio')
           .update({ status: 'erro', erro_detalhe: envioErro.message })
