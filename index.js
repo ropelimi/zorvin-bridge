@@ -59,7 +59,7 @@ app.post('/webhook', async (req, res) => {
     const advogadoNumero = body.owner || m.owner;
     const { data: adv, error: advErro } = await supabase
       .from('advogados')
-      .select('id')
+      .select('id, token, servidor')
       .eq('numero', advogadoNumero)
       .maybeSingle();
     if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
@@ -103,12 +103,21 @@ app.post('/webhook', async (req, res) => {
     const texto =
       m.text || (typeof m.content === 'string' ? m.content : '') || null;
 
-    // Miniatura embutida da imagem (prévia imediata).
+    // Miniatura embutida da imagem (prévia imediata, baixa resolução).
     let midiaUrl = null;
     if (tipo === 'imagem' && m.content && m.content.JPEGThumbnail) {
       midiaUrl = 'data:image/jpeg;base64,' + m.content.JPEGThumbnail;
     }
     const midiaMime = (m.content && m.content.mimetype) || null;
+
+    // Mídia em ALTA RESOLUÇÃO: tenta baixar o arquivo real pela Uazapi e
+    // salvar no Storage. Se conseguir, usa essa URL; se não, fica a miniatura
+    // (ou nada, no caso de áudio) — comportamento de antes, sem quebrar.
+    if (m.type === 'media') {
+      const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+      const urlReal = await baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime);
+      if (urlReal) midiaUrl = urlReal;
+    }
 
     const base = {
       conversa_id: conversa.id,
@@ -175,6 +184,66 @@ async function tratarStatusMensagem(body, evento) {
     console.log(`Status "${novo}" aplicado à mensagem ${id}.`);
   } catch (e) {
     console.error('Erro ao tratar status de mensagem:', e.message);
+  }
+}
+
+// ------------------------------------------------------------
+//  Baixa a mídia RECEBIDA (imagem/áudio/vídeo/doc) em alta resolução
+//  pela Uazapi e salva no Storage do Supabase. Retorna a URL pública,
+//  ou null se não conseguir (aí mantém a miniatura de antes).
+//
+//  ATENÇÃO: o endpoint/retorno de download da Uazapi ainda não foi
+//  confirmado. Tentamos algumas rotas e formatos comuns e registramos
+//  no log a estrutura real, para ajustar com precisão depois. Nada
+//  quebra se falhar.
+// ------------------------------------------------------------
+async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
+  try {
+    try { console.log('Mídia recebida (content):', JSON.stringify(m.content).slice(0, 600)); } catch (_) { /* ignora */ }
+    if (!token || !m.messageid) return null;
+
+    let dados = null;
+    for (const rota of ['/message/downloadmedia', '/message/download', '/downloadmedia']) {
+      try {
+        const r = await fetch(`${servidor}${rota}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'token': token },
+          body: JSON.stringify({ id: m.messageid })
+        });
+        if (r.ok) {
+          dados = await r.json().catch(() => null);
+          if (dados) { console.log(`downloadmedia OK via ${rota}`); break; }
+        } else {
+          console.log(`downloadmedia ${rota} -> ${r.status}`);
+        }
+      } catch (e) { console.log(`downloadmedia ${rota} erro: ${e.message}`); }
+    }
+    if (!dados) return null;
+
+    const mime = dados.mimetype || dados.mime || mimeInformado || 'application/octet-stream';
+    let bytes = null;
+    const b64 = dados.file || dados.data || dados.base64 || dados.media || dados.buffer;
+    const urlBaixavel = dados.url || dados.fileURL || dados.fileUrl || dados.link || dados.mediaUrl;
+    if (typeof b64 === 'string' && b64.length > 100) {
+      bytes = Buffer.from(b64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+    } else if (urlBaixavel) {
+      const arq = await fetch(urlBaixavel);
+      if (arq.ok) bytes = Buffer.from(await arq.arrayBuffer());
+    }
+    if (!bytes || !bytes.length) {
+      console.log('downloadmedia sem arquivo reconhecível:', JSON.stringify(dados).slice(0, 300));
+      return null;
+    }
+
+    const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
+    const caminho = `recebidos/${m.messageid}.${ext}`;
+    const { error: upErr } = await supabase.storage.from('anexos').upload(caminho, bytes, { contentType: mime, upsert: true });
+    if (upErr) { console.error('Erro ao salvar mídia recebida no Storage:', upErr.message); return null; }
+    const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
+    return pub?.publicUrl || null;
+  } catch (e) {
+    console.error('Erro em baixarMidiaRecebida:', e.message);
+    return null;
   }
 }
 
