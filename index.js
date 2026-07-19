@@ -110,21 +110,19 @@ app.post('/webhook', async (req, res) => {
     }
     const midiaMime = (m.content && m.content.mimetype) || null;
 
-    const { error: msgErro } = await supabase
-      .from('mensagens')
-      .upsert(
-        {
-          conversa_id: conversa.id,
-          origem,
-          tipo,
-          texto,
-          midia_url: midiaUrl,
-          midia_mime: midiaMime,
-          id_uazapi: m.messageid,
-          status: origem === 'contato' ? 'recebida' : 'enviada'
-        },
-        { onConflict: 'id_uazapi', ignoreDuplicates: true }
-      );
+    const base = {
+      conversa_id: conversa.id,
+      origem,
+      tipo,
+      texto,
+      midia_url: midiaUrl,
+      midia_mime: midiaMime,
+      id_uazapi: m.messageid,
+      status: origem === 'contato' ? 'recebida' : 'enviada'
+    };
+    // Se a mensagem recebida é uma RESPOSTA a outra, guarda a citação.
+    const extras = extrairResposta(m);
+    const msgErro = await salvarMensagem(base, extras);
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
 
     console.log(`Recebida (${tipo}) de ${contatoNumero} p/ advogado ${advogadoNumero}.`);
@@ -180,6 +178,52 @@ async function tratarStatusMensagem(body, evento) {
   }
 }
 
+// ------------------------------------------------------------
+//  Grava uma mensagem, tolerando colunas novas que talvez ainda
+//  não existam no banco (ex.: as de citação). Se o upsert falhar
+//  com os campos extras, tenta de novo só com o básico.
+// ------------------------------------------------------------
+async function salvarMensagem(base, extras) {
+  const temExtras = extras && Object.keys(extras).length > 0;
+  const payload = temExtras ? { ...base, ...extras } : base;
+  let { error } = await supabase
+    .from('mensagens')
+    .upsert(payload, { onConflict: 'id_uazapi', ignoreDuplicates: true });
+  if (error && temExtras) {
+    // Provável coluna inexistente: grava sem os campos de citação.
+    console.log('Regravando mensagem sem campos de citação:', error.message);
+    ({ error } = await supabase
+      .from('mensagens')
+      .upsert(base, { onConflict: 'id_uazapi', ignoreDuplicates: true }));
+  }
+  return error;
+}
+
+// ------------------------------------------------------------
+//  Detecta se uma mensagem recebida é RESPOSTA (citação) a outra.
+//  O formato exato da Uazapi ainda não foi confirmado, então
+//  tentamos vários campos comuns; se não achar, retorna null.
+// ------------------------------------------------------------
+function extrairResposta(m) {
+  const ctx =
+    m.quoted || m.quotedMsg || m.contextInfo ||
+    (m.content && (m.content.contextInfo || m.content.quotedMessage)) || null;
+  if (!ctx) return null;
+  const idCitada =
+    ctx.stanzaId || ctx.quotedId || ctx.id || (ctx.key && ctx.key.id) ||
+    m.quotedMessageId || null;
+  const texto =
+    ctx.text || ctx.body || ctx.caption ||
+    (ctx.quotedMessage && (ctx.quotedMessage.conversation || ctx.quotedMessage.text)) ||
+    (typeof ctx.quotedMessage === 'string' ? ctx.quotedMessage : null);
+  if (!idCitada && !texto) return null;
+  return {
+    responder_id_uazapi: idCitada || null,
+    resposta_previa: texto ? String(texto).slice(0, 120) : null,
+    resposta_autor: ctx.fromMe === true ? 'advogado' : 'contato',
+  };
+}
+
 // ============================================================
 //  PARTE 2 — ENVIAR respostas (processa a fila_envio)
 // ============================================================
@@ -191,7 +235,7 @@ async function processarFilaDeEnvio() {
     // Pega até 10 mensagens pendentes de cada vez.
     const { data: pendentes, error } = await supabase
       .from('fila_envio')
-      .select('id, conversa_id, texto')
+      .select('*')
       .eq('status', 'pendente')
       .order('criado_em', { ascending: true })
       .limit(10);
@@ -224,19 +268,35 @@ async function processarFilaDeEnvio() {
       const numeroDestino = conv.contato.numero;
 
       try {
-        // Chama a Uazapi para enviar o texto.
-        const resposta = await fetch(`${servidor}/send/text`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'token': token
-          },
-          body: JSON.stringify({
-            number: numeroDestino,
-            text: item.texto,
-            readchat: true
-          })
-        });
+        // Esta mensagem é um ANEXO (imagem/documento/áudio/vídeo) ou texto?
+        const ehMidia = item.tipo && item.tipo !== 'texto' && item.midia_url;
+
+        let resposta;
+        if (ehMidia) {
+          // Envia mídia pela Uazapi (formato do body não confirmado em teste;
+          // se falhar, o log traz a resposta da Uazapi para ajuste).
+          const tipoUaz =
+            item.tipo === 'imagem' ? 'image' :
+            item.tipo === 'video' ? 'video' :
+            item.tipo === 'audio' ? 'audio' : 'document';
+          const corpoM = { number: numeroDestino, type: tipoUaz, file: item.midia_url, text: item.texto || '' };
+          if (item.midia_nome) corpoM.docName = item.midia_nome;
+          if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
+          resposta = await fetch(`${servidor}/send/media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify(corpoM)
+          });
+        } else {
+          // Envia texto. Se é uma RESPOSTA, passa o replyid para citar.
+          const corpo = { number: numeroDestino, text: item.texto, readchat: true };
+          if (item.responder_id_uazapi) corpo.replyid = item.responder_id_uazapi;
+          resposta = await fetch(`${servidor}/send/text`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify(corpo)
+          });
+        }
 
         if (!resposta.ok) {
           const detalhe = await resposta.text();
@@ -257,19 +317,26 @@ async function processarFilaDeEnvio() {
           .update({ status: 'enviada', enviado_em: new Date().toISOString() })
           .eq('id', item.id);
 
-        await supabase.from('mensagens').upsert(
-          {
-            conversa_id: item.conversa_id,
-            origem: 'advogado',
-            tipo: 'texto',
-            texto: item.texto,
-            id_uazapi: idUazapi,
-            status: 'enviada'
-          },
-          { onConflict: 'id_uazapi', ignoreDuplicates: true }
-        );
+        const base = {
+          conversa_id: item.conversa_id,
+          origem: 'advogado',
+          tipo: item.tipo || 'texto',
+          texto: item.texto || null,
+          midia_url: ehMidia ? item.midia_url : null,
+          midia_mime: ehMidia ? (item.midia_mime || null) : null,
+          id_uazapi: idUazapi,
+          status: 'enviada'
+        };
+        const extras = item.responder_id_uazapi
+          ? {
+              responder_id_uazapi: item.responder_id_uazapi,
+              resposta_previa: item.resposta_previa || null,
+              resposta_autor: item.resposta_autor || null
+            }
+          : null;
+        await salvarMensagem(base, extras);
 
-        console.log(`Enviada para ${numeroDestino}.`);
+        console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
         await supabase.from('fila_envio')
           .update({ status: 'erro', erro_detalhe: envioErro.message })
