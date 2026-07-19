@@ -179,6 +179,20 @@ async function tratarStatusMensagem(body, evento) {
 }
 
 // ------------------------------------------------------------
+//  Extrai o caminho interno do Storage a partir da URL pública.
+//  Ex.: https://xxx.supabase.co/storage/v1/object/public/anexos/CAMINHO
+//       -> "CAMINHO"
+// ------------------------------------------------------------
+function caminhoDoStorage(url) {
+  if (!url) return null;
+  const marca = '/anexos/';
+  const i = url.indexOf(marca);
+  if (i < 0) return null;
+  try { return decodeURIComponent(url.slice(i + marca.length)); }
+  catch (_) { return url.slice(i + marca.length); }
+}
+
+// ------------------------------------------------------------
 //  Grava uma mensagem, tolerando colunas novas que talvez ainda
 //  não existam no banco (ex.: as de citação). Se o upsert falhar
 //  com os campos extras, tenta de novo só com o básico.
@@ -273,15 +287,37 @@ async function processarFilaDeEnvio() {
 
         let resposta;
         if (ehMidia) {
-          // Envia mídia pela Uazapi (formato do body não confirmado em teste;
-          // se falhar, o log traz a resposta da Uazapi para ajuste).
           const tipoUaz =
             item.tipo === 'imagem' ? 'image' :
             item.tipo === 'video' ? 'video' :
-            item.tipo === 'audio' ? 'audio' : 'document';
-          const corpoM = { number: numeroDestino, type: tipoUaz, file: item.midia_url, text: item.texto || '' };
+            item.tipo === 'audio' ? 'ptt' : 'document';
+
+          // Baixa o arquivo do Storage com a chave de serviço e manda como
+          // base64. Assim não depende do bucket ser público nem de a Uazapi
+          // conseguir alcançar a URL. Se não conseguir baixar, manda a URL.
+          let fileParam = item.midia_url;
+          let via = 'url';
+          try {
+            const caminho = caminhoDoStorage(item.midia_url);
+            if (caminho) {
+              const { data: blob, error: dlErr } = await supabase.storage.from('anexos').download(caminho);
+              if (dlErr) {
+                console.error('Erro ao baixar anexo do Storage:', dlErr.message);
+              } else {
+                const buff = Buffer.from(await blob.arrayBuffer());
+                const mime = item.midia_mime || 'application/octet-stream';
+                fileParam = `data:${mime};base64,${buff.toString('base64')}`;
+                via = 'base64';
+              }
+            }
+          } catch (prepErro) {
+            console.error('Falha ao preparar o anexo:', prepErro.message);
+          }
+
+          const corpoM = { number: numeroDestino, type: tipoUaz, file: fileParam, text: item.texto || '' };
           if (item.midia_nome) corpoM.docName = item.midia_nome;
           if (item.responder_id_uazapi) corpoM.replyid = item.responder_id_uazapi;
+          console.log(`Enviando mídia (${tipoUaz}) via ${via} para ${numeroDestino}.`);
           resposta = await fetch(`${servidor}/send/media`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'token': token },
