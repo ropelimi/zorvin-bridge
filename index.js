@@ -32,6 +32,33 @@ async function fetchComTimeout(url, opts = {}, ms = 15000) {
 }
 
 // ------------------------------------------------------------
+//  Descobre o telefone REAL do contato, ignorando o "@lid"
+//  (identificador de privacidade da WhatsApp que criava contatos e
+//  conversas duplicados). Para mensagens que NÓS enviamos (fromMe),
+//  o contato é o "chat"; para recebidas, é o remetente (sender_pn).
+// ------------------------------------------------------------
+function numeroRealDoContato(body, m) {
+  const chatPhone = body.chat && body.chat.phone;
+  const chatId = body.chat && body.chat.id;
+  const fontes = (m && m.fromMe)
+    ? [chatPhone, chatId, m && m.sender_pn, m && m.sender]
+    : [m && m.sender_pn, chatPhone, chatId, m && m.sender];
+  const limpos = fontes.filter(Boolean).map(String);
+  // 1ª passada: só telefone real (ignora @lid).
+  for (const f of limpos) {
+    if (f.includes('@lid')) continue;
+    const num = f.split('@')[0].replace(/\D/g, '');
+    if (num.length >= 8) return num;
+  }
+  // 2ª passada: qualquer coisa com dígitos suficientes (última tentativa).
+  for (const f of limpos) {
+    const num = f.split('@')[0].replace(/\D/g, '');
+    if (num.length >= 8) return num;
+  }
+  return null;
+}
+
+// ------------------------------------------------------------
 //  Verificação de saúde (usada pelo cronjob para não "dormir").
 // ------------------------------------------------------------
 app.get('/', (req, res) => {
@@ -78,12 +105,17 @@ app.post('/webhook', async (req, res) => {
     if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
     if (!adv) { console.log('Número não cadastrado em advogados:', advogadoNumero); return; }
 
-    // Quem é o CONTATO (usa o telefone real, não o @lid).
-    const contatoNumero =
-      (body.chat && body.chat.phone) || (m.sender_pn || '').split('@')[0];
+    // Quem é o CONTATO — SEMPRE o telefone real, ignorando o identificador de
+    // privacidade "@lid" que a WhatsApp passou a enviar (ele criava um segundo
+    // contato/conversa para a MESMA pessoa).
+    const contatoNumero = numeroRealDoContato(body, m);
     const contatoNome =
       (body.chat && body.chat.wa_name) || m.senderName || null;
-    if (!contatoNumero) { console.log('Sem número de contato; ignorando.'); return; }
+    if (!contatoNumero) {
+      console.log('Sem número de contato; ignorando.', JSON.stringify(body).slice(0, 250));
+      return;
+    }
+    console.log(`Contato ${contatoNumero} | chat.phone=${body.chat && body.chat.phone} | sender_pn=${m.sender_pn} | fromMe=${m.fromMe}`);
 
     // Foto de perfil do contato (vem no próprio webhook, no chat).
     const fotoContato =
