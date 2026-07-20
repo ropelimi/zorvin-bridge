@@ -548,14 +548,17 @@ async function processarFilaDeEnvio() {
           id_uazapi: idUazapi,
           status: 'enviada'
         };
-        const extras = item.responder_id_uazapi
-          ? {
-              responder_id_uazapi: item.responder_id_uazapi,
-              resposta_previa: item.resposta_previa || null,
-              resposta_autor: item.resposta_autor || null
-            }
-          : null;
-        await salvarMensagem(base, extras);
+        // Campos "extras" (colunas que podem não existir ainda no banco): quem
+        // enviou (atendente) e os dados de citação. Se alguma coluna faltar, o
+        // salvarMensagem regrava só com o básico, sem quebrar.
+        const extras = {};
+        if (item.enviado_por) extras.enviado_por = item.enviado_por;
+        if (item.responder_id_uazapi) {
+          extras.responder_id_uazapi = item.responder_id_uazapi;
+          extras.resposta_previa = item.resposta_previa || null;
+          extras.resposta_autor = item.resposta_autor || null;
+        }
+        await salvarMensagem(base, Object.keys(extras).length ? extras : null);
 
         console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
