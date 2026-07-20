@@ -85,9 +85,18 @@ app.post('/webhook', async (req, res) => {
       (body.chat && body.chat.wa_name) || m.senderName || null;
     if (!contatoNumero) { console.log('Sem número de contato; ignorando.'); return; }
 
+    // Foto de perfil do contato (vem no próprio webhook, no chat).
+    const fotoContato =
+      (body.chat && (body.chat.imagePreview || body.chat.imgUrl || body.chat.image || body.chat.profilePicUrl || body.chat.profilePictureUrl)) || null;
+
+    // Só inclui foto_url/nome quando temos valor, para não apagar o que já existe.
+    const contatoUpsert = { numero: contatoNumero };
+    if (contatoNome) contatoUpsert.nome = contatoNome;
+    if (fotoContato) contatoUpsert.foto_url = fotoContato;
+
     const { data: contato, error: contErro } = await supabase
       .from('contatos')
-      .upsert({ numero: contatoNumero, nome: contatoNome }, { onConflict: 'numero' })
+      .upsert(contatoUpsert, { onConflict: 'numero' })
       .select('id')
       .single();
     if (contErro) { console.error('Erro no contato:', contErro.message); return; }
