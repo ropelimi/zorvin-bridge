@@ -96,3 +96,12 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
 - **Enviar anexos pelo painel** (imagem, áudio, documento) — endpoints `/send/media` da Uazapi.
 - **E-mails (Gmail)**: fase futura, fora do escopo atual.
 - Recursos de UX: "Digitando…" (`delay`), marcar como lida (`readmessages`).
+
+## Fluxo de trabalho — PRs (REGRA IMPORTANTE do Rodrigo)
+
+- **Cada entrega/pedido deve ir numa PR NOVA.** Nunca reutilizar nem estender uma PR já mesclada.
+- O Rodrigo faz o merge e, na rodada seguinte, quer **sempre uma PR nova** (não empilhar em cima da anterior).
+- Fluxo por rodada: recomeçar a branch a partir da `main` mais recente
+  (`git fetch origin main && git checkout -B <branch> origin/main`), aplicar a mudança,
+  commit, push e **abrir uma PR nova**.
+- Passo a passo (SQL, merge, etc.) vai **no chat**, não na descrição da PR.

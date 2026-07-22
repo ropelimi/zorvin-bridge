@@ -553,6 +553,7 @@ async function processarFilaDeEnvio() {
         // salvarMensagem regrava só com o básico, sem quebrar.
         const extras = {};
         if (item.enviado_por) extras.enviado_por = item.enviado_por;
+        if (item.enviado_por_foto) extras.enviado_por_foto = item.enviado_por_foto;
         if (item.responder_id_uazapi) {
           extras.responder_id_uazapi = item.responder_id_uazapi;
           extras.resposta_previa = item.resposta_previa || null;
