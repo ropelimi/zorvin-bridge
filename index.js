@@ -78,6 +78,147 @@ app.get('/ping', (req, res) => {
   processarFilaDeEnvio().catch(() => {});
 });
 
+// ------------------------------------------------------------
+//  IMPORTAR HISTÓRICO de um contato (backfill via Uazapi /message/find).
+//  Uso administrativo e MANUAL — protegido por senha (env IMPORT_TOKEN).
+//  Ex.: /importar-historico?token=SENHA&advogado=5511...&contato=5511...&limite=500
+//  Seguro rodar de novo: id_uazapi é único, então não duplica.
+// ------------------------------------------------------------
+function tipoDaMidiaHist(m) {
+  const mt = String(m.mediaType || m.messageType || m.type || '').toLowerCase();
+  if (mt.includes('image')) return 'imagem';
+  if (mt === 'ptt' || mt.includes('audio')) return 'audio';
+  if (mt.includes('video')) return 'video';
+  if (mt.includes('document') || mt.includes('file')) return 'documento';
+  return 'texto';
+}
+function previaMidiaHist(tipo) {
+  if (tipo === 'imagem') return '📷 Foto';
+  if (tipo === 'audio') return '🎤 Mensagem de voz';
+  if (tipo === 'video') return '🎬 Vídeo';
+  if (tipo === 'documento') return '📄 Documento';
+  return '';
+}
+// Converte uma mensagem do /message/find no formato da nossa tabela "mensagens".
+function mapearMensagemHistorico(m, conversaId) {
+  const idUazapi = m.messageid || m.id || (m.key && m.key.id) || null;
+  if (!idUazapi) return null;
+  const fromMe = m.fromMe === true || (m.key && m.key.fromMe === true);
+  const tipo = tipoDaMidiaHist(m);
+  const texto = m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
+  const midiaUrl = m.fileURL || m.mediaUrl || m.url || null;
+  const midiaMime = m.mimetype || (m.content && m.content.mimetype) || null;
+  // Horário original: pode vir em segundos ou milissegundos.
+  let ts = m.messageTimestamp || m.timestamp || m.momment || m.t || null;
+  const linha = {
+    conversa_id: conversaId,
+    origem: fromMe ? 'advogado' : 'contato',
+    tipo,
+    texto,
+    midia_url: midiaUrl,
+    midia_mime: midiaMime,
+    id_uazapi: idUazapi,
+    status: fromMe ? 'enviada' : 'recebida',
+  };
+  if (ts) {
+    ts = Number(ts);
+    if (ts > 0) {
+      if (ts < 1e12) ts = ts * 1000; // segundos -> ms
+      linha.criado_em = new Date(ts).toISOString();
+    }
+  }
+  return linha;
+}
+
+app.get('/importar-historico', async (req, res) => {
+  try {
+    const senha = process.env.IMPORT_TOKEN;
+    if (!senha || req.query.token !== senha) {
+      return res.status(403).send('Acesso negado. Configure IMPORT_TOKEN e informe ?token= correto.');
+    }
+    const advogadoNumero = String(req.query.advogado || '').replace(/\D/g, '');
+    const contatoNumero = String(req.query.contato || '').replace(/\D/g, '');
+    const limiteTotal = Math.min(parseInt(req.query.limite || '500', 10) || 500, 5000);
+    if (!advogadoNumero || !contatoNumero) {
+      return res.status(400).send('Informe advogado e contato (só números).');
+    }
+
+    const { data: adv } = await supabase.from('advogados')
+      .select('id, token, servidor').eq('numero', advogadoNumero).maybeSingle();
+    if (!adv || !adv.token) return res.status(404).send('Advogado não encontrado (ou sem token) no banco.');
+
+    // Garante contato e conversa.
+    const { data: contUp } = await supabase.from('contatos')
+      .upsert({ numero: contatoNumero }, { onConflict: 'numero' }).select('id').single();
+    const { data: conv } = await supabase.from('conversas')
+      .upsert({ advogado_id: adv.id, contato_id: contUp.id }, { onConflict: 'advogado_id,contato_id' })
+      .select('id').single();
+
+    const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+    const PAG = 100;
+
+    // Busca uma página do histórico; tenta os dois formatos de "chatid".
+    async function buscarPagina(chatid, offset) {
+      const r = await fetchComTimeout(`${servidor}/message/find`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'token': adv.token },
+        body: JSON.stringify({ chatid, limit: PAG, offset }),
+      }, 25000);
+      if (!r.ok) { console.error('message/find HTTP', r.status); return null; }
+      const dados = await r.json().catch(() => ({}));
+      if (Array.isArray(dados)) return dados;
+      return dados.messages || dados.data || dados.results || [];
+    }
+
+    // Descobre qual sufixo de chatid a Uazapi aceita (varia por versão).
+    let chatid = `${contatoNumero}@s.whatsapp.net`;
+    let primeira = await buscarPagina(chatid, 0);
+    if (!primeira || primeira.length === 0) {
+      const alt = `${contatoNumero}@c.us`;
+      const tent = await buscarPagina(alt, 0);
+      if (tent && tent.length) { chatid = alt; primeira = tent; }
+    }
+
+    let importadas = 0, vistas = 0, offset = 0;
+    let pagina = primeira || [];
+    while (pagina && pagina.length && vistas < limiteTotal) {
+      for (const m of pagina) {
+        const linha = mapearMensagemHistorico(m, conv.id);
+        if (!linha) continue;
+        const erro = await salvarMensagem(linha, null);
+        if (!erro) importadas++;
+      }
+      vistas += pagina.length;
+      offset += pagina.length;
+      if (pagina.length < PAG) break; // última página
+      pagina = await buscarPagina(chatid, offset);
+    }
+
+    // Conserta a conversa: ordena pela mensagem mais recente e zera "não lidas"
+    // (histórico importado não é mensagem nova).
+    const { data: ult } = await supabase.from('mensagens')
+      .select('texto, tipo, criado_em').eq('conversa_id', conv.id)
+      .order('criado_em', { ascending: false }).limit(1);
+    const u = ult && ult[0];
+    if (u) {
+      await supabase.from('conversas').update({
+        ultima_mensagem: u.texto || previaMidiaHist(u.tipo) || '[mídia]',
+        ultima_atividade: u.criado_em,
+        nao_lidas: 0,
+      }).eq('id', conv.id);
+    }
+
+    console.log(`Histórico: ${importadas} importadas de ${vistas} vistas (contato ${contatoNumero}).`);
+    return res.status(200).send(
+      `Pronto! Importei ${importadas} mensagem(ns) do contato ${contatoNumero} ` +
+      `(vistas ${vistas}). Abra o painel para conferir.`
+    );
+  } catch (e) {
+    console.error('Erro ao importar histórico:', e.message);
+    return res.status(500).send('Erro ao importar: ' + e.message);
+  }
+});
+
 // ============================================================
 //  PARTE 1 — RECEBER mensagens
 // ============================================================
