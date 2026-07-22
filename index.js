@@ -63,6 +63,11 @@ function numeroRealDoContato(body, m) {
 // ------------------------------------------------------------
 app.get('/', (req, res) => {
   res.status(200).send('Zorvin bridge online');
+  // Aproveita CADA acesso (o cronjob que mantém a ponte acordada E o "toque"
+  // que o painel dá ao enviar) para despachar a fila na hora. Assim, se a
+  // ponte tinha acabado de acordar, as mensagens não ficam "carregando"
+  // esperando o próximo ciclo do setInterval.
+  processarFilaDeEnvio().catch(() => {});
 });
 
 // ============================================================
@@ -189,6 +194,9 @@ app.post('/webhook', async (req, res) => {
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
 
     console.log(`Recebida (${tipo}) de ${contatoNumero} p/ advogado ${advogadoNumero}.`);
+    // A ponte está acordada agora: aproveita para despachar qualquer mensagem
+    // que estava esperando na fila (não espera o próximo ciclo do setInterval).
+    processarFilaDeEnvio().catch(() => {});
   } catch (e) {
     console.error('Erro inesperado no webhook:', e.message);
   }
