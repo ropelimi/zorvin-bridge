@@ -70,6 +70,14 @@ app.get('/', (req, res) => {
   processarFilaDeEnvio().catch(() => {});
 });
 
+// Endereço enxuto para o cronjob de keep-alive: responde 200 com corpo VAZIO
+// (evita o "output too large" que desativava o job no cron-job.org) e ainda
+// aproveita para despachar a fila. Aponte o cronjob para .../ping.
+app.get('/ping', (req, res) => {
+  res.status(200).end();
+  processarFilaDeEnvio().catch(() => {});
+});
+
 // ============================================================
 //  PARTE 1 — RECEBER mensagens
 // ============================================================
