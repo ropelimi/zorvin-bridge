@@ -40,8 +40,11 @@ async function fetchComTimeout(url, opts = {}, ms = 15000) {
 function numeroRealDoContato(body, m) {
   const chatPhone = body.chat && body.chat.phone;
   const chatId = body.chat && body.chat.id;
+  // Em mensagens que NÓS enviamos (fromMe), o remetente (sender_pn/sender) é o
+  // ADVOGADO — nunca pode ser usado como número do contato. O contato é sempre
+  // o "chat". Em mensagens recebidas, o contato é o remetente.
   const fontes = (m && m.fromMe)
-    ? [chatPhone, chatId, m && m.sender_pn, m && m.sender]
+    ? [chatPhone, chatId]
     : [m && m.sender_pn, chatPhone, chatId, m && m.sender];
   const limpos = fontes.filter(Boolean).map(String);
   // 1ª passada: só telefone real (ignora @lid).
@@ -263,8 +266,6 @@ app.post('/webhook', async (req, res) => {
     // privacidade "@lid" que a WhatsApp passou a enviar (ele criava um segundo
     // contato/conversa para a MESMA pessoa).
     const contatoNumero = numeroRealDoContato(body, m);
-    const contatoNome =
-      (body.chat && body.chat.wa_name) || m.senderName || null;
     if (!contatoNumero) {
       console.log('Sem número de contato; ignorando.', JSON.stringify(body).slice(0, 250));
       return;
@@ -274,6 +275,14 @@ app.post('/webhook', async (req, res) => {
     // Foto de perfil do contato (vem no próprio webhook, no chat).
     const fotoContato =
       (body.chat && (body.chat.imagePreview || body.chat.imgUrl || body.chat.image || body.chat.profilePicUrl || body.chat.profilePictureUrl)) || null;
+
+    // NOME do contato: só confiamos em mensagens RECEBIDAS. Numa mensagem fromMe
+    // (o advogado escrevendo pelo próprio WhatsApp), os campos de nome trazem o
+    // nome do ADVOGADO (ex.: "Acordos Yunes Kaled"), então NÃO tocamos no nome
+    // do contato para não sobrescrever com o dado errado.
+    const contatoNome = m.fromMe
+      ? null
+      : ((body.chat && body.chat.wa_name) || m.senderName || null);
 
     // Só inclui foto_url/nome quando temos valor, para não apagar o que já existe.
     const contatoUpsert = { numero: contatoNumero };
