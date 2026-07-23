@@ -237,7 +237,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    if (body.EventType !== 'messages' || !body.message) return;
+    if (evento !== 'messages' || !body.message) return;
 
     const m = body.message;
 
@@ -381,7 +381,7 @@ async function tratarStatusMensagem(body, evento) {
 
     const s = String(bruto).toLowerCase();
     let novo = null;
-    if (s === '3' || s === '4' || s.includes('read') || s.includes('play') || s.includes('lid')) {
+    if (s === '3' || s === '4' || s.includes('read') || s.includes('play')) {
       novo = 'lida';
     } else if (s === '2' || s.includes('deliver') || s.includes('entreg')) {
       novo = 'entregue';
@@ -471,11 +471,11 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
     let dados = null;
     for (const rota of ['/message/downloadmedia', '/message/download', '/downloadmedia']) {
       try {
-        const r = await fetch(`${servidor}${rota}`, {
+        const r = await fetchComTimeout(`${servidor}${rota}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'token': token },
           body: JSON.stringify({ id: m.messageid })
-        });
+        }, 20000);
         if (r.ok) {
           dados = await r.json().catch(() => null);
           if (dados) { console.log(`downloadmedia OK via ${rota}`); break; }
@@ -493,7 +493,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
     if (typeof b64 === 'string' && b64.length > 100) {
       bytes = Buffer.from(b64.replace(/^data:[^;]+;base64,/, ''), 'base64');
     } else if (urlBaixavel) {
-      const arq = await fetch(urlBaixavel);
+      const arq = await fetchComTimeout(urlBaixavel, {}, 20000);
       if (arq.ok) bytes = Buffer.from(await arq.arrayBuffer());
     }
     if (!bytes || !bytes.length) {
@@ -584,6 +584,18 @@ async function processarFilaDeEnvio() {
   if (filaRodando) return; // o ciclo anterior ainda não terminou
   filaRodando = true;
   try {
+    // Recuperação: se um item ficou preso em 'enviando' por mais de 5 min
+    // (ex.: o Render reiniciou/dormiu no meio de um envio), volta para
+    // 'pendente' para ser reprocessado — senão a mensagem some sem aviso.
+    const limiteTravado = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { data: destravadas } = await supabase
+      .from('fila_envio')
+      .update({ status: 'pendente' })
+      .eq('status', 'enviando')
+      .lt('criado_em', limiteTravado)
+      .select('id');
+    if (destravadas && destravadas.length) console.log(`Fila: ${destravadas.length} item(ns) preso(s) em 'enviando' devolvido(s) para 'pendente'.`);
+
     // Pega até 10 mensagens pendentes de cada vez.
     const { data: pendentes, error } = await supabase
       .from('fila_envio')
@@ -598,11 +610,12 @@ async function processarFilaDeEnvio() {
     for (const item of pendentes) {
       // Reivindica o item de forma ATÔMICA: só processa se ainda estava
       // 'pendente'. Evita envio duplicado se dois ciclos se cruzarem.
-      const { data: claim } = await supabase.from('fila_envio')
+      const { data: claim, error: claimErr } = await supabase.from('fila_envio')
         .update({ status: 'enviando', tentativas: 1 })
         .eq('id', item.id)
         .eq('status', 'pendente')
         .select('id');
+      if (claimErr) { console.error('Erro ao reivindicar item da fila:', claimErr.message); continue; }
       if (!claim || claim.length === 0) continue; // outro ciclo já pegou este item
 
       // Descobre para qual número enviar e por qual advogado (token/servidor).
@@ -696,9 +709,10 @@ async function processarFilaDeEnvio() {
         } catch (_) { /* resposta sem JSON: seguimos sem o id */ }
 
         // Deu certo: marca como enviada e registra a mensagem no histórico.
-        await supabase.from('fila_envio')
+        const { error: okErr } = await supabase.from('fila_envio')
           .update({ status: 'enviada', enviado_em: new Date().toISOString() })
           .eq('id', item.id);
+        if (okErr) console.error(`Enviada ao WhatsApp mas falhou ao marcar 'enviada' (item ${item.id}):`, okErr.message);
 
         const base = {
           conversa_id: item.conversa_id,
