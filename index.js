@@ -337,6 +337,11 @@ app.post('/webhook', async (req, res) => {
       id_uazapi: m.messageid,
       status: origem === 'contato' ? 'recebida' : 'enviada'
     };
+    // Mensagem "fromMe" que chega pelo webhook (e não é eco de envio pela API,
+    // que já foi ignorado acima) = foi enviada DIRETO pelo WhatsApp (app do
+    // celular ou desktop), fora do Zorvin. Não sabemos qual atendente foi, então
+    // marca com um rótulo de sistema para a equipe distinguir na bolha.
+    if (origem === 'advogado') base.enviado_por = 'WhatsApp';
     // Se a mensagem recebida é uma RESPOSTA a outra, guarda a citação.
     const extras = extrairResposta(m);
     const msgErro = await salvarMensagem(base, extras);
