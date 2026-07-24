@@ -14,6 +14,15 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json({ limit: '15mb' }));
 
+// Rede de segurança: um erro assíncrono não tratado NÃO pode derrubar a ponte
+// (é um único processo no plano free do Render). Registra e segue vivo.
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', (err && err.message) || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', (err && err.message) || err);
+});
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -253,7 +262,9 @@ app.post('/webhook', async (req, res) => {
     }
 
     // De qual ADVOGADO é esta conversa (owner = número do dono da instância).
-    const advogadoNumero = body.owner || m.owner;
+    // Normaliza para só dígitos (igual ao contato), senão um owner formatado
+    // não bate com o cadastro e a mensagem seria descartada.
+    const advogadoNumero = String(body.owner || m.owner || '').replace(/\D/g, '');
     const { data: adv, error: advErro } = await supabase
       .from('advogados')
       .select('id, token, servidor')
@@ -616,11 +627,22 @@ async function processarFilaDeEnvio() {
     if (error) { console.error('Erro ao ler fila:', error.message); return; }
     if (!pendentes || pendentes.length === 0) return;
 
+    const MAX_TENTATIVAS = 5;
     for (const item of pendentes) {
+      // Trava de segurança: se o item já tentou demais (ex.: ficou preso e foi
+      // devolvido para 'pendente' várias vezes), para de reenviar e marca erro.
+      // Evita um laço infinito que reentregaria a mesma mensagem sem parar.
+      if ((item.tentativas || 0) >= MAX_TENTATIVAS) {
+        await supabase.from('fila_envio')
+          .update({ status: 'erro', erro_detalhe: `Falhou após ${MAX_TENTATIVAS} tentativas` })
+          .eq('id', item.id);
+        console.error(`Fila: item ${item.id} excedeu ${MAX_TENTATIVAS} tentativas; marcado como erro.`);
+        continue;
+      }
       // Reivindica o item de forma ATÔMICA: só processa se ainda estava
       // 'pendente'. Evita envio duplicado se dois ciclos se cruzarem.
       const { data: claim, error: claimErr } = await supabase.from('fila_envio')
-        .update({ status: 'enviando', tentativas: 1 })
+        .update({ status: 'enviando', tentativas: (item.tentativas || 0) + 1 })
         .eq('id', item.id)
         .eq('status', 'pendente')
         .select('id');
@@ -666,7 +688,7 @@ async function processarFilaDeEnvio() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'token': token },
               body: JSON.stringify(corpoM)
-            });
+            }, 45000); // mídia é mais lenta: dá mais tempo antes de abortar
           };
 
           // 1ª tentativa: URL pública do Storage (bucket público).
@@ -700,11 +722,13 @@ async function processarFilaDeEnvio() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'token': token },
             body: JSON.stringify(corpo)
-          });
+          }, 45000);
         }
 
         if (!resposta.ok) {
-          const detalhe = await resposta.text();
+          // .catch: no caminho de mídia a 1ª resposta já pode ter sido lida
+          // (linha da tentativa por URL) — evita o erro "body already read".
+          const detalhe = await resposta.text().catch(() => '');
           throw new Error(`Uazapi respondeu ${resposta.status}: ${detalhe}`);
         }
 
