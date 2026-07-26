@@ -785,6 +785,125 @@ async function processarFilaDeEnvio() {
   }
 }
 
+// ============================================================
+//  VANTORO — ficha do cliente dentro do atendimento
+//
+//  O painel roda no NAVEGADOR, então ele não pode conhecer o token do
+//  Vantoro (seria dar a base inteira de clientes para quem abrir o
+//  inspecionar). Por isso a ponte funciona como intermediária:
+//
+//     painel  ->  (sessão do Supabase)  ->  ponte  ->  (token)  ->  Vantoro
+//
+//  A ponte confere se quem chamou está logado no Zorvin e só então
+//  repassa a chamada, acrescentando o token no servidor.
+//
+//  Variáveis necessárias (Render do zorvin-bridge):
+//     VANTORO_API_URL    ex.: https://SEU-VANTORO.onrender.com/cadastro/api/v1
+//     VANTORO_API_TOKEN  o mesmo valor gerado no Render do Vantoro
+// ============================================================
+
+const VANTORO_URL = (process.env.VANTORO_API_URL || '').replace(/\/+$/, '');
+const VANTORO_TOKEN = process.env.VANTORO_API_TOKEN || '';
+
+// O painel fica em outro endereço, então o navegador exige estes cabeçalhos.
+function liberarCors(res) {
+  res.set('Access-Control-Allow-Origin', process.env.PAINEL_ORIGEM || '*');
+  res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+}
+
+// Só passa quem está logado no Zorvin (sessão válida do Supabase).
+async function exigirLogin(req, res) {
+  const cabecalho = String(req.headers.authorization || '');
+  const jwt = cabecalho.toLowerCase().startsWith('bearer ')
+    ? cabecalho.slice(7).trim() : '';
+  if (!jwt) {
+    res.status(401).json({ ok: false, erro: 'Faça login no Zorvin.' });
+    return null;
+  }
+  const { data, error } = await supabase.auth.getUser(jwt);
+  if (error || !data || !data.user) {
+    res.status(401).json({ ok: false, erro: 'Sessão expirada. Entre de novo.' });
+    return null;
+  }
+  return data.user;
+}
+
+// Repassa a chamada ao Vantoro colocando o token (que só existe aqui).
+async function chamarVantoro(caminho, opcoes = {}) {
+  if (!VANTORO_URL || !VANTORO_TOKEN) {
+    return { status: 503, corpo: { ok: false, erro: 'Integração com o Vantoro não configurada (VANTORO_API_URL/VANTORO_API_TOKEN).' } };
+  }
+  const r = await fetchComTimeout(`${VANTORO_URL}${caminho}`, {
+    ...opcoes,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${VANTORO_TOKEN}`,
+      ...(opcoes.headers || {}),
+    },
+  }, 20000);
+  let corpo = null;
+  try { corpo = await r.json(); } catch (_e) { corpo = { ok: false, erro: 'Resposta inválida do Vantoro.' }; }
+  return { status: r.status, corpo };
+}
+
+// Envolve cada rota: CORS + login + tratamento de erro, sem repetir código.
+function rotaVantoro(handler) {
+  return async (req, res) => {
+    liberarCors(res);
+    try {
+      const usuario = await exigirLogin(req, res);
+      if (!usuario) return;
+      const { status, corpo } = await handler(req, usuario);
+      res.status(status).json(corpo);
+    } catch (e) {
+      console.error('vantoro:', (e && e.message) || e);
+      res.status(502).json({ ok: false, erro: 'Não foi possível falar com o Vantoro agora.' });
+    }
+  };
+}
+
+app.options('/vantoro/*', (req, res) => { liberarCors(res); res.sendStatus(204); });
+
+// Acha o cliente pelo número do WhatsApp da conversa aberta.
+app.get('/vantoro/cliente', rotaVantoro(async (req) => {
+  const telefone = String(req.query.telefone || '').replace(/\D/g, '');
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  if (!telefone && !cpf) {
+    return { status: 400, corpo: { ok: false, erro: 'Informe telefone ou cpf.' } };
+  }
+  const busca = telefone ? `telefone=${telefone}` : `cpf=${cpf}`;
+  return chamarVantoro(`/clientes/buscar?${busca}`);
+}));
+
+// Ficha completa (dados, pendências da ordem de serviço e processos).
+app.get('/vantoro/cliente/:id', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}`)));
+
+// Cria o pré-cadastro a partir do atendimento.
+app.post('/vantoro/cliente', rotaVantoro(async (req) =>
+  chamarVantoro('/clientes', { method: 'POST', body: JSON.stringify(req.body || {}) })));
+
+// Atendente corrige/completa os dados sem sair da conversa.
+app.patch('/vantoro/cliente/:id', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/editar`,
+    { method: 'PATCH', body: JSON.stringify(req.body || {}) })));
+
+// Manda para o cadastro um arquivo recebido no WhatsApp.
+app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/documentos`,
+    { method: 'POST', body: JSON.stringify(req.body || {}) })));
+
+// Diagnóstico rápido: a integração está configurada?
+app.get('/vantoro/status', (req, res) => {
+  liberarCors(res);
+  res.json({
+    ok: true,
+    configurado: Boolean(VANTORO_URL && VANTORO_TOKEN),
+    url: VANTORO_URL ? VANTORO_URL.replace(/\/\/[^/]+/, '//…') : null,
+  });
+});
+
 // Roda a verificação da fila a cada 3 segundos.
 setInterval(processarFilaDeEnvio, 3000);
 
