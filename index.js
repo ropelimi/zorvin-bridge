@@ -265,9 +265,13 @@ app.post('/webhook', async (req, res) => {
     // Normaliza para só dígitos (igual ao contato), senão um owner formatado
     // não bate com o cadastro e a mensagem seria descartada.
     const advogadoNumero = String(body.owner || m.owner || '').replace(/\D/g, '');
+    // select('*') em vez da lista de colunas: assim a frente_fixa (números de
+    // uso interno, como RH e cadastro) vem junto sem quebrar quem ainda não
+    // rodou o SQL das frentes — pedir uma coluna inexistente daria erro e a
+    // mensagem seria descartada.
     const { data: adv, error: advErro } = await supabase
       .from('advogados')
-      .select('id, token, servidor')
+      .select('*')
       .eq('numero', advogadoNumero)
       .maybeSingle();
     if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
@@ -300,10 +304,12 @@ app.post('/webhook', async (req, res) => {
     if (contatoNome) contatoUpsert.nome = contatoNome;
     if (fotoContato) contatoUpsert.foto_url = fotoContato;
 
+    // select('*') pelo mesmo motivo do advogado: traz frente/frente_em quando
+    // essas colunas já existirem, sem exigir que existam.
     const { data: contato, error: contErro } = await supabase
       .from('contatos')
       .upsert(contatoUpsert, { onConflict: 'numero' })
-      .select('id')
+      .select('*')
       .single();
     if (contErro) { console.error('Erro no contato:', contErro.message); return; }
 
@@ -317,6 +323,11 @@ app.post('/webhook', async (req, res) => {
       .select('id')
       .single();
     if (convErro) { console.error('Erro na conversa:', convErro.message); return; }
+
+    // De quem é esta conversa: cliente, advogado da parte contrária, lead…
+    // Não bloqueia nada — se falhar, a mensagem entra igual e a etiqueta sai
+    // na próxima que chegar.
+    await definirFrente(contato, adv, conversa.id, body);
 
     // TIPO da mensagem.
     let tipo = 'texto';
@@ -747,6 +758,19 @@ async function processarFilaDeEnvio() {
           .eq('id', item.id);
         if (okErr) console.error(`Enviada ao WhatsApp mas falhou ao marcar 'enviada' (item ${item.id}):`, okErr.message);
 
+        // Era um aviso de audiência? Só AGORA o Vantoro pode marcar como
+        // enviado — é aqui que a mensagem realmente saiu. Confirmar lá atrás,
+        // na hora de enfileirar, faria o Vantoro achar que o cliente foi
+        // avisado mesmo quando a Uazapi recusou.
+        if (item.aviso_vantoro_id) {
+          try {
+            await chamarAudiencias(`/avisos/${item.aviso_vantoro_id}/enviado`, { method: 'POST' });
+            console.log(`Aviso ${item.aviso_vantoro_id} confirmado no Vantoro.`);
+          } catch (e) {
+            console.error('Não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
+          }
+        }
+
         const base = {
           conversa_id: item.conversa_id,
           origem: 'advogado',
@@ -775,6 +799,9 @@ async function processarFilaDeEnvio() {
         await supabase.from('fila_envio')
           .update({ status: 'erro', erro_detalhe: envioErro.message })
           .eq('id', item.id);
+        // O aviso de audiência volta a aparecer como "Falhou" no Vantoro, com o
+        // motivo — em vez de sumir e só dar as caras quando o cliente faltar.
+        if (item.aviso_vantoro_id) await avisoDeuErro(item.aviso_vantoro_id, envioErro.message);
         console.error(`Falha ao enviar (${item.id}):`, envioErro.message);
       }
     }
@@ -904,8 +931,223 @@ app.get('/vantoro/status', (req, res) => {
   });
 });
 
+// ============================================================
+//  FRENTES — de quem é esta conversa?
+//
+//  O mesmo número de advogado atende duas coisas opostas: negociar acordo com
+//  o escritório do réu e avisar/atender o próprio cliente. Separar pelo número
+//  não funciona; quem define é quem está do outro lado, e isso o Vantoro sabe.
+//
+//    CLIENTE       — é um cliente nosso (SAC, audiências)
+//    ACORDO        — é o advogado da parte contrária, ou a própria parte
+//    LEAD          — não é conhecido e escreveu vindo de um anúncio
+//    INTERNO       — chegou num número nosso de uso interno (RH, cadastro)
+//    DESCONHECIDA  — ainda não deu para saber
+//
+//  A frente fica gravada no CONTATO (quem a pessoa é não muda de advogado para
+//  advogado) e é copiada para a CONVERSA, que é onde o painel filtra.
+// ============================================================
+
+// Reclassifica um contato no máximo uma vez por semana. A resposta quase nunca
+// muda, e perguntar ao Vantoro a cada mensagem só atrasaria o webhook.
+const FRENTE_VALIDADE_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Marcas que a Uazapi manda quando a conversa começou por um anúncio de
+// clique-para-WhatsApp. Não é lista fechada: por isso procuramos no JSON todo.
+const MARCAS_DE_ANUNCIO = ['externaladreply', 'sourceurl', 'sourceid', 'ctwa', 'referral'];
+
+function veioDeAnuncio(body) {
+  try {
+    const blob = JSON.stringify(body || {}).toLowerCase();
+    return MARCAS_DE_ANUNCIO.some((marca) => blob.includes(marca));
+  } catch (_e) {
+    return false;
+  }
+}
+
+// Grava colunas que talvez ainda não existam (o SQL das frentes pode não ter
+// sido rodado). Isso nunca pode derrubar a entrada de mensagens: conversa sem
+// etiqueta é um contratempo; mensagem perdida, não.
+async function gravarTolerante(tabela, campos, filtro, rotulo) {
+  const { error } = await supabase.from(tabela).update(campos).match(filtro);
+  if (error) console.log(`${rotulo}: não gravei (${error.message}). Falta rodar o SQL das frentes?`);
+  return !error;
+}
+
+async function perguntarFrenteAoVantoro(numero) {
+  const { status, corpo } = await chamarVantoro(
+    `/contatos/classificar?telefone=${encodeURIComponent(numero)}`);
+  if (status !== 200 || !corpo || !corpo.ok) return null;
+  return corpo;
+}
+
+/**
+ * Descobre e grava a frente desta conversa.
+ *
+ * Ordem de decisão, da mais forte para a mais fraca:
+ *   1. o número NOSSO que recebeu é de uso interno  → a frente dele manda;
+ *   2. o Vantoro reconhece a pessoa                 → CLIENTE ou ACORDO;
+ *   3. veio de anúncio e ninguém conhece            → LEAD;
+ *   4. nada disso                                   → DESCONHECIDA.
+ */
+async function definirFrente(contato, advogado, conversaId, body) {
+  try {
+    if (advogado.frente_fixa) {
+      await gravarTolerante('conversas', { frente: advogado.frente_fixa },
+        { id: conversaId }, 'frente da conversa');
+      return advogado.frente_fixa;
+    }
+
+    const recente = contato.frente_em &&
+      (Date.now() - new Date(contato.frente_em).getTime()) < FRENTE_VALIDADE_MS;
+    let frente = contato.frente || null;
+
+    if (!recente) {
+      const resposta = await perguntarFrenteAoVantoro(contato.numero);
+      if (resposta) {
+        frente = resposta.frente;
+        if (frente === 'DESCONHECIDA' && veioDeAnuncio(body)) frente = 'LEAD';
+        await gravarTolerante('contatos', {
+          frente,
+          frente_em: new Date().toISOString(),
+          vantoro_cliente_id: resposta.cliente ? resposta.cliente.id : null,
+          vantoro_nome: resposta.cliente ? resposta.cliente.nome : null,
+        }, { id: contato.id }, 'frente do contato');
+      }
+    }
+
+    if (frente) {
+      await gravarTolerante('conversas', { frente }, { id: conversaId }, 'frente da conversa');
+    }
+    return frente;
+  } catch (e) {
+    // Classificar é um extra. Se o Vantoro estiver fora do ar, a mensagem
+    // continua entrando normalmente e a etiqueta sai na próxima.
+    console.log('Frente: não consegui classificar agora —', (e && e.message) || e);
+    return null;
+  }
+}
+
+// O painel pergunta a frente de um número (para mostrar o selo na hora).
+app.get('/vantoro/classificar', rotaVantoro(async (req) => {
+  const telefone = String(req.query.telefone || '').replace(/\D/g, '');
+  if (!telefone) return { status: 400, corpo: { ok: false, erro: 'Informe o telefone.' } };
+  return chamarVantoro(`/contatos/classificar?telefone=${telefone}`);
+}));
+
+// ============================================================
+//  AVISOS DE AUDIÊNCIA
+//
+//  O Vantoro monta a fila (quem avisar, o que dizer, de qual advogado sai) e a
+//  ponte só executa: enfileira em fila_envio e, quando a Uazapi confirmar,
+//  avisa o Vantoro de volta. Marcar como enviado na hora de enfileirar seria
+//  mentira — a mensagem ainda não saiu.
+// ============================================================
+
+// A API de clientes fica em /cadastro/api/v1 e a de audiências em
+// /audiencias/api/v1. Deriva uma da outra para não exigir mais uma variável;
+// VANTORO_AUDIENCIAS_URL existe como escape se o endereço fugir do padrão.
+const VANTORO_AUDIENCIAS = (process.env.VANTORO_AUDIENCIAS_URL ||
+  VANTORO_URL.replace(/\/cadastro\/api\/v1$/, '/audiencias/api/v1')).replace(/\/+$/, '');
+
+async function chamarAudiencias(caminho, opcoes = {}) {
+  if (!VANTORO_AUDIENCIAS || !VANTORO_TOKEN) return { status: 503, corpo: null };
+  const r = await fetchComTimeout(`${VANTORO_AUDIENCIAS}${caminho}`, {
+    ...opcoes,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${VANTORO_TOKEN}`,
+      ...(opcoes.headers || {}),
+    },
+  }, 20000);
+  let corpo = null;
+  try { corpo = await r.json(); } catch (_e) { corpo = null; }
+  return { status: r.status, corpo };
+}
+
+async function avisoDeuErro(id, motivo) {
+  try {
+    await chamarAudiencias(`/avisos/${id}/erro`,
+      { method: 'POST', body: JSON.stringify({ motivo }) });
+  } catch (_e) { /* segue pendente no Vantoro; tentamos de novo no próximo ciclo */ }
+}
+
+// O Vantoro manda o número sem o código do país; a Uazapi quer com ele.
+function numeroComPais(digitos) {
+  const d = String(digitos || '').replace(/\D/g, '');
+  if (!d) return '';
+  return d.startsWith('55') ? d : `55${d}`;
+}
+
+let avisosRodando = false;
+async function buscarAvisosDeAudiencia() {
+  if (avisosRodando) return;
+  avisosRodando = true;
+  try {
+    const { status, corpo } = await chamarAudiencias('/avisos/pendentes');
+    if (status !== 200 || !corpo || !corpo.ok) return;
+    const avisos = corpo.avisos || [];
+    if (!avisos.length) return;
+    console.log(`Audiências: ${avisos.length} aviso(s) para enviar.`);
+
+    for (const aviso of avisos) {
+      const destino = numeroComPais(aviso.telefone);
+      if (!destino) {
+        await avisoDeuErro(aviso.id, 'Cliente sem número de WhatsApp no cadastro.');
+        continue;
+      }
+
+      // De qual WhatsApp esta mensagem sai: o do advogado da AÇÃO. Se ele não
+      // estiver cadastrado aqui, devolvemos o motivo em vez de mandar pelo
+      // número de outra pessoa — o cliente não reconheceria quem escreveu.
+      const { data: adv } = await supabase.from('advogados')
+        .select('id, nome').ilike('nome', `%${aviso.remetente || ''}%`)
+        .limit(1).maybeSingle();
+      if (!aviso.remetente || !adv) {
+        await avisoDeuErro(aviso.id,
+          `Advogado "${aviso.remetente || '(em branco)'}" não encontrado no Zorvin.`);
+        continue;
+      }
+
+      const { data: contato } = await supabase.from('contatos')
+        .upsert({ numero: destino }, { onConflict: 'numero' }).select('id').single();
+      if (!contato) { await avisoDeuErro(aviso.id, 'Não consegui criar o contato.'); continue; }
+
+      const { data: conversa } = await supabase.from('conversas')
+        .upsert({ advogado_id: adv.id, contato_id: contato.id },
+          { onConflict: 'advogado_id,contato_id' }).select('id').single();
+      if (!conversa) { await avisoDeuErro(aviso.id, 'Não consegui abrir a conversa.'); continue; }
+
+      // Já nasce etiquetada: é conversa com CLIENTE, não negociação de acordo.
+      await gravarTolerante('conversas', { frente: aviso.finalidade || 'CLIENTE' },
+        { id: conversa.id }, 'frente do aviso');
+
+      // aviso_vantoro_id tem índice único: se este ciclo repetir antes de a fila
+      // ser processada, o banco recusa a segunda cópia e o cliente não recebe a
+      // mesma mensagem duas vezes.
+      const { error: filaErro } = await supabase.from('fila_envio').insert({
+        conversa_id: conversa.id, texto: aviso.texto,
+        status: 'pendente', tipo: 'texto', aviso_vantoro_id: aviso.id,
+      });
+      if (filaErro) {
+        console.log(`Aviso ${aviso.id}: não entrou na fila (${filaErro.message}).`);
+        continue;
+      }
+      console.log(`Aviso ${aviso.id} enfileirado para ${destino} por ${adv.nome}.`);
+    }
+  } catch (e) {
+    console.error('Avisos de audiência:', (e && e.message) || e);
+  } finally {
+    avisosRodando = false;
+  }
+}
+
 // Roda a verificação da fila a cada 3 segundos.
 setInterval(processarFilaDeEnvio, 3000);
+
+// Os avisos de audiência mudam de hora em hora, não de segundo em segundo:
+// 5 minutos é de sobra e não pesa no plano free.
+setInterval(buscarAvisosDeAudiencia, 5 * 60 * 1000);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
