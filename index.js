@@ -903,6 +903,17 @@ app.get('/vantoro/cliente', rotaVantoro(async (req) => {
   return chamarVantoro(`/clientes/buscar?${busca}`);
 }));
 
+// Busca livre no cadastro: nome, CPF ou número do processo. É o que permite ao
+// atendente procurar no Zorvin do mesmo jeito que procuraria no Vantoro, em vez
+// de depender de já ter o telefone da pessoa.
+app.get('/vantoro/buscar', rotaVantoro(async (req) => {
+  const termo = String(req.query.q || '').trim();
+  if (termo.length < 3) {
+    return { status: 400, corpo: { ok: false, erro: 'Digite ao menos 3 letras ou números.' } };
+  }
+  return chamarVantoro(`/clientes/buscar?q=${encodeURIComponent(termo)}`);
+}));
+
 // Ficha completa (dados, pendências da ordem de serviço e processos).
 app.get('/vantoro/cliente/:id', rotaVantoro(async (req) =>
   chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}`)));
