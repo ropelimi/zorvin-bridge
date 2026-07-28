@@ -327,7 +327,10 @@ app.post('/webhook', async (req, res) => {
     // De quem é esta conversa: cliente, advogado da parte contrária, lead…
     // Não bloqueia nada — se falhar, a mensagem entra igual e a etiqueta sai
     // na próxima que chegar.
-    await definirFrente(contato, adv, conversa.id, body);
+    const frenteDaConversa = await definirFrente(contato, adv, conversa.id, body);
+    // E em que GRUPO do departamento ela cai. Depende da frente acima — por
+    // isso vem depois, e não junto.
+    await definirGrupo(adv, conversa.id, frenteDaConversa);
 
     // TIPO da mensagem.
     let tipo = 'texto';
@@ -943,6 +946,148 @@ app.get('/vantoro/status', (req, res) => {
 });
 
 // ============================================================
+//  LOGIN ÚNICO — a senha mora no Vantoro
+//
+//  Antes: cada pessoa tinha uma conta criada à mão no Supabase, com uma senha
+//  que não era a do Vantoro. Duas listas de gente para manter iguais à mão, e
+//  ninguém lembra das duas.
+//
+//  Agora o painel manda login e senha para cá; a ponte pergunta ao Vantoro se
+//  confere (é ela quem tem o token) e, se conferir, abre a sessão do Supabase
+//  com a chave de serviço. A conta do Supabase passa a ser uma carcaça: ela
+//  existe só para o `auth.uid()` das regras de visibilidade ter um valor. A
+//  senha de verdade existe num lugar só.
+//
+//  A senha NUNCA é gravada nem repassada para o Supabase — ela só atravessa
+//  esta função a caminho do Vantoro.
+// ============================================================
+
+// Freio contra tentativa de adivinhar senha. Em memória de propósito: a ponte
+// é um processo só, e um freio simples que funciona vale mais do que um
+// elaborado que depende de outra peça no ar.
+const tentativas = new Map();
+const TENTATIVAS_MAX = 8;
+const TENTATIVAS_JANELA_MS = 5 * 60 * 1000;
+
+function freioBateu(chave) {
+  const agora = Date.now();
+  const reg = tentativas.get(chave);
+  if (!reg || agora - reg.desde > TENTATIVAS_JANELA_MS) {
+    tentativas.set(chave, { n: 1, desde: agora });
+    return false;
+  }
+  reg.n += 1;
+  return reg.n > TENTATIVAS_MAX;
+}
+
+function freioLimpa(chave) { tentativas.delete(chave); }
+
+// Acha (ou cria) a conta do Supabase daquele e-mail e devolve o id.
+async function contaDoSupabase(email, nome) {
+  // `listUsers` não filtra por e-mail na API atual, então a criação vem
+  // primeiro: se já existir, o erro diz isso e aí sim procuramos. Evita
+  // varrer a lista inteira de usuários a cada login.
+  const criada = await supabase.auth.admin.createUser({
+    email,
+    email_confirm: true,          // sem isto a conta nasce impedida de entrar
+    user_metadata: { nome: nome || '' },
+  });
+  if (criada && criada.data && criada.data.user) return criada.data.user.id;
+
+  const msg = String((criada && criada.error && criada.error.message) || '').toLowerCase();
+  const jaExiste = msg.includes('already') || msg.includes('registered') || msg.includes('exists');
+  if (!jaExiste) throw new Error((criada && criada.error && criada.error.message) || 'Falha ao criar a conta.');
+
+  // Procura pelo e-mail, paginando. A base é de dezenas de pessoas, não de
+  // milhares — mas o laço tem teto para não virar varredura infinita se a API
+  // mudar de comportamento.
+  for (let pagina = 1; pagina <= 20; pagina += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page: pagina, perPage: 200 });
+    if (error) throw new Error(error.message);
+    const achada = (data.users || []).find(
+      (u) => String(u.email || '').toLowerCase() === email.toLowerCase());
+    if (achada) return achada.id;
+    if (!data.users || data.users.length < 200) break;
+  }
+  throw new Error('A conta existe mas não foi encontrada.');
+}
+
+app.options('/auth/login', (req, res) => { liberarCors(res); res.sendStatus(204); });
+
+app.post('/auth/login', async (req, res) => {
+  liberarCors(res);
+  const login = String((req.body && (req.body.login || req.body.email)) || '').trim();
+  const senha = String((req.body && req.body.senha) || '');
+  if (!login || !senha) {
+    return res.status(400).json({ ok: false, erro: 'Informe usuário e senha.' });
+  }
+
+  const chaveFreio = `${req.ip || 'sem-ip'}|${login.toLowerCase()}`;
+  if (freioBateu(chaveFreio)) {
+    return res.status(429).json({
+      ok: false,
+      erro: 'Muitas tentativas seguidas. Espere alguns minutos e tente de novo.',
+    });
+  }
+
+  try {
+    const { status, corpo } = await chamarVantoro('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ login, senha }),
+    });
+    if (status !== 200 || !corpo || !corpo.ok) {
+      // Repassa 401/403 como vieram; qualquer outra coisa é problema nosso, e
+      // dizer "usuário ou senha incorretos" quando o Vantoro está fora do ar
+      // mandaria a equipe caçar um erro que não existe.
+      if (status === 401 || status === 403) {
+        return res.status(status).json({ ok: false, erro: (corpo && corpo.erro) || 'Login ou senha incorretos.' });
+      }
+      console.error('login: Vantoro respondeu', status, corpo && corpo.erro);
+      return res.status(503).json({
+        ok: false,
+        erro: 'O Vantoro não respondeu agora — é ele quem confere a senha. Tente de novo em instantes.',
+      });
+    }
+
+    const u = corpo.usuario;
+    const email = String(u.email || '').toLowerCase();
+    const id = await contaDoSupabase(email, u.nome);
+
+    // Espelha quem é a pessoa, para a tela de permissões mostrar nome em vez
+    // de um código, e para as regras de visibilidade terem onde se apoiar.
+    // `admin` do Vantoro manda: quem é superusuário lá administra aqui.
+    const { error: erroUsuario } = await supabase.from('usuarios').upsert({
+      id, login: u.login, nome: u.nome || '', email,
+      admin: Boolean(u.admin), ativo: true, visto_em: new Date().toISOString(),
+    }, { onConflict: 'id' });
+    if (erroUsuario) {
+      console.log(`login: não espelhei o usuário (${erroUsuario.message}). Falta rodar o SQL de departamentos?`);
+    }
+
+    // O bilhete de entrada. É de uso único e curta duração — o painel troca
+    // por uma sessão na hora. A senha não vai junto, e não existe do lado de cá.
+    const { data: link, error: erroLink } = await supabase.auth.admin.generateLink({
+      type: 'magiclink', email,
+    });
+    if (erroLink || !link || !link.properties || !link.properties.hashed_token) {
+      console.error('login: generateLink falhou —', erroLink && erroLink.message);
+      return res.status(502).json({ ok: false, erro: 'Não consegui abrir a sessão. Tente de novo.' });
+    }
+
+    freioLimpa(chaveFreio);
+    return res.json({
+      ok: true,
+      token_hash: link.properties.hashed_token,
+      email,
+      usuario: { login: u.login, nome: u.nome, admin: Boolean(u.admin) },
+    });
+  } catch (e) {
+    console.error('login:', (e && e.message) || e);
+    return res.status(502).json({ ok: false, erro: 'Não foi possível entrar agora. Tente de novo.' });
+  }
+});
+
+// ============================================================
 //  FRENTES — de quem é esta conversa?
 //
 //  O mesmo número de advogado atende duas coisas opostas: negociar acordo com
@@ -1035,6 +1180,71 @@ async function definirFrente(contato, advogado, conversaId, body) {
     // Classificar é um extra. Se o Vantoro estiver fora do ar, a mensagem
     // continua entrando normalmente e a etiqueta sai na próxima.
     console.log('Frente: não consegui classificar agora —', (e && e.message) || e);
+    return null;
+  }
+}
+
+// ============================================================
+//  GRUPOS DENTRO DO DEPARTAMENTO
+//
+//  O departamento diz de QUEM é o telefone (Advogados, SAC, Vendas). O grupo
+//  diz que TIPO de conversa é aquela — e essa é a distinção que o telefone
+//  sozinho nunca dá: no departamento Advogados, o mesmo número negocia acordo
+//  com o réu e avisa o cliente da audiência.
+//
+//  Quem separa é quem está do outro lado, e isso a frente já respondeu. Aqui
+//  só se traduz frente → grupo daquele departamento, com um balaio para o que
+//  não se encaixar.
+// ============================================================
+
+// Cache do mapa de grupos: o webhook roda a cada mensagem e o mapa muda quando
+// alguém mexe na tela de departamentos, ou seja, quase nunca.
+let cacheGrupos = null;
+let cacheGruposEm = 0;
+const GRUPOS_VALIDADE_MS = 60 * 1000;
+
+async function mapaDeGrupos() {
+  if (cacheGrupos && Date.now() - cacheGruposEm < GRUPOS_VALIDADE_MS) return cacheGrupos;
+  const { data, error } = await supabase
+    .from('grupos').select('id, departamento_id, regra, frente, ativo');
+  if (error) {
+    // Sem o SQL rodado a tabela não existe. Não é erro fatal: a conversa entra
+    // sem grupo e passa a ter um assim que o SQL for aplicado.
+    console.log(`Grupos: não consegui ler (${error.message}). Falta rodar o SQL de departamentos?`);
+    return null;
+  }
+  const mapa = { porFrente: new Map(), padrao: new Map() };
+  for (const g of data || []) {
+    if (g.ativo === false) continue;
+    if (g.regra === 'padrao') mapa.padrao.set(g.departamento_id, g.id);
+    else if (g.frente) mapa.porFrente.set(`${g.departamento_id}:${g.frente}`, g.id);
+  }
+  cacheGrupos = mapa;
+  cacheGruposEm = Date.now();
+  return mapa;
+}
+
+async function definirGrupo(advogado, conversaId, frente) {
+  try {
+    const dep = advogado.departamento_id;
+    if (!dep) return null;  // telefone ainda sem departamento
+    const mapa = await mapaDeGrupos();
+    if (!mapa) return null;
+
+    const grupoId = (frente && mapa.porFrente.get(`${dep}:${frente}`)) || mapa.padrao.get(dep) || null;
+    if (!grupoId) return null;
+
+    // `grupo_fixado` é o respeito à decisão de uma pessoa: se alguém moveu a
+    // conversa à mão, a próxima mensagem não pode devolvê-la para o automático.
+    // O filtro vai no UPDATE (e não num SELECT antes) para não haver janela
+    // entre ler e gravar.
+    const { error } = await supabase
+      .from('conversas').update({ grupo_id: grupoId })
+      .eq('id', conversaId).eq('grupo_fixado', false);
+    if (error) console.log(`Grupo da conversa: não gravei (${error.message}).`);
+    return grupoId;
+  } catch (e) {
+    console.log('Grupo: não consegui definir agora —', (e && e.message) || e);
     return null;
   }
 }
