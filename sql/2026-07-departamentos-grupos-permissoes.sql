@@ -134,17 +134,37 @@ create table if not exists usuarios (
 --  todo mundo lê errado na hora de responder "afinal, ela vê ou não vê?".
 --  Aqui a resposta é sempre: vê se alguma linha disser que sim.
 -- ------------------------------------------------------------
-create table if not exists permissoes (
-  id               bigint generated always as identity primary key,
-  usuario_id       uuid        not null references usuarios(id) on delete cascade,
-  departamento_id  bigint      references departamentos(id) on delete cascade,
-  grupo_id         bigint      references grupos(id)         on delete cascade,
-  telefone_id      bigint      references advogados(id)      on delete cascade,
-  criado_em        timestamptz not null default now(),
-  -- Linha com tudo vazio liberaria tudo sem dizer isso em lugar nenhum.
-  constraint permissao_nao_vazia check (
-    departamento_id is not null or grupo_id is not null or telefone_id is not null)
-);
+--  O tipo de `telefone_id` é LIDO da tabela `advogados`, não escrito à mão.
+--
+--  A primeira versão deste arquivo escreveu `bigint` e a execução parou aqui:
+--  o `advogados.id` do Zorvin é `uuid`. Tipo chutado não falha discretamente —
+--  a chave estrangeira nem chega a ser criada e o arquivo morre no meio.
+--  Lendo o tipo do próprio banco, ele vale para os dois formatos, hoje e
+--  depois de qualquer migração.
+do $$
+declare tipo_do_telefone text;
+begin
+  select format_type(a.atttypid, a.atttypmod) into tipo_do_telefone
+    from pg_attribute a
+   where a.attrelid = 'public.advogados'::regclass
+     and a.attname = 'id' and a.attnum > 0 and not a.attisdropped;
+  if tipo_do_telefone is null then
+    raise exception 'Não achei a coluna advogados.id — este banco é o do Zorvin?';
+  end if;
+
+  execute format($ddl$
+    create table if not exists permissoes (
+      id               bigint generated always as identity primary key,
+      usuario_id       uuid        not null references usuarios(id) on delete cascade,
+      departamento_id  bigint      references departamentos(id) on delete cascade,
+      grupo_id         bigint      references grupos(id)         on delete cascade,
+      telefone_id      %s          references advogados(id)      on delete cascade,
+      criado_em        timestamptz not null default now(),
+      -- Linha com tudo vazio liberaria tudo sem dizer isso em lugar nenhum.
+      constraint permissao_nao_vazia check (
+        departamento_id is not null or grupo_id is not null or telefone_id is not null)
+    )$ddl$, tipo_do_telefone);
+end $$;
 create index if not exists permissoes_usuario_idx on permissoes (usuario_id);
 
 
@@ -321,20 +341,54 @@ grant execute on function zorvin_admin() to authenticated;
 -- Esta pessoa enxerga uma conversa deste telefone, neste grupo?
 -- Cada dimensão preenchida na linha de permissão tem de bater; as vazias não
 -- restringem. É a regra inteira, num lugar só.
-create or replace function pode_ver_conversa(p_telefone_id bigint, p_grupo_id bigint)
-returns boolean
-language sql stable security definer set search_path = public, auth as $$
-  select zorvin_admin() or exists (
-    select 1
-      from permissoes p
-      join advogados a on a.id = p_telefone_id
-     where p.usuario_id = auth.uid()
-       and (p.departamento_id is null or p.departamento_id = a.departamento_id)
-       and (p.grupo_id        is null or p.grupo_id        = p_grupo_id)
-       and (p.telefone_id     is null or p.telefone_id     = p_telefone_id)
-  );
-$$;
-grant execute on function pode_ver_conversa(bigint, bigint) to authenticated;
+--
+-- O tipo do primeiro argumento vem do banco, pelo mesmo motivo da tabela
+-- `permissoes` mais acima. E qualquer versão anterior com a assinatura errada
+-- é removida antes: `create or replace` com outros tipos não substitui nada —
+-- cria uma SEGUNDA função com o mesmo nome, e aí a política passaria a
+-- escolher entre duas regras parecidas por resolução de tipo.
+-- O bloco usa a marca $visibilidade$ e não o $$ de costume: o corpo dele
+-- termina com duas marcas de citação encostadas, e um $$ ali dentro fecharia
+-- o bloco no meio da frase.
+do $visibilidade$
+declare tipo_do_telefone text;
+        f record;
+begin
+  select format_type(a.atttypid, a.atttypmod) into tipo_do_telefone
+    from pg_attribute a
+   where a.attrelid = 'public.advogados'::regclass
+     and a.attname = 'id' and a.attnum > 0 and not a.attisdropped;
+
+  -- `cascade` derruba junto as políticas que usam a função — e elas são
+  -- recriadas logo abaixo, neste mesmo arquivo. Sem o cascade, a segunda
+  -- execução pararia aqui dizendo que a função está em uso.
+  for f in
+    select oid::regprocedure as assinatura from pg_proc
+     where proname = 'pode_ver_conversa'
+       and pronamespace = 'public'::regnamespace
+  loop
+    execute format('drop function if exists %s cascade', f.assinatura);
+  end loop;
+
+  execute format($fn$
+    create or replace function pode_ver_conversa(p_telefone_id %s, p_grupo_id bigint)
+    returns boolean
+    language sql stable security definer set search_path = public, auth as $corpo$
+      select zorvin_admin() or exists (
+        select 1
+          from permissoes p
+          join advogados a on a.id = p_telefone_id
+         where p.usuario_id = auth.uid()
+           and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+           and (p.grupo_id        is null or p.grupo_id        = p_grupo_id)
+           and (p.telefone_id     is null or p.telefone_id     = p_telefone_id)
+      );
+    $corpo$
+  $fn$, tipo_do_telefone);
+
+  execute format('grant execute on function pode_ver_conversa(%s, bigint) to authenticated',
+                 tipo_do_telefone);
+end $visibilidade$;
 
 -- O painel lê estas tabelas com a chave pública; sem o GRANT, ele levaria
 -- "permission denied" — que numa tela vira uma lista vazia sem explicação.
