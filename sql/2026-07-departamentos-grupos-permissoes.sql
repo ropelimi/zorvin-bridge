@@ -16,6 +16,58 @@
 
 
 -- ------------------------------------------------------------
+--  0. CONFERE O TERRENO ANTES DE CONSTRUIR
+--
+--  Este arquivo liga a permissão ao telefone por `advogados.id`, que aqui é
+--  `uuid`. Se um dia esse tipo mudar, o erro que aparece sem esta parte é
+--  "foreign key constraint cannot be implemented ... bigint and uuid" — no
+--  meio do arquivo, com metade das tabelas já criadas e ninguém sabendo o que
+--  fazer com a informação. Melhor parar na primeira linha e dizer o que trocar.
+-- ------------------------------------------------------------
+do $$
+declare tipo text;
+begin
+  select format_type(atttypid, atttypmod) into tipo
+    from pg_attribute
+   where attrelid = 'public.advogados'::regclass
+     and attname = 'id' and attnum > 0 and not attisdropped;
+
+  if tipo is null then
+    raise exception 'Não achei a tabela/coluna advogados.id. Este banco é o do Zorvin?';
+  end if;
+  if tipo <> 'uuid' then
+    raise exception
+      'advogados.id aqui é %, e este arquivo espera uuid. Troque as duas ocorrências de "uuid" (a coluna permissoes.telefone_id e o 1º argumento de pode_ver_conversa) por % e rode de novo.', tipo, tipo;
+  end if;
+end $$;
+
+-- Sobra de uma execução anterior que morreu no meio: se `permissoes` já existe
+-- com o telefone no tipo errado, o `create table if not exists` lá embaixo a
+-- deixaria como está — e o erro só apareceria depois, comparando uuid com
+-- bigint dentro da regra de visibilidade, onde ninguém liga uma coisa à outra.
+do $$
+declare tipo_atual text;
+        n bigint;
+begin
+  select format_type(atttypid, atttypmod) into tipo_atual
+    from pg_attribute
+   where attrelid = to_regclass('public.permissoes')
+     and attname = 'telefone_id' and attnum > 0 and not attisdropped;
+
+  if tipo_atual is not null and tipo_atual <> 'uuid' then
+    execute 'select count(*) from permissoes' into n;
+    if n > 0 then
+      raise exception
+        'A tabela permissoes existe com telefone_id % e já tem % linha(s). Confira o que há nela antes: as permissões concedidas se perderiam.', tipo_atual, n;
+    end if;
+    -- Vazia: é resto de execução que falhou. Recomeça essa tabela só.
+    drop table permissoes;
+    raise notice 'permissoes existia com telefone_id % e estava vazia — refeita.', tipo_atual;
+  end if;
+end $$;
+
+
+-- ------------------------------------------------------------
 --  1. DEPARTAMENTOS  —  os telefones nossos, agrupados
 --
 --  Hoje isto existe como a coluna `advogados.setor`, com dois valores escritos
@@ -139,7 +191,11 @@ create table if not exists permissoes (
   usuario_id       uuid        not null references usuarios(id) on delete cascade,
   departamento_id  bigint      references departamentos(id) on delete cascade,
   grupo_id         bigint      references grupos(id)         on delete cascade,
-  telefone_id      bigint      references advogados(id)      on delete cascade,
+  -- uuid, e não bigint: é o tipo do `advogados.id` no Zorvin. A primeira
+  -- versão deste arquivo escreveu bigint e a execução parou aqui — a chave
+  -- estrangeira nem chega a ser criada, e o arquivo morre no meio. A parte 0,
+  -- lá no começo, confere isso antes de qualquer coisa e avisa em português.
+  telefone_id      uuid        references advogados(id)      on delete cascade,
   criado_em        timestamptz not null default now(),
   -- Linha com tudo vazio liberaria tudo sem dizer isso em lugar nenhum.
   constraint permissao_nao_vazia check (
@@ -318,10 +374,17 @@ language sql stable security definer set search_path = public, auth as $$
 $$;
 grant execute on function zorvin_admin() to authenticated;
 
+-- Uma versão anterior desta função foi criada com `bigint` no primeiro
+-- argumento. `create or replace` com outro tipo não substitui nada: cria uma
+-- SEGUNDA função de mesmo nome, e a política passaria a escolher entre duas
+-- regras parecidas por resolução de tipo. O `cascade` derruba junto as
+-- políticas que a usam — e elas são recriadas logo abaixo, neste arquivo.
+drop function if exists pode_ver_conversa(bigint, bigint) cascade;
+
 -- Esta pessoa enxerga uma conversa deste telefone, neste grupo?
 -- Cada dimensão preenchida na linha de permissão tem de bater; as vazias não
 -- restringem. É a regra inteira, num lugar só.
-create or replace function pode_ver_conversa(p_telefone_id bigint, p_grupo_id bigint)
+create or replace function pode_ver_conversa(p_telefone_id uuid, p_grupo_id bigint)
 returns boolean
 language sql stable security definer set search_path = public, auth as $$
   select zorvin_admin() or exists (
@@ -334,7 +397,7 @@ language sql stable security definer set search_path = public, auth as $$
        and (p.telefone_id     is null or p.telefone_id     = p_telefone_id)
   );
 $$;
-grant execute on function pode_ver_conversa(bigint, bigint) to authenticated;
+grant execute on function pode_ver_conversa(uuid, bigint) to authenticated;
 
 -- O painel lê estas tabelas com a chave pública; sem o GRANT, ele levaria
 -- "permission denied" — que numa tela vira uma lista vazia sem explicação.
