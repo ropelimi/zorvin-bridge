@@ -1012,6 +1012,113 @@ async function contaDoSupabase(email, nome) {
   throw new Error('A conta existe mas não foi encontrada.');
 }
 
+// ============================================================
+//  PERMISSÕES — o Vantoro decide, a Ponte aplica
+//
+//  Quem pode ver quais conversas é decisão de CADASTRO DE PESSOA, e cadastro de
+//  pessoa mora no Vantoro. Duas telas de permissão para a mesma pessoa é como o
+//  escritório acaba com alguém que saiu da empresa ainda lendo conversa de
+//  cliente: só metade dos acessos foi cortada.
+//
+//  Faltavam as duas pontas do caminho, e sem elas a tela do Vantoro guardava a
+//  escolha sem que ela chegasse a lugar nenhum:
+//
+//    1. a lista de departamentos daqui nunca era enviada ao Vantoro, então a
+//       tela de lá não tinha o que oferecer para marcar;
+//    2. o que fosse marcado lá nunca era gravado em `permissoes` aqui.
+//
+//  O momento é o LOGIN: é quando a Ponte já está falando com o Vantoro sobre
+//  esta pessoa, e é quando a permissão precisa valer — ela entra na tela em
+//  seguida. Uma rotina de fundo chegaria depois de a pessoa já estar dentro.
+// ============================================================
+
+// A lista de departamentos muda quando alguém mexe na tela de departamentos —
+// quase nunca. Sem o teto, todo login viria com duas idas ao banco e uma
+// chamada ao Vantoro para reenviar exatamente a mesma coisa.
+let departamentosEnviadosEm = 0;
+const DEPARTAMENTOS_VALIDADE_MS = 10 * 60 * 1000;
+
+async function mandarDepartamentosAoVantoro() {
+  if (!VANTORO_URL || !VANTORO_TOKEN) return;
+  if (Date.now() - departamentosEnviadosEm < DEPARTAMENTOS_VALIDADE_MS) return;
+
+  const { data, error } = await supabase
+    .from('departamentos').select('slug, nome').eq('ativo', true);
+  if (error) {
+    console.log(`Departamentos: não consegui ler (${error.message}). Falta rodar o SQL?`);
+    return;
+  }
+  // Lista vazia não se envia: do lado do Vantoro, uma lista vazia não desativa
+  // nada (ele trata isso), mas mandar "nenhum departamento existe" quando na
+  // verdade não consegui ler seria afirmar uma coisa que não sei.
+  if (!data || !data.length) return;
+
+  const { status } = await chamarVantoro('/zorvin/departamentos', {
+    method: 'POST',
+    body: JSON.stringify({ departamentos: data }),
+  });
+  if (status === 200) {
+    departamentosEnviadosEm = Date.now();
+  } else {
+    console.log(`Departamentos: o Vantoro respondeu ${status}.`);
+  }
+}
+
+async function aplicarPermissoes(usuarioId, u) {
+  // `zorvin_definido` distingue "não pode ver nada" de "ninguém definiu ainda".
+  // Sem essa distinção, o primeiro login depois desta mudança apagaria a
+  // permissão de todo mundo que ainda não tem perfil no Vantoro — o sistema
+  // inteiro ficaria cego de uma vez, e por causa de uma melhoria.
+  if (!u || u.zorvin_definido !== true) return;
+  // Admin vê tudo pelas regras de visibilidade; linha de permissão para ele
+  // seria enfeite que confunde quem for conferir depois.
+  if (u.admin) return;
+
+  const chaves = Array.isArray(u.zorvin) ? u.zorvin.filter(Boolean) : [];
+
+  let ids = [];
+  if (chaves.length) {
+    const { data, error } = await supabase
+      .from('departamentos').select('id, slug').in('slug', chaves);
+    if (error) {
+      console.log(`Permissões: não consegui ler os departamentos (${error.message}).`);
+      return;
+    }
+    ids = (data || []).map((d) => d.id);
+    // Chave marcada no Vantoro que não existe aqui é erro de digitação lá. Fica
+    // registrado: é o que explica "marquei e a pessoa continua sem ver".
+    const achados = new Set((data || []).map((d) => d.slug));
+    const perdidas = chaves.filter((s) => !achados.has(s));
+    if (perdidas.length) {
+      console.log(`Permissões de ${u.login}: o Zorvin não conhece ${perdidas.join(', ')}.`);
+    }
+  }
+
+  // Só as linhas de DEPARTAMENTO são substituídas. As de TELEFONE foram dadas
+  // aqui, numa tela mais fina do que a do Vantoro — apagá-las porque o Vantoro
+  // não fala sobre elas seria deixar o sistema mais grosseiro decidir por cima
+  // do mais preciso.
+  //
+  // A consulta não cita `grupo_id` de propósito: a coluna ainda existe, mas os
+  // grupos saíram e ela está esperando o painel parar de mencioná-la para ser
+  // apagada. Amarrar esta rotina a ela faria o login parar de aplicar permissão
+  // no dia em que a coluna sumir — e sem nada dizendo por quê.
+  const { error: erroApaga } = await supabase
+    .from('permissoes').delete()
+    .eq('usuario_id', usuarioId)
+    .not('departamento_id', 'is', null)
+    .is('telefone_id', null);
+  if (erroApaga) {
+    console.log(`Permissões: não consegui limpar as antigas (${erroApaga.message}).`);
+    return;
+  }
+  if (!ids.length) return;
+
+  const { error: erroInsere } = await supabase.from('permissoes')
+    .insert(ids.map((departamento_id) => ({ usuario_id: usuarioId, departamento_id })));
+  if (erroInsere) console.log(`Permissões: não consegui gravar (${erroInsere.message}).`);
+}
+
 app.options('/auth/login', (req, res) => { liberarCors(res); res.sendStatus(204); });
 
 app.post('/auth/login', async (req, res) => {
@@ -1063,6 +1170,14 @@ app.post('/auth/login', async (req, res) => {
     if (erroUsuario) {
       console.log(`login: não espelhei o usuário (${erroUsuario.message}). Falta rodar o SQL de departamentos?`);
     }
+
+    // As duas metades que faltavam para a permissão do Vantoro valer aqui.
+    // Rodam DEPOIS de espelhar o usuário (as permissões dependem da linha dele)
+    // e sem `await` bloqueando a entrada: quem está digitando a senha não pode
+    // esperar por sincronização. Se falharem, a pessoa entra com o que já
+    // tinha, e a próxima entrada tenta de novo.
+    mandarDepartamentosAoVantoro().catch(() => {});
+    aplicarPermissoes(id, u).catch(() => {});
 
     // O bilhete de entrada. É de uso único e curta duração — o painel troca
     // por uma sessão na hora. A senha não vai junto, e não existe do lado de cá.
