@@ -1119,6 +1119,197 @@ async function aplicarPermissoes(usuarioId, u) {
   if (erroInsere) console.log(`Permissões: não consegui gravar (${erroInsere.message}).`);
 }
 
+// ------------------------------------------------------------
+//  A PERMISSÃO NÃO PODE ESPERAR O PRÓXIMO LOGIN
+//
+//  Aplicar só na entrada tem um defeito que só aparece no uso: quem já está com
+//  o painel aberto — que é o caso de todo mundo no meio do expediente —
+//  continua com a permissão velha até sair e entrar de novo. Do lado de quem
+//  administra, o sintoma é exatamente "liberei o departamento e a pessoa
+//  continua sem ver as conversas", sem nada na tela explicando que falta um
+//  logout.
+//
+//  Esta rotina reaplica a permissão de todo mundo de tempos em tempos, lendo a
+//  mesma lista que o Vantoro já expõe em /usuarios. Quem estiver com a tela
+//  aberta passa a enxergar sozinho, sem instrução nenhuma.
+//
+//  Só mexe em quem JÁ ENTROU alguma vez (está em `usuarios`): criar conta no
+//  Supabase para quem nunca entrou encheria a base de contas que ninguém pediu,
+//  e a permissão dessa pessoa é aplicada no primeiro login dela de todo jeito.
+// ------------------------------------------------------------
+const PERMISSOES_INTERVALO_MS = 3 * 60 * 1000;
+
+async function sincronizarPermissoes() {
+  if (!VANTORO_URL || !VANTORO_TOKEN) return;
+
+  const { status, corpo } = await chamarVantoro('/usuarios');
+  if (status !== 200 || !corpo || !Array.isArray(corpo.usuarios)) {
+    console.log(`Permissões: o Vantoro respondeu ${status} ao listar usuários.`);
+    return;
+  }
+
+  const { data: espelhados, error } = await supabase
+    .from('usuarios').select('id, login, email');
+  if (error) {
+    console.log(`Permissões: não consegui ler os usuários (${error.message}).`);
+    return;
+  }
+
+  // Casa pelo login E pelo e-mail. O login é a identidade no Vantoro; o e-mail
+  // entra porque foi ele que abriu a conta aqui, e quem trocou de login lá
+  // continuaria casando por ele.
+  const porLogin = new Map();
+  const porEmail = new Map();
+  for (const u of espelhados || []) {
+    if (u.login) porLogin.set(String(u.login).toLowerCase(), u.id);
+    if (u.email) porEmail.set(String(u.email).toLowerCase(), u.id);
+  }
+
+  let aplicadas = 0;
+  for (const u of corpo.usuarios) {
+    const id = porLogin.get(String(u.login || '').toLowerCase())
+            || porEmail.get(String(u.email || '').toLowerCase());
+    if (!id) continue;   // ainda não entrou no Zorvin nenhuma vez
+    try {
+      await aplicarPermissoes(id, u);
+      aplicadas += 1;
+    } catch (e) {
+      console.log(`Permissões de ${u.login}: ${(e && e.message) || e}`);
+    }
+  }
+  if (aplicadas) console.log(`Permissões: reaplicadas para ${aplicadas} usuário(s).`);
+}
+
+// ------------------------------------------------------------
+//  TELEFONE SEM DEPARTAMENTO É TELEFONE INVISÍVEL
+//
+//  A regra de visibilidade compara o departamento da permissão com o do
+//  TELEFONE. Telefone sem departamento não bate com nada, então as conversas
+//  dele somem para todo mundo que não é administrador — e somem em silêncio,
+//  inclusive para quem tem a permissão certa. É a causa que mais engana, porque
+//  a permissão está lá, marcada, correta.
+//
+//  O SQL que criou os departamentos já resolveu isso para os telefones daquele
+//  dia (cada um foi para o departamento do seu `setor`, e quem não tinha setor
+//  foi para `acordos`, que era o padrão de antes). Telefone cadastrado DEPOIS
+//  nasce sem departamento e recria o problema. Esta rotina aplica a mesma regra
+//  daquele SQL, continuamente — não é regra nova, é a mesma deixando de valer
+//  só uma vez.
+// ------------------------------------------------------------
+async function garantirDepartamentoDosTelefones() {
+  // `select('*')` e não a lista de colunas: o formato de `advogados` varia com
+  // o que já foi rodado no banco, e pedir uma coluna que ainda não existe
+  // devolve erro e mata a rotina inteira. É o mesmo cuidado que a busca do
+  // advogado no webhook já toma, e pelo mesmo motivo.
+  const { data: fones, error } = await supabase
+    .from('advogados').select('*').is('departamento_id', null);
+  if (error || !fones || !fones.length) return;
+
+  const { data: deps } = await supabase.from('departamentos').select('id, slug');
+  if (!deps || !deps.length) return;
+  const porSlug = new Map(deps.map((d) => [d.slug, d.id]));
+  const padrao = porSlug.get('acordos') || deps[0].id;
+
+  for (const f of fones) {
+    const destino = porSlug.get(String(f.setor || '').trim()) || padrao;
+    const { error: erroGrava } = await supabase
+      .from('advogados').update({ departamento_id: destino }).eq('id', f.id);
+    if (erroGrava) {
+      console.log(`Telefone ${f.nome || f.numero || f.id}: não consegui definir o departamento (${erroGrava.message}).`);
+    } else {
+      console.log(`Telefone ${f.nome || f.numero || f.id} estava sem departamento — suas conversas `
+                + 'não apareciam para ninguém que não fosse administrador. Corrigido.');
+    }
+  }
+}
+
+// A primeira rodada sai logo depois de subir (dando tempo de o processo ficar
+// de pé), e daí em diante no intervalo. `unref` para o temporizador não segurar
+// o processo se ele for encerrado.
+async function rodada() {
+  // A ordem importa: o telefone precisa ter departamento ANTES de a permissão
+  // ser conferida, senão a primeira rodada aplica permissão que ainda não
+  // alcança conversa nenhuma.
+  await garantirDepartamentoDosTelefones().catch(() => {});
+  await mandarDepartamentosAoVantoro().catch(() => {});
+  await sincronizarPermissoes().catch(() => {});
+}
+setTimeout(() => { rodada().catch(() => {}); }, 20 * 1000).unref();
+setInterval(() => { rodada().catch(() => {}); }, PERMISSOES_INTERVALO_MS).unref();
+
+// ------------------------------------------------------------
+//  POR QUE FULANO NÃO VÊ AS CONVERSAS
+//
+//  A regra de visibilidade tem alguns elos, e quando um falha o sintoma é
+//  sempre o mesmo: tela vazia. Sem esta rota, descobrir QUAL deles falhou exige
+//  abrir o Supabase e escrever consulta — e quem administra o escritório não
+//  faz isso. Aqui a resposta vem em português, com o passo que resolve.
+//
+//  Só admin abre: a resposta conta quem enxerga o quê.
+// ------------------------------------------------------------
+app.options('/permissoes/diagnostico', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
+  const { data: eu } = await supabase
+    .from('usuarios').select('admin').eq('id', usuario.id).maybeSingle();
+  if (!eu || !eu.admin) {
+    return { status: 403, corpo: { ok: false, erro: 'Só quem administra pode abrir este diagnóstico.' } };
+  }
+
+  const alvo = String(req.query.login || req.query.email || '').trim().toLowerCase();
+  if (!alvo) return { status: 400, corpo: { ok: false, erro: 'Informe ?login=' } };
+
+  const { data: pessoas } = await supabase
+    .from('usuarios').select('id, login, nome, email, admin, ativo');
+  const pessoa = (pessoas || []).find(
+    (p) => String(p.login || '').toLowerCase() === alvo
+        || String(p.email || '').toLowerCase() === alvo);
+
+  if (!pessoa) {
+    return { status: 200, corpo: { ok: true, problema:
+      'Esta pessoa nunca entrou no Zorvin. A permissão é gravada aqui na primeira '
+      + 'entrada dela — peça para ela fazer login uma vez.' } };
+  }
+  if (pessoa.admin) {
+    return { status: 200, corpo: { ok: true, problema: null,
+      resumo: 'É administradora: enxerga todas as conversas, independentemente de permissão.' } };
+  }
+
+  const { data: perms } = await supabase
+    .from('permissoes').select('departamento_id, telefone_id').eq('usuario_id', pessoa.id);
+  const { data: deps } = await supabase.from('departamentos').select('id, nome');
+  const nomeDep = new Map((deps || []).map((d) => [d.id, d.nome]));
+
+  // Telefone sem departamento é invisível para quem não é admin: a regra compara
+  // o departamento da permissão com o do telefone, e comparar com vazio nunca dá
+  // verdadeiro. É a causa que mais engana, porque a permissão ESTÁ lá.
+  const { data: fones } = await supabase.from('advogados').select('*');
+  const orfaos = (fones || []).filter((f) => !f.departamento_id);
+  const nomeDoFone = (f) => f.nome || f.numero || f.id;
+
+  const liberados = (perms || []).filter((p) => p.departamento_id)
+    .map((p) => nomeDep.get(p.departamento_id) || `#${p.departamento_id}`);
+
+  let problema = null;
+  if (!pessoa.ativo) {
+    problema = 'O acesso dela está desativado aqui.';
+  } else if (!perms || !perms.length) {
+    problema = 'Não há permissão nenhuma gravada para esta pessoa. Confira se o '
+             + 'departamento está marcado no cadastro dela no Vantoro — a Ponte '
+             + 'reaplica a cada poucos minutos.';
+  } else if (!liberados.length) {
+    problema = 'Ela tem permissão só por telefone, nenhuma por departamento.';
+  } else if (orfaos.length) {
+    problema = `Há ${orfaos.length} telefone(s) sem departamento definido `
+             + `(${orfaos.slice(0, 5).map(nomeDoFone).join(', ')}). `
+             + 'As conversas deles não aparecem para quem não é administrador — '
+             + 'defina o departamento de cada telefone.';
+  }
+
+  return { status: 200, corpo: { ok: true, pessoa: pessoa.login, ativa: pessoa.ativo,
+    departamentos_liberados: liberados,
+    telefones_sem_departamento: orfaos.length, problema } };
+}));
+
 app.options('/auth/login', (req, res) => { liberarCors(res); res.sendStatus(204); });
 
 app.post('/auth/login', async (req, res) => {
