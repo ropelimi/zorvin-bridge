@@ -40,6 +40,151 @@ async function fetchComTimeout(url, opts = {}, ms = 15000) {
   }
 }
 
+// ============================================================
+//  GRUPO É UMA CONVERSA SÓ — e não uma por participante.
+//
+//  O erro que isto conserta: mensagem de GRUPO virava conversa nova.
+//
+//  A ponte tratava todo chat como pessoa. Num grupo, isso dá dois estragos
+//  diferentes, e os dois foram vistos:
+//
+//    - mensagem que NÓS mandamos ao grupo (fromMe) tinha como "contato" o
+//      identificador do grupo, que não é telefone de ninguém. Nascia uma
+//      conversa com nome de número esquisito ("+70929710"), separada do grupo;
+//    - mensagem RECEBIDA no grupo tinha como "contato" o PARTICIPANTE. Um grupo
+//      de cinco pessoas ia virando cinco conversas de um-para-um, cada uma com
+//      um pedaço da mesma discussão.
+//
+//  A identidade certa de um grupo é o JID dele (`...@g.us`): ele não muda
+//  quando o grupo é renomeado, e é o mesmo para todo mundo lá dentro. Guardamos
+//  como `grupo:<jid>` em `contatos.numero` — o mesmo prefixo que a importação de
+//  histórico já usava, então o painel continua reconhecendo grupo do mesmo jeito.
+// ============================================================
+function chatDaMensagem(body, m) {
+  const chat = body.chat || {};
+  const candidatos = [chat.id, chat.jid, chat.chatid, m && m.chatid, m && m.chatId]
+    .filter(Boolean).map(String);
+  const jid = candidatos.find((c) => c.toLowerCase().includes('@g.us'));
+  const marcado = chat.isGroup === true || body.isGroup === true || (m && m.isGroup === true);
+
+  if (jid || marcado) {
+    // Sem o JID não dá para inventar uma chave estável — e chave instável é
+    // exatamente o defeito que estamos consertando. Melhor deixar seguir pelo
+    // caminho de sempre do que criar um grupo por mensagem.
+    if (!jid) return { ehGrupo: false, chave: numeroRealDoContato(body, m), nome: null };
+    return {
+      ehGrupo: true,
+      chave: 'grupo:' + jid.split('@')[0].toLowerCase(),
+      // O nome do GRUPO vem do chat, e vale inclusive em mensagem nossa: aqui
+      // `chat.name` é o nome do grupo, e não o do advogado (que é o motivo de o
+      // nome ser ignorado em fromMe nas conversas de uma pessoa só).
+      nome: chat.name || chat.wa_name || chat.subject || chat.pushName || null,
+    };
+  }
+  return { ehGrupo: false, chave: numeroRealDoContato(body, m), nome: null };
+}
+
+// Quem escreveu ESTA mensagem dentro do grupo. Sem isto, a conversa do grupo
+// vira um monólogo de balões sem autor — que é como se lê uma discussão de
+// cinco pessoas quando ninguém está identificado.
+function autorNoGrupo(body, m) {
+  if (m && m.fromMe) return 'WhatsApp';
+  const nome = (m && m.senderName) || (body.chat && body.chat.wa_name) || '';
+  if (nome && !/^\+?\d[\d\s()-]*$/.test(nome)) return String(nome).slice(0, 80);
+  const fone = String((m && (m.sender_pn || m.sender)) || '').split('@')[0].replace(/\D/g, '');
+  return fone ? '+' + fone : 'Participante';
+}
+
+// ------------------------------------------------------------
+//  O QUE JÁ FOI GRAVADO ERRADO SE JUNTA SOZINHO
+//
+//  Consertar daqui para a frente não resolve o que a equipe está vendo hoje: o
+//  mesmo grupo espalhado em duas ou três conversas, cada uma com um pedaço da
+//  discussão. Pedir um SQL para isso seria empurrar para quem não escreve SQL o
+//  conserto de um erro nosso.
+//
+//  Então a primeira mensagem que chegar do grupo depois deste deploy junta tudo:
+//  acha as conversas antigas daquele grupo, muda as mensagens delas para a
+//  conversa boa e apaga o que ficou vazio. Roda uma vez por grupo — depois disso
+//  não há mais o que achar.
+//
+//  Os dois rastros que o erro deixou, e como cada um é reconhecido:
+//    1. os DÍGITOS CRUS do JID, virados "telefone" (a conversa "+70929710");
+//    2. o grupo IMPORTADO do histórico, que tem chave `grupo:<hash do nome>` —
+//       reconhecido pelo NOME, que é o único dado que os dois têm em comum.
+//
+//  O caso 2 só junta quando há UM candidato com aquele nome exato. Dois grupos
+//  de mesmo nome é o momento de não adivinhar: fica como está, e o log diz.
+// ------------------------------------------------------------
+async function juntarConversasDoGrupo(advId, chave, jidDigitos, nome) {
+  // O rastro 1 nem sempre são os dígitos INTEIROS do JID: no caso que motivou
+  // este conserto, a conversa nasceu como "+70929710" — um PEDAÇO do fim do
+  // identificador do grupo. Então procuramos por todas as terminações dele.
+  //
+  // E só entram as SEM NOME. É a diferença entre juntar o estrago e destruir
+  // dado bom: a mensagem que NÓS mandamos criou contato sem nome nenhum (é o
+  // sintoma), enquanto a recebida criou contato com o nome do PARTICIPANTE — e
+  // esse é uma pessoa de verdade, que provavelmente tem conversa de um-para-um
+  // com o escritório. Juntar essa apagaria a conversa dela.
+  const terminacoes = [];
+  for (let n = 6; n <= jidDigitos.length; n++) terminacoes.push(jidDigitos.slice(-n));
+
+  const { data: achados, error } = await supabase
+    .from('contatos').select('id, numero, nome')
+    .in('numero', [chave, ...terminacoes]);
+  if (error) { console.log(`Grupo: não consegui procurar as conversas antigas (${error.message}).`); return; }
+
+  const candidatos = (achados || []).filter((c) => c.numero === chave || !c.nome);
+  if (nome) {
+    const { data: porNome } = await supabase
+      .from('contatos').select('id, numero, nome')
+      .like('numero', 'grupo:%').eq('nome', nome);
+    const outros = (porNome || []).filter((c) => c.numero !== chave);
+    if (outros.length === 1) candidatos.push(outros[0]);
+    else if (outros.length > 1) {
+      console.log(`Grupo "${nome}": ${outros.length} conversas com esse nome — não juntei, `
+                + 'para não misturar grupos diferentes de mesmo nome.');
+    }
+  }
+  const antigos = candidatos.filter((c) => c.numero !== chave);
+  if (!antigos.length) return;
+
+  // O contato DEFINITIVO: o que já tem a chave certa; se não existe nenhum,
+  // promove o primeiro antigo (renomear preserva as mensagens dele).
+  let bom = candidatos.find((c) => c.numero === chave) || null;
+  if (!bom) {
+    bom = antigos.shift();
+    const { error: erroRen } = await supabase
+      .from('contatos').update({ numero: chave, nome: nome || bom.nome }).eq('id', bom.id);
+    if (erroRen) { console.log(`Grupo: não consegui promover a conversa antiga (${erroRen.message}).`); return; }
+    console.log(`Grupo "${nome || chave}": a conversa "${bom.numero}" era o mesmo grupo — passou a ser a conversa dele.`);
+    bom = { ...bom, numero: chave };
+    if (!antigos.length) return;
+  }
+
+  const { data: convBoa } = await supabase
+    .from('conversas').select('id').eq('advogado_id', advId).eq('contato_id', bom.id).maybeSingle();
+  if (!convBoa) return;   // ainda não existe; a mensagem de agora vai criá-la
+
+  for (const velho of antigos) {
+    const { data: convs } = await supabase
+      .from('conversas').select('id').eq('advogado_id', advId).eq('contato_id', velho.id);
+    for (const cv of convs || []) {
+      if (cv.id === convBoa.id) continue;
+      const { error: erroMove } = await supabase
+        .from('mensagens').update({ conversa_id: convBoa.id }).eq('conversa_id', cv.id);
+      if (erroMove) { console.log(`Grupo: não consegui mover as mensagens (${erroMove.message}).`); continue; }
+      await supabase.from('conversas').delete().eq('id', cv.id);
+      console.log(`Grupo "${nome || chave}": juntei as mensagens de "${velho.numero}" na conversa do grupo.`);
+    }
+    // O contato antigo só sai se não sobrou conversa nenhuma nele (ele pode ser
+    // de outro telefone do escritório, e aí não é nosso para apagar).
+    const { data: sobrou } = await supabase
+      .from('conversas').select('id').eq('contato_id', velho.id).limit(1);
+    if (!sobrou || !sobrou.length) await supabase.from('contatos').delete().eq('id', velho.id);
+  }
+}
+
 // ------------------------------------------------------------
 //  Descobre o telefone REAL do contato, ignorando o "@lid"
 //  (identificador de privacidade da WhatsApp que criava contatos e
@@ -280,12 +425,24 @@ app.post('/webhook', async (req, res) => {
     // Quem é o CONTATO — SEMPRE o telefone real, ignorando o identificador de
     // privacidade "@lid" que a WhatsApp passou a enviar (ele criava um segundo
     // contato/conversa para a MESMA pessoa).
-    const contatoNumero = numeroRealDoContato(body, m);
+    // GRUPO ou pessoa: a identidade do grupo é o JID dele, e não o telefone de
+    // quem escreveu (recebida) nem o do próprio grupo virado número (enviada).
+    const chat = chatDaMensagem(body, m);
+    const contatoNumero = chat.chave;
     if (!contatoNumero) {
       console.log('Sem número de contato; ignorando.', JSON.stringify(body).slice(0, 250));
       return;
     }
-    console.log(`Contato ${contatoNumero} | chat.phone=${body.chat && body.chat.phone} | sender_pn=${m.sender_pn} | fromMe=${m.fromMe}`);
+    console.log(`Contato ${contatoNumero}${chat.ehGrupo ? ' (grupo)' : ''} | `
+              + `chat.phone=${body.chat && body.chat.phone} | sender_pn=${m.sender_pn} | fromMe=${m.fromMe}`);
+
+    // Antes de gravar, junta o que este mesmo grupo deixou espalhado enquanto o
+    // erro existia. Não bloqueia a mensagem: se falhar, ela entra igual e a
+    // próxima tenta de novo.
+    if (chat.ehGrupo) {
+      const jidDigitos = contatoNumero.replace('grupo:', '').replace(/\D/g, '');
+      await juntarConversasDoGrupo(adv.id, contatoNumero, jidDigitos, chat.nome).catch(() => {});
+    }
 
     // Foto de perfil do contato (vem no próprio webhook, no chat).
     const fotoContato =
@@ -295,9 +452,14 @@ app.post('/webhook', async (req, res) => {
     // (o advogado escrevendo pelo próprio WhatsApp), os campos de nome trazem o
     // nome do ADVOGADO (ex.: "Acordos Yunes Kaled"), então NÃO tocamos no nome
     // do contato para não sobrescrever com o dado errado.
-    const contatoNome = m.fromMe
-      ? null
-      : ((body.chat && body.chat.wa_name) || m.senderName || null);
+    // No GRUPO o nome vem do chat sempre — inclusive em mensagem nossa, porque
+    // ali `chat.name` é o nome do grupo. Era isso que fazia a conversa nascer
+    // sem nome nenhum e aparecer como "+70929710": a regra de não confiar no
+    // nome em `fromMe` existe para conversa de uma pessoa só, onde o campo traz
+    // o nome do ADVOGADO.
+    const contatoNome = chat.ehGrupo
+      ? chat.nome
+      : (m.fromMe ? null : ((body.chat && body.chat.wa_name) || m.senderName || null));
 
     // Só inclui foto_url/nome quando temos valor, para não apagar o que já existe.
     const contatoUpsert = { numero: contatoNumero };
@@ -377,6 +539,10 @@ app.post('/webhook', async (req, res) => {
     // celular ou desktop), fora do Zorvin. Não sabemos qual atendente foi, então
     // marca com um rótulo de sistema para a equipe distinguir na bolha.
     if (origem === 'advogado') base.enviado_por = 'WhatsApp';
+    // No grupo, quem escreveu importa em toda mensagem — inclusive nas recebidas,
+    // que num grupo vêm de gente diferente a cada linha. É o mesmo campo que a
+    // importação de histórico já preenchia, então a bolha mostra igual.
+    if (chat.ehGrupo) base.enviado_por = autorNoGrupo(body, m);
     // Se a mensagem recebida é uma RESPOSTA a outra, guarda a citação.
     const extras = extrairResposta(m);
     const msgErro = await salvarMensagem(base, extras);
