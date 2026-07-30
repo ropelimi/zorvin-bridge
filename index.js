@@ -1336,6 +1336,101 @@ async function rodada() {
 setTimeout(() => { rodada().catch(() => {}); }, 20 * 1000).unref();
 setInterval(() => { rodada().catch(() => {}); }, PERMISSOES_INTERVALO_MS).unref();
 
+// ============================================================
+//  A TELA DE ATENDENTES DO ZORVIN
+//
+//  Quem administra o escritório passa a dar e tirar acesso DENTRO do Zorvin, em
+//  vez de abrir o admin do Django. É a mesma permissão — não uma segunda.
+//
+//  E é por isso que estas rotas escrevem no VANTORO, e não direto em
+//  `permissoes` aqui. A Ponte reescreve as linhas de lá a partir do Vantoro a
+//  cada poucos minutos: o que a tela gravasse direto no Supabase sumiria
+//  sozinho na rodada seguinte, sem nada dizendo por quê. Uma resposta, um lugar.
+//
+//  Depois de gravar, a permissão é aplicada NA HORA (`aplicarPermissoes`), sem
+//  esperar a rodada: quem acabou de marcar quer conferir na tela ao lado, e
+//  "espere três minutos" é o tipo de coisa que faz a pessoa marcar de novo
+//  achando que não salvou.
+// ============================================================
+
+// Só admin abre: as duas rotas contam e mudam quem enxerga o quê.
+function soAdmin(handler) {
+  return rotaVantoro(async (req, usuario) => {
+    const { data: eu } = await supabase
+      .from('usuarios').select('admin').eq('id', usuario.id).maybeSingle();
+    if (!eu || !eu.admin) {
+      return { status: 403, corpo: { ok: false, erro: 'Só quem administra pode mexer nas permissões.' } };
+    }
+    return handler(req, usuario);
+  });
+}
+
+// Nomeadas, e não escritas dentro do `app.get`: assim dá para exercitá-las com
+// um dublê do Supabase e do Vantoro, que é o único jeito de conferir quem pode
+// mexer em quê sem depender de um banco de verdade.
+async function listarAtendentes() {
+  // A lista sai do Vantoro porque é lá que a permissão mora. Vem com o estado de
+  // cada pessoa (departamentos, telefones e a chave), que é o que a tela desenha.
+  const { status, corpo } = await chamarVantoro('/usuarios');
+  if (status !== 200 || !corpo || !corpo.ok) {
+    return { status: 502, corpo: { ok: false, erro: 'Não consegui ler os usuários do Vantoro.' } };
+  }
+  // Quem nunca entrou no Zorvin ainda não tem conta aqui — e a permissão dele só
+  // vira linha no dia em que entrar. A tela precisa dizer isso, senão o
+  // administrador marca, confere e não vê efeito nenhum.
+  const { data: contas } = await supabase.from('usuarios').select('id, login, email');
+  const conhecidos = new Set();
+  for (const c of contas || []) {
+    if (c.login) conhecidos.add(String(c.login).toLowerCase());
+    if (c.email) conhecidos.add(String(c.email).toLowerCase());
+  }
+  const usuarios = (corpo.usuarios || []).map((u) => ({
+    ...u,
+    ja_entrou: conhecidos.has(String(u.login || '').toLowerCase())
+            || conhecidos.has(String(u.email || '').toLowerCase()),
+  }));
+  return { status: 200, corpo: { ok: true, usuarios } };
+}
+
+async function gravarAtendente(req) {
+  const corpoEnviado = req.body || {};
+  if (!corpoEnviado.usuario) {
+    return { status: 400, corpo: { ok: false, erro: 'Informe de quem é a permissão.' } };
+  }
+  const { status, corpo } = await chamarVantoro('/zorvin/permissoes', {
+    method: 'POST',
+    body: JSON.stringify(corpoEnviado),
+  });
+  if (status !== 200 || !corpo || !corpo.ok) {
+    return { status, corpo: corpo || { ok: false, erro: 'O Vantoro não aceitou a mudança.' } };
+  }
+
+  // Aplicar agora, e não na próxima rodada. Se falhar, a gravação no Vantoro
+  // continua valendo — a rodada seguinte aplica. Por isso o erro daqui não
+  // desfaz nada: ele só avisa que o efeito vai demorar alguns minutos.
+  let aplicada = false;
+  try {
+    const login = String(corpo.usuario.login || '').toLowerCase();
+    const { data: contas } = await supabase.from('usuarios').select('id, login, email');
+    const conta = (contas || []).find(
+      (c) => String(c.login || '').toLowerCase() === login
+          || String(c.email || '').toLowerCase() === login);
+    if (conta) {
+      await aplicarPermissoes(conta.id, { ...corpo.usuario, admin: false });
+      aplicada = true;
+    }
+  } catch (e) {
+    console.log('Permissões: gravei no Vantoro mas não apliquei agora —', (e && e.message) || e);
+  }
+  return { status: 200, corpo: { ok: true, usuario: corpo.usuario, aplicada } };
+}
+
+app.options('/permissoes/atendentes', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.get('/permissoes/atendentes', soAdmin(listarAtendentes));
+app.options('/permissoes/atendente', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.post('/permissoes/atendente', soAdmin(gravarAtendente));
+
+
 // ------------------------------------------------------------
 //  POR QUE FULANO NÃO VÊ AS CONVERSAS
 //
