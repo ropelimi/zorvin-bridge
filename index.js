@@ -327,10 +327,11 @@ app.post('/webhook', async (req, res) => {
     // De quem é esta conversa: cliente, advogado da parte contrária, lead…
     // Não bloqueia nada — se falhar, a mensagem entra igual e a etiqueta sai
     // na próxima que chegar.
-    const frenteDaConversa = await definirFrente(contato, adv, conversa.id, body);
-    // E em que GRUPO do departamento ela cai. Depende da frente acima — por
-    // isso vem depois, e não junto.
-    await definirGrupo(adv, conversa.id, frenteDaConversa);
+    // A FRENTE continua sendo gravada na conversa (`conversas.frente`): é o dado
+    // que diz de que natureza é aquele atendimento, e o Vantoro o usa. O que
+    // saiu foi o GRUPO — a etiqueta colorida que o painel carimbava a partir
+    // dela. Ver o bloco "o grupo saiu" mais abaixo.
+    await definirFrente(contato, adv, conversa.id, body);
 
     // TIPO da mensagem.
     let tipo = 'texto';
@@ -1616,57 +1617,21 @@ async function definirFrente(contato, advogado, conversaId, body) {
 //  não se encaixar.
 // ============================================================
 
-// Cache do mapa de grupos: o webhook roda a cada mensagem e o mapa muda quando
-// alguém mexe na tela de departamentos, ou seja, quase nunca.
-let cacheGrupos = null;
-let cacheGruposEm = 0;
-const GRUPOS_VALIDADE_MS = 60 * 1000;
-
-async function mapaDeGrupos() {
-  if (cacheGrupos && Date.now() - cacheGruposEm < GRUPOS_VALIDADE_MS) return cacheGrupos;
-  const { data, error } = await supabase
-    .from('grupos').select('id, departamento_id, regra, frente, ativo');
-  if (error) {
-    // Sem o SQL rodado a tabela não existe. Não é erro fatal: a conversa entra
-    // sem grupo e passa a ter um assim que o SQL for aplicado.
-    console.log(`Grupos: não consegui ler (${error.message}). Falta rodar o SQL de departamentos?`);
-    return null;
-  }
-  const mapa = { porFrente: new Map(), padrao: new Map() };
-  for (const g of data || []) {
-    if (g.ativo === false) continue;
-    if (g.regra === 'padrao') mapa.padrao.set(g.departamento_id, g.id);
-    else if (g.frente) mapa.porFrente.set(`${g.departamento_id}:${g.frente}`, g.id);
-  }
-  cacheGrupos = mapa;
-  cacheGruposEm = Date.now();
-  return mapa;
-}
-
-async function definirGrupo(advogado, conversaId, frente) {
-  try {
-    const dep = advogado.departamento_id;
-    if (!dep) return null;  // telefone ainda sem departamento
-    const mapa = await mapaDeGrupos();
-    if (!mapa) return null;
-
-    const grupoId = (frente && mapa.porFrente.get(`${dep}:${frente}`)) || mapa.padrao.get(dep) || null;
-    if (!grupoId) return null;
-
-    // `grupo_fixado` é o respeito à decisão de uma pessoa: se alguém moveu a
-    // conversa à mão, a próxima mensagem não pode devolvê-la para o automático.
-    // O filtro vai no UPDATE (e não num SELECT antes) para não haver janela
-    // entre ler e gravar.
-    const { error } = await supabase
-      .from('conversas').update({ grupo_id: grupoId })
-      .eq('id', conversaId).eq('grupo_fixado', false);
-    if (error) console.log(`Grupo da conversa: não gravei (${error.message}).`);
-    return grupoId;
-  } catch (e) {
-    console.log('Grupo: não consegui definir agora —', (e && e.message) || e);
-    return null;
-  }
-}
+// O GRUPO SAIU — e com ele a etiqueta que ninguém tinha criado.
+//
+// O grupo existia para um problema só: no departamento Advogados, os MESMOS
+// telefones negociavam acordo com o réu e avisavam o cliente da audiência —
+// duas conversas de natureza oposta no mesmo número. O aviso de audiência passou
+// a sair de um telefone próprio, e aí o telefone voltou a responder a pergunta
+// sozinho. O `sql/2026-07-sem-grupos.sql` já tinha tirado o grupo da permissão
+// por isso; ficava só o carimbo na tela.
+//
+// E o carimbo era o pior pedaço: na lista, ele ficava idêntico às tags que a
+// equipe cria à mão. "Sem identificar" — o balaio de quem ainda não tem ficha —
+// caía em quase toda conversa, uma etiqueta dizendo "não sei" em cada linha.
+//
+// Gravar `conversas.grupo_id` a cada mensagem virou escrita que ninguém lê. Sai
+// junto: é um UPDATE por mensagem recebida.
 
 // O painel pergunta a frente de um número (para mostrar o selo na hora).
 app.get('/vantoro/classificar', rotaVantoro(async (req) => {
