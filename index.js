@@ -1064,6 +1064,63 @@ async function mandarDepartamentosAoVantoro() {
   }
 }
 
+// O NÚMERO COMO O VANTORO GUARDA: só dígitos, sem o 55 na frente, últimos 11.
+//
+// É a mesma redução que o cadastro do Vantoro usa para casar telefone
+// (`core.models.normalizar_telefone`), e ela precisa ser a mesma dos dois lados:
+// a permissão por telefone é encontrada comparando esta chave. Aqui o número
+// vem cru da instância ("5511934042997"); lá ele foi normalizado ao entrar.
+function chaveDoNumero(bruto) {
+  let d = String(bruto || '').replace(/\D/g, '');
+  if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+  return d.length > 11 ? d.slice(-11) : d;
+}
+
+// A lista de telefones muda quando alguém liga uma instância nova — quase nunca.
+// O mesmo teto dos departamentos, pela mesma razão.
+let telefonesEnviadosEm = 0;
+
+async function mandarTelefonesAoVantoro() {
+  if (!VANTORO_URL || !VANTORO_TOKEN) return;
+  if (Date.now() - telefonesEnviadosEm < DEPARTAMENTOS_VALIDADE_MS) return;
+
+  // `select('*')` e não a lista de colunas: o formato de `advogados` varia com o
+  // que já foi rodado no banco, e pedir uma coluna que ainda não existe devolve
+  // erro e mata a rotina inteira. Mesmo cuidado que a rotina do departamento.
+  const { data: fones, error } = await supabase
+    .from('advogados').select('*').eq('ativo', true);
+  if (error) {
+    console.log(`Telefones: não consegui ler (${error.message}).`);
+    return;
+  }
+  if (!fones || !fones.length) return;
+
+  const { data: deps } = await supabase.from('departamentos').select('id, slug');
+  const slugPorId = new Map((deps || []).map((d) => [d.id, d.slug]));
+
+  const lista = fones
+    .map((f) => ({
+      numero: chaveDoNumero(f.numero),
+      nome: String(f.nome || f.numero || '').slice(0, 120),
+      // O departamento vai junto para a tela de permissões poder dizer "este
+      // número já está incluído no departamento X" — sem isso, marcar os dois
+      // parece dobrar o acesso quando só repete.
+      departamento: slugPorId.get(f.departamento_id) || String(f.setor || '').trim(),
+    }))
+    .filter((f) => f.numero);
+  if (!lista.length) return;
+
+  const { status } = await chamarVantoro('/zorvin/telefones', {
+    method: 'POST',
+    body: JSON.stringify({ telefones: lista }),
+  });
+  if (status === 200) {
+    telefonesEnviadosEm = Date.now();
+  } else {
+    console.log(`Telefones: o Vantoro respondeu ${status}.`);
+  }
+}
+
 async function aplicarPermissoes(usuarioId, u) {
   // `zorvin_definido` distingue "não pode ver nada" de "ninguém definiu ainda".
   // Sem essa distinção, o primeiro login depois desta mudança apagaria a
@@ -1074,17 +1131,53 @@ async function aplicarPermissoes(usuarioId, u) {
   // seria enfeite que confunde quem for conferir depois.
   if (u.admin) return;
 
+  // DOIS CORTES, E O FINO GANHA DO GROSSO.
+  //
+  // O departamento é o corte certo na maioria dos casos. O que ele não resolve
+  // aparece toda semana: a pessoa que atende UM número e só ele — uma estagiária
+  // no número do cadastro, um parceiro no de vendas. Pelo departamento, liberar
+  // esse número libera todos os números do departamento junto.
+  //
+  // Quando o Vantoro diz `zorvin_so_telefones`, ele já conferiu que há telefone
+  // marcado (chave ligada com lista vazia não vira restrição lá, justamente para
+  // não deixar ninguém sem ver nada no meio de uma edição). Aqui a lista de
+  // telefones SUBSTITUI os departamentos: é o que a tela promete a quem marcou.
+  const soTelefones = u.zorvin_so_telefones === true;
   const chaves = Array.isArray(u.zorvin) ? u.zorvin.filter(Boolean) : [];
+  const numeros = Array.isArray(u.zorvin_telefones) ? u.zorvin_telefones.filter(Boolean) : [];
 
-  let ids = [];
-  if (chaves.length) {
+  const linhas = [];
+
+  if (soTelefones) {
+    // `select('*')` e não a lista de colunas, pelo mesmo motivo das outras
+    // rotinas: o formato de `advogados` varia com o que já foi rodado no banco.
+    const { data: fones, error } = await supabase.from('advogados').select('*');
+    if (error) {
+      console.log(`Permissões: não consegui ler os telefones (${error.message}).`);
+      return;
+    }
+    const porChave = new Map((fones || []).map((f) => [chaveDoNumero(f.numero), f.id]));
+    const perdidos = [];
+    for (const n of numeros) {
+      const id = porChave.get(chaveDoNumero(n));
+      if (id) linhas.push({ usuario_id: usuarioId, telefone_id: id });
+      else perdidos.push(n);
+    }
+    if (perdidos.length) {
+      console.log(`Permissões de ${u.login}: o Zorvin não tem os telefones ${perdidos.join(', ')}.`);
+    }
+    // Nenhum telefone reconhecido: sair sem apagar nada. Substituir a permissão
+    // por uma lista vazia deixaria a pessoa cega por causa de um número escrito
+    // diferente dos dois lados — e o sintoma não apontaria para a causa.
+    if (!linhas.length) return;
+  } else if (chaves.length) {
     const { data, error } = await supabase
       .from('departamentos').select('id, slug').in('slug', chaves);
     if (error) {
       console.log(`Permissões: não consegui ler os departamentos (${error.message}).`);
       return;
     }
-    ids = (data || []).map((d) => d.id);
+    for (const d of data || []) linhas.push({ usuario_id: usuarioId, departamento_id: d.id });
     // Chave marcada no Vantoro que não existe aqui é erro de digitação lá. Fica
     // registrado: é o que explica "marquei e a pessoa continua sem ver".
     const achados = new Set((data || []).map((d) => d.slug));
@@ -1094,28 +1187,28 @@ async function aplicarPermissoes(usuarioId, u) {
     }
   }
 
-  // Só as linhas de DEPARTAMENTO são substituídas. As de TELEFONE foram dadas
-  // aqui, numa tela mais fina do que a do Vantoro — apagá-las porque o Vantoro
-  // não fala sobre elas seria deixar o sistema mais grosseiro decidir por cima
-  // do mais preciso.
+  // AGORA AS DUAS ESPÉCIES DE LINHA SÃO SUBSTITUÍDAS — antes, só as de
+  // departamento eram. A regra mudou porque o lugar de decidir mudou: enquanto
+  // o telefone só se liberava aqui, apagar essas linhas seria o sistema mais
+  // grosseiro passando por cima do mais fino. Agora o Vantoro tem a tela dos
+  // dois cortes, e quem tem perfil lá tem a resposta inteira lá. Deixar
+  // sobrar linha de telefone dada em outro tempo faria a pessoa continuar vendo
+  // o que a tela diz que ela não vê — e ninguém procuraria o resto da resposta
+  // num segundo lugar.
   //
   // A consulta não cita `grupo_id` de propósito: a coluna ainda existe, mas os
   // grupos saíram e ela está esperando o painel parar de mencioná-la para ser
-  // apagada. Amarrar esta rotina a ela faria o login parar de aplicar permissão
+  // apagada. Amarrar esta rotina a ela faria a permissão parar de ser aplicada
   // no dia em que a coluna sumir — e sem nada dizendo por quê.
   const { error: erroApaga } = await supabase
-    .from('permissoes').delete()
-    .eq('usuario_id', usuarioId)
-    .not('departamento_id', 'is', null)
-    .is('telefone_id', null);
+    .from('permissoes').delete().eq('usuario_id', usuarioId);
   if (erroApaga) {
     console.log(`Permissões: não consegui limpar as antigas (${erroApaga.message}).`);
     return;
   }
-  if (!ids.length) return;
+  if (!linhas.length) return;
 
-  const { error: erroInsere } = await supabase.from('permissoes')
-    .insert(ids.map((departamento_id) => ({ usuario_id: usuarioId, departamento_id })));
+  const { error: erroInsere } = await supabase.from('permissoes').insert(linhas);
   if (erroInsere) console.log(`Permissões: não consegui gravar (${erroInsere.message}).`);
 }
 
@@ -1232,6 +1325,11 @@ async function rodada() {
   // alcança conversa nenhuma.
   await garantirDepartamentoDosTelefones().catch(() => {});
   await mandarDepartamentosAoVantoro().catch(() => {});
+  // Os telefones vão DEPOIS dos departamentos: a tela de permissões mostra a que
+  // departamento cada número pertence, e para isso o departamento já tem de
+  // existir lá. Na ordem inversa, a primeira sincronização mostraria os números
+  // soltos, e quem marcasse ali não veria que já estavam cobertos.
+  await mandarTelefonesAoVantoro().catch(() => {});
   await sincronizarPermissoes().catch(() => {});
 }
 setTimeout(() => { rodada().catch(() => {}); }, 20 * 1000).unref();
@@ -1289,6 +1387,15 @@ app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
   const liberados = (perms || []).filter((p) => p.departamento_id)
     .map((p) => nomeDep.get(p.departamento_id) || `#${p.departamento_id}`);
 
+  // Permissão por TELEFONE deixou de ser exceção: é o corte fino da tela do
+  // Vantoro ("limitar a telefones específicos"), e quem está nele vê os números
+  // marcados e mais nada. Antes esta rota tratava isso como defeito — dizia
+  // "ela tem permissão só por telefone" como se faltasse alguma coisa, e quem
+  // lia ia mexer numa configuração que estava certa.
+  const nomeDoFone2 = new Map((fones || []).map((f) => [f.id, f.nome || f.numero || f.id]));
+  const fonesLiberados = (perms || []).filter((p) => p.telefone_id)
+    .map((p) => nomeDoFone2.get(p.telefone_id) || `#${p.telefone_id}`);
+
   let problema = null;
   if (!pessoa.ativo) {
     problema = 'O acesso dela está desativado aqui.';
@@ -1296,9 +1403,11 @@ app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
     problema = 'Não há permissão nenhuma gravada para esta pessoa. Confira se o '
              + 'departamento está marcado no cadastro dela no Vantoro — a Ponte '
              + 'reaplica a cada poucos minutos.';
-  } else if (!liberados.length) {
-    problema = 'Ela tem permissão só por telefone, nenhuma por departamento.';
-  } else if (orfaos.length) {
+  } else if (!liberados.length && !fonesLiberados.length) {
+    problema = 'Há linhas de permissão, mas nenhuma aponta para departamento nem '
+             + 'para telefone. É resto de uma versão antiga: salve o cadastro dela '
+             + 'no Vantoro para a Ponte regravar.';
+  } else if (orfaos.length && liberados.length) {
     problema = `Há ${orfaos.length} telefone(s) sem departamento definido `
              + `(${orfaos.slice(0, 5).map(nomeDoFone).join(', ')}). `
              + 'As conversas deles não aparecem para quem não é administrador — '
@@ -1307,6 +1416,10 @@ app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
 
   return { status: 200, corpo: { ok: true, pessoa: pessoa.login, ativa: pessoa.ativo,
     departamentos_liberados: liberados,
+    // Quando esta lista vem preenchida, a pessoa está no corte fino: ela vê
+    // ESTES telefones e nada mais, e é por isso que os departamentos podem
+    // aparecer vazios sem que haja nada errado.
+    telefones_liberados: fonesLiberados,
     telefones_sem_departamento: orfaos.length, problema } };
 }));
 
