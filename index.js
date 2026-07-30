@@ -1871,10 +1871,36 @@ function veioDeAnuncio(body) {
 // Grava colunas que talvez ainda não existam (o SQL das frentes pode não ter
 // sido rodado). Isso nunca pode derrubar a entrada de mensagens: conversa sem
 // etiqueta é um contratempo; mensagem perdida, não.
+// Coluna que não existe é problema PERMANENTE — só passa quando alguém roda o
+// SQL. Continuar tentando a cada mensagem não conserta nada e enche o log do
+// Postgres de erro, que é onde um erro de verdade precisaria ser visto. Então a
+// primeira recusa por coluna inexistente desliga aquela gravação até o próximo
+// restart da ponte (que é quando o SQL novo teria sido rodado, de todo modo).
+//
+// Erro de rede NÃO entra nesta conta: esse passa sozinho, e desligar por causa
+// dele deixaria a etiqueta parada por horas sem motivo.
+const SEM_ESSA_COLUNA = ['42703', '42P01', 'PGRST204', 'PGRST200'];
+const faltaColuna = (erro) => Boolean(erro) && (
+  SEM_ESSA_COLUNA.includes(String(erro.code)) ||
+  /does not exist|could not find|schema cache/i.test(String(erro.message || '')));
+
+const GRAVACOES_DESLIGADAS = new Set();
+
 async function gravarTolerante(tabela, campos, filtro, rotulo) {
+  const chave = tabela + ':' + Object.keys(campos).sort().join(',');
+  if (GRAVACOES_DESLIGADAS.has(chave)) return false;
+
   const { error } = await supabase.from(tabela).update(campos).match(filtro);
-  if (error) console.log(`${rotulo}: não gravei (${error.message}). Falta rodar o SQL das frentes?`);
-  return !error;
+  if (!error) return true;
+
+  if (faltaColuna(error)) {
+    GRAVACOES_DESLIGADAS.add(chave);
+    console.log(`${rotulo}: a coluna não existe (${error.message}). `
+      + 'Parei de tentar até a ponte reiniciar — rode o SQL das frentes no Supabase.');
+  } else {
+    console.log(`${rotulo}: não gravei agora (${error.message}). Tento na próxima.`);
+  }
+  return false;
 }
 
 async function perguntarFrenteAoVantoro(numero) {
