@@ -433,7 +433,11 @@ app.post('/webhook', async (req, res) => {
       console.log('Sem número de contato; ignorando.', JSON.stringify(body).slice(0, 250));
       return;
     }
+    // `chat.id` no log porque e ELE que decide se a mensagem e de grupo. Quando
+    // uma conversa de grupo nascer errada de novo, esta linha diz por que — sem
+    // ela, o diagnostico depende de adivinhar o formato que a Uazapi mandou.
     console.log(`Contato ${contatoNumero}${chat.ehGrupo ? ' (grupo)' : ''} | `
+              + `chat.id=${(body.chat && body.chat.id) || '—'} | `
               + `chat.phone=${body.chat && body.chat.phone} | sender_pn=${m.sender_pn} | fromMe=${m.fromMe}`);
 
     // Antes de gravar, junta o que este mesmo grupo deixou espalhado enquanto o
@@ -1595,6 +1599,68 @@ app.options('/permissoes/atendentes', (req, res) => { liberarCors(res); res.send
 app.get('/permissoes/atendentes', soAdmin(listarAtendentes));
 app.options('/permissoes/atendente', (req, res) => { liberarCors(res); res.sendStatus(204); });
 app.post('/permissoes/atendente', soAdmin(gravarAtendente));
+
+
+// ============================================================
+//  JUNTAR DUAS CONVERSAS À MÃO
+//
+//  A junção automática dos grupos depende de reconhecer o rastro que o erro
+//  deixou, e ela só roda quando chega uma mensagem nova daquele grupo. Duas
+//  coisas que ela não alcança:
+//
+//    - grupo parado: ninguém escreve nele há dias, então nada dispara;
+//    - rastro que não bate com nenhum dos padrões conhecidos — e aí o certo é
+//      deixar quem OLHA a tela dizer "estas duas são a mesma", em vez de o
+//      código adivinhar com mais uma regra.
+//
+//  Esta rota é isso: a pessoa aponta as duas, e nós movemos.
+//
+//  Ela mora AQUI e não no painel por causa do RLS: mover mensagem é UPDATE em
+//  `mensagens`, e apagar conversa é DELETE em `conversas` — duas coisas que o
+//  painel não pode fazer (e não deve). A ponte fala com o banco pelo papel de
+//  serviço, e por isso é ela quem faz, com o admin conferido antes.
+// ============================================================
+async function juntarConversas(req) {
+  const de = String((req.body && req.body.de) || '').trim();
+  const para = String((req.body && req.body.para) || '').trim();
+  if (!de || !para) return { status: 400, corpo: { ok: false, erro: 'Informe as duas conversas.' } };
+  if (de === para) return { status: 400, corpo: { ok: false, erro: 'São a mesma conversa.' } };
+
+  const { data: ambas, error } = await supabase
+    .from('conversas').select('id, advogado_id, contato_id').in('id', [de, para]);
+  if (error) return { status: 500, corpo: { ok: false, erro: error.message } };
+  const origem = (ambas || []).find((c) => String(c.id) === de);
+  const destino = (ambas || []).find((c) => String(c.id) === para);
+  if (!origem || !destino) return { status: 404, corpo: { ok: false, erro: 'Não achei uma das conversas.' } };
+  // Telefones diferentes não se juntam: a conversa pertence ao número por onde
+  // ela aconteceu, e misturar dois números apagaria essa informação — além de
+  // levar mensagem para um telefone que talvez outra equipe enxergue.
+  if (String(origem.advogado_id) !== String(destino.advogado_id)) {
+    return { status: 400, corpo: { ok: false,
+      erro: 'As duas conversas são de telefones diferentes. Junte só conversas do mesmo número.' } };
+  }
+
+  const { count, error: erroMove } = await supabase
+    .from('mensagens').update({ conversa_id: destino.id }, { count: 'exact' })
+    .eq('conversa_id', origem.id);
+  if (erroMove) return { status: 500, corpo: { ok: false, erro: erroMove.message } };
+
+  await supabase.from('conversas').delete().eq('id', origem.id);
+
+  // O contato da conversa que saiu só é apagado se não sobrou conversa nenhuma
+  // nele — ele pode ter conversa em outro telefone do escritório, e aí não é
+  // nosso para apagar.
+  const { data: sobrou } = await supabase
+    .from('conversas').select('id').eq('contato_id', origem.contato_id).limit(1);
+  if (!sobrou || !sobrou.length) {
+    await supabase.from('contatos').delete().eq('id', origem.contato_id);
+  }
+  console.log(`Conversas: juntei ${count || 0} mensagem(ns) da conversa ${origem.id} na ${destino.id}.`);
+  return { status: 200, corpo: { ok: true, movidas: count || 0 } };
+}
+
+app.options('/conversas/juntar', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.post('/conversas/juntar', soAdmin(juntarConversas));
 
 
 // ------------------------------------------------------------
