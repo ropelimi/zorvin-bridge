@@ -171,9 +171,8 @@ async function juntarConversasDoGrupo(advId, chave, jidDigitos, nome) {
       .from('conversas').select('id').eq('advogado_id', advId).eq('contato_id', velho.id);
     for (const cv of convs || []) {
       if (cv.id === convBoa.id) continue;
-      const { error: erroMove } = await supabase
-        .from('mensagens').update({ conversa_id: convBoa.id }).eq('conversa_id', cv.id);
-      if (erroMove) { console.log(`Grupo: não consegui mover as mensagens (${erroMove.message}).`); continue; }
+      const { erro: erroMove } = await mudarDeConversa(cv.id, convBoa.id);
+      if (erroMove) { console.log(`Grupo: não consegui mover as mensagens (${erroMove}).`); continue; }
       await supabase.from('conversas').delete().eq('id', cv.id);
       console.log(`Grupo "${nome || chave}": juntei as mensagens de "${velho.numero}" na conversa do grupo.`);
     }
@@ -183,6 +182,62 @@ async function juntarConversasDoGrupo(advId, chave, jidDigitos, nome) {
       .from('conversas').select('id').eq('contato_id', velho.id).limit(1);
     if (!sobrou || !sobrou.length) await supabase.from('contatos').delete().eq('id', velho.id);
   }
+}
+
+// ------------------------------------------------------------
+//  MUDAR TUDO DE UMA CONVERSA PARA OUTRA
+//
+//  Juntar duas conversas é mover o que está pendurado nelas — e o que está
+//  pendurado não é só a mensagem. A NOTA INTERNA (o combinado da equipe, que
+//  nunca foi para o WhatsApp), a ETIQUETA e o ENVIO QUE AINDA ESTÁ NA FILA
+//  moram em tabelas separadas, todas apontando para `conversa_id`. Mover só as
+//  mensagens e apagar a conversa levava as outras três junto, em silêncio: o
+//  banco apaga em cascata, e ninguém fica sabendo que a nota sumiu.
+//
+//  A etiqueta é o único caso com regra própria: se a conversa de destino JÁ tem
+//  aquela etiqueta, a da origem é descartada em vez de movida — senão a mesma
+//  etiqueta apareceria duas vezes na mesma conversa.
+//
+//  O "não lidas" das duas se soma. A conversa que sai pode ter mensagem que
+//  ninguém leu, e essas mensagens continuam existindo depois da junção; zerar
+//  a conta faria a equipe passar por elas sem ver.
+//
+//  `notas` e `fila_envio` podem não existir numa instalação mais antiga. O erro
+//  delas é registrado e a junção segue — perder a nota é ruim, mas parar no
+//  meio, com as mensagens já movidas, seria pior.
+// ------------------------------------------------------------
+async function mudarDeConversa(origemId, destinoId) {
+  const { count, error } = await supabase
+    .from('mensagens').update({ conversa_id: destinoId }, { count: 'exact' })
+    .eq('conversa_id', origemId);
+  if (error) return { erro: error.message };
+
+  for (const tabela of ['notas', 'fila_envio']) {
+    const { error: e } = await supabase
+      .from(tabela).update({ conversa_id: destinoId }).eq('conversa_id', origemId);
+    if (e) console.log(`Junção: não movi "${tabela}" (${e.message}).`);
+  }
+
+  const { data: doDestino } = await supabase
+    .from('conversa_tags').select('tag_id').eq('conversa_id', destinoId);
+  const jaTem = new Set((doDestino || []).map((t) => t.tag_id));
+  const { data: daOrigem } = await supabase
+    .from('conversa_tags').select('tag_id').eq('conversa_id', origemId);
+  for (const t of daOrigem || []) {
+    const { error: e } = jaTem.has(t.tag_id)
+      ? await supabase.from('conversa_tags').delete()
+          .eq('conversa_id', origemId).eq('tag_id', t.tag_id)
+      : await supabase.from('conversa_tags').update({ conversa_id: destinoId })
+          .eq('conversa_id', origemId).eq('tag_id', t.tag_id);
+    if (e) console.log(`Junção: não movi a etiqueta (${e.message}).`);
+  }
+
+  const { data: duas } = await supabase
+    .from('conversas').select('id, nao_lidas').in('id', [origemId, destinoId]);
+  const soma = (duas || []).reduce((t, c) => t + (c.nao_lidas || 0), 0);
+  if (soma) await supabase.from('conversas').update({ nao_lidas: soma }).eq('id', destinoId);
+
+  return { movidas: count || 0 };
 }
 
 // ------------------------------------------------------------
@@ -1678,10 +1733,8 @@ async function juntarConversas(req) {
       erro: 'As duas conversas são de telefones diferentes. Junte só conversas do mesmo número.' } };
   }
 
-  const { count, error: erroMove } = await supabase
-    .from('mensagens').update({ conversa_id: destino.id }, { count: 'exact' })
-    .eq('conversa_id', origem.id);
-  if (erroMove) return { status: 500, corpo: { ok: false, erro: erroMove.message } };
+  const { movidas, erro: erroMove } = await mudarDeConversa(origem.id, destino.id);
+  if (erroMove) return { status: 500, corpo: { ok: false, erro: erroMove } };
 
   await supabase.from('conversas').delete().eq('id', origem.id);
 
@@ -1693,8 +1746,8 @@ async function juntarConversas(req) {
   if (!sobrou || !sobrou.length) {
     await supabase.from('contatos').delete().eq('id', origem.contato_id);
   }
-  console.log(`Conversas: juntei ${count || 0} mensagem(ns) da conversa ${origem.id} na ${destino.id}.`);
-  return { status: 200, corpo: { ok: true, movidas: count || 0 } };
+  console.log(`Conversas: juntei ${movidas} mensagem(ns) da conversa ${origem.id} na ${destino.id}.`);
+  return { status: 200, corpo: { ok: true, movidas } };
 }
 
 app.options('/conversas/juntar', (req, res) => { liberarCors(res); res.sendStatus(204); });
