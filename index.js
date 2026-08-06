@@ -465,6 +465,44 @@ app.post('/webhook', async (req, res) => {
       ? chat.nome
       : (m.fromMe ? null : ((body.chat && body.chat.wa_name) || m.senderName || null));
 
+    // O MESMO TELEFONE ESCRITO SEM O CÓDIGO DO PAÍS.
+    //
+    // O painel deixava cadastrar o contato como "11956706171" — o número do
+    // jeito que se digita no Brasil, sem o 55. Nós mandávamos a primeira
+    // mensagem e ela ia normalmente; quando a pessoa respondia, o WhatsApp
+    // devolvia "5511956706171", e aqui, não achando ninguém com esse texto,
+    // nascia um SEGUNDO contato e uma SEGUNDA conversa. A resposta aparecia
+    // separada da conversa que nós mesmos tínhamos começado.
+    //
+    // O painel novo já grava com o 55, mas os contatos antigos continuam curtos
+    // no banco. Antes de criar qualquer coisa, procuramos a versão curta e,
+    // achando, ARRUMAMOS ela — a conversa que já existe segue viva, com o
+    // histórico inteiro, e passa a casar com o que o WhatsApp manda.
+    //
+    // É uma comparação exata (os mesmos dígitos, menos o "55" da frente), e não
+    // um "parecido": palpite aqui juntaria conversa de cliente errado.
+    if (!chat.ehGrupo && contatoNumero.length > 11 && contatoNumero.startsWith('55')) {
+      const semDdi = contatoNumero.slice(2);
+      const { data: curto } = await supabase
+        .from('contatos').select('id, numero').eq('numero', semDdi).maybeSingle();
+      if (curto) {
+        const { data: jaTem } = await supabase
+          .from('contatos').select('id').eq('numero', contatoNumero).maybeSingle();
+        if (jaTem) {
+          // Os dois já existem: quem manda é o longo, e o curto some da frente
+          // para não voltar a receber nada. Juntar as conversas é decisão de
+          // gente — o painel tem "Juntar duas conversas" para isso.
+          console.log(`Contato ${semDdi} e ${contatoNumero} coexistem; use "Juntar duas conversas".`);
+        } else {
+          const { error: arrumou } = await supabase
+            .from('contatos').update({ numero: contatoNumero }).eq('id', curto.id);
+          console.log(arrumou
+            ? `Não consegui pôr o 55 em ${semDdi}: ${arrumou.message}`
+            : `Contato ${semDdi} virou ${contatoNumero} (mesma pessoa, agora com o código do país).`);
+        }
+      }
+    }
+
     // Só inclui foto_url/nome quando temos valor, para não apagar o que já existe.
     const contatoUpsert = { numero: contatoNumero };
     if (contatoNome) contatoUpsert.nome = contatoNome;
