@@ -680,6 +680,26 @@ app.post('/webhook', async (req, res) => {
     const msgErro = await salvarMensagem(base, extras);
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
 
+    // A CONVERSA ARQUIVADA VOLTA quando o contato escreve.
+    //
+    // Arquivar quer dizer "por ora, resolvido". Se a pessoa voltou a falar, não
+    // está mais resolvido — e uma mensagem que chega numa conversa arquivada
+    // fica invisível: não aparece na lista, e ninguém vai procurá-la dentro de
+    // Arquivadas. É assim que o WhatsApp se comporta, e é o comportamento que
+    // não deixa cliente sem resposta.
+    //
+    // Só o CONTATO desarquiva. Mensagem nossa, saindo do próprio Zorvin, não
+    // deve tirar da pasta o que a equipe acabou de guardar lá.
+    //
+    // O `.eq('arquivada', true)` evita uma escrita inútil em toda mensagem: só
+    // as que estão arquivadas são tocadas.
+    if (origem === 'contato') {
+      const { data: voltou, error: erroArq } = await supabase.from('conversas')
+        .update({ arquivada: false }).eq('id', conversa.id).eq('arquivada', true).select('id');
+      if (erroArq) console.log('Não consegui desarquivar (coluna "arquivada"?):', erroArq.message);
+      else if (voltou && voltou.length) console.log(`Conversa ${conversa.id} saiu das arquivadas: o contato escreveu.`);
+    }
+
     console.log(`Recebida (${tipo}) de ${contatoNumero} p/ advogado ${advogadoNumero}.`);
     // A ponte está acordada agora: aproveita para despachar qualquer mensagem
     // que estava esperando na fila (não espera o próximo ciclo do setInterval).
