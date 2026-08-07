@@ -1,0 +1,16 @@
+-- ------------------------------------------------------------
+--  O SELO "EDITADA"
+--
+--  Editar uma mensagem reescreve a bolha que já está na conversa. Sem uma
+--  marca, o texto simplesmente muda: quem leu antes e volta depois vê outra
+--  coisa e não tem como saber que houve correção — nem se foi correção ou se
+--  a própria memória falhou. O WhatsApp escreve "Editada" na bolha pelo mesmo
+--  motivo.
+--
+--  A ponte grava este campo junto com o texto novo. Se a coluna não existir,
+--  ela grava só o texto e registra no log: perder o selo é aceitável, não
+--  gravar a correção não é.
+--
+--  Rode INTEIRO no SQL Editor do Supabase. É um comando só.
+-- ------------------------------------------------------------
+alter table mensagens add column if not exists editada boolean default false;

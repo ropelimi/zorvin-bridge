@@ -1139,9 +1139,18 @@ async function processarFilaDeEnvio() {
         // Reaproveita `responder_id_uazapi` porque é exatamente o que a coluna
         // já significa — "a mensagem à qual isto se refere".
         const ehReacao = item.tipo === 'reacao';
+        // EDIÇÃO: também não é mensagem nova. Reaproveita `responder_id_uazapi`
+        // para apontar a mensagem que será reescrita, como a reação faz.
+        const ehEdicao = item.tipo === 'edicao';
 
         let resposta;
-        if (ehReacao) {
+        if (ehEdicao) {
+          resposta = await fetchComTimeout(`${servidor}/message/edit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify({ id: item.responder_id_uazapi, text: item.texto || '' })
+          }, 30000);
+        } else if (ehReacao) {
           // O número vai no formato de JID que a Uazapi documenta para esta
           // rota. Ela aceita o número cru nas outras, mas aqui seguimos o
           // exemplo da documentação em vez de supor.
@@ -1240,6 +1249,38 @@ async function processarFilaDeEnvio() {
           } catch (e) {
             console.error('Não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
           }
+        }
+
+        // A EDIÇÃO PARA AQUI: ela reescreve uma bolha que já existe, em vez de
+        // criar outra. Sem este desvio, editar criaria uma segunda mensagem com
+        // o texto novo e a antiga continuaria na conversa — o oposto de editar.
+        //
+        // O WhatsApp gera um ID NOVO para a mensagem editada, e por isso o
+        // `id_uazapi` é trocado junto: sem isso, uma edição seguinte apontaria
+        // para um id que já não existe, e a segunda correção falharia.
+        if (ehEdicao) {
+          const novoTexto = item.texto || '';
+          let idNovo = null;
+          try {
+            const dados = await resposta.json();
+            idNovo = dados?.messageid || dados?.id || dados?.message?.messageid || null;
+          } catch (_) { /* sem JSON: mantém o id antigo */ }
+          const campos = { texto: novoTexto, editada: true };
+          if (idNovo) campos.id_uazapi = String(idNovo).split(':').pop();
+          let { error: erroEd } = await supabase.from('mensagens')
+            .update(campos).eq('id_uazapi', item.responder_id_uazapi);
+          // Instalação sem a coluna `editada`: grava só o texto. Perder o selo
+          // "editada" é aceitável; não gravar a correção, não.
+          if (erroEd && /editada/i.test(erroEd.message || '')) {
+            delete campos.editada;
+            ({ error: erroEd } = await supabase.from('mensagens')
+              .update(campos).eq('id_uazapi', item.responder_id_uazapi));
+          }
+          if (erroEd) console.log('Edição: não consegui gravar o texto novo:', erroEd.message);
+          await supabase.from('fila_envio')
+            .update({ status: 'enviada', enviado_em: new Date().toISOString() }).eq('id', item.id);
+          console.log(`Mensagem ${item.responder_id_uazapi} editada.`);
+          continue;
         }
 
         // A REAÇÃO PARA AQUI. Ela não vira linha no histórico: prende-se à
