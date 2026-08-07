@@ -894,14 +894,54 @@ function extrairResposta(m) {
 //  deixar rastro seria pior. O log registra o corpo cru para ajustar depois com
 //  um exemplo real em mãos.
 // ------------------------------------------------------------
+// Diz se um texto TEM CARA DE EMOJI. É a trava que faltava.
+//
+// A primeira versão desta detecção pegou o campo errado do webhook e gravou o
+// ID DA MENSAGEM no lugar do emoji: a bolha passou a exibir
+// "3EB080DB9CFFC33549C426" numa pastilha, e como um id nunca é vazio, a
+// retirada da reação também não apagava nada.
+//
+// A lição não é "acertar o campo" — é que adivinhar o campo de um formato não
+// documentado É a situação normal aqui, e o código tem de recusar o que não
+// serve em vez de exibir. Um emoji é curto e não é feito de letras e números
+// ASCII; um id de mensagem do WhatsApp tem 20 e poucos caracteres e é só isso.
+function pareceEmoji(txt) {
+  const t = String(txt == null ? '' : txt).trim();
+  if (!t) return false;
+  if (Array.from(t).length > 8) return false;      // conta por caractere, não por byte
+  return !/^[\w\s.,:;@/+-]+$/.test(t);            // só ASCII "de identificador" não é emoji
+}
+
 function extrairReacao(m) {
   const cru = m.reaction || (m.content && m.content.reactionMessage) || null;
   const tipo = String(m.messageType || m.mediaType || m.type || '').toLowerCase();
   if (!cru && !tipo.includes('reaction')) return null;
 
-  const fonte = cru || m.content || {};
-  const emoji = (typeof fonte === 'string' ? fonte : (fonte.text || fonte.emoji || fonte.body))
-    || m.text || '';
+  // O corpo cru vai para o log SEMPRE que é reação. É o que permite ajustar os
+  // campos com um exemplo real em mãos, em vez de com mais um palpite.
+  console.log('Reação recebida. Corpo:', JSON.stringify(m).slice(0, 800));
+
+  // O EMOJI: em vez de escolher um campo e torcer, olhamos todos os candidatos
+  // e ficamos com o primeiro que TEM CARA DE EMOJI. Assim o campo certo é
+  // encontrado mesmo que eu tenha errado a ordem, e o campo errado é recusado
+  // mesmo que venha primeiro.
+  const candidatos = [
+    cru && cru.text, cru && cru.emoji, cru && cru.body,
+    typeof cru === 'string' ? cru : null,
+    m.content && m.content.text, m.content && m.content.emoji,
+    typeof m.content === 'string' ? m.content : null,
+    m.text, m.body, m.caption,
+  ];
+  const emoji = candidatos.find((c) => pareceEmoji(c));
+  // Nenhum candidato tem conteúdo = RETIRADA da reação (o WhatsApp manda o
+  // mesmo evento com o emoji vazio). Mas se havia conteúdo e nada parecia
+  // emoji, é o campo errado de novo — e aí não se grava nada. Melhor a reação
+  // não aparecer do que a bolha exibir um código.
+  const tinhaAlgo = candidatos.some((c) => String(c == null ? '' : c).trim());
+  if (!emoji && tinhaAlgo) {
+    console.log('Reação: não achei o emoji em nenhum campo conhecido. Nada foi gravado.');
+    return null;
+  }
 
   // O id do ALVO, e nunca o id da própria reação: só vale campo que fale da
   // mensagem reagida. Por isso não há um `m.id` de recurso aqui.
@@ -910,11 +950,9 @@ function extrairReacao(m) {
     || m.quotedMessageId || m.reactedMessageId
     || (cru && (cru.messageid || cru.stanzaId || cru.id))
     || null;
-
-  console.log('Reação recebida. Corpo:', JSON.stringify(m).slice(0, 600));
   if (!alvo) return null;
-  // Emoji vazio é a RETIRADA da reação — caso legítimo, não é falha.
-  return { alvo: String(alvo), emoji: String(emoji || '') };
+
+  return { alvo: String(alvo), emoji: emoji ? String(emoji).trim() : '' };
 }
 
 // Prende a reação na mensagem. Devolve `true` quando conseguiu — e é esse
@@ -934,8 +972,14 @@ async function aplicarReacao(reacao, de) {
   // UMA REAÇÃO POR PESSOA: a nova substitui a anterior e o emoji vazio a
   // retira. É como o WhatsApp se comporta, e é o que evita a mesma pessoa
   // acumular cinco emojis na mesma bolha por ter mudado de ideia.
-  const atuais = Array.isArray(alvo.reacoes) ? alvo.reacoes.filter((r) => r && r.de !== de) : [];
-  if (reacao.emoji) atuais.push({ emoji: reacao.emoji, de, em: new Date().toISOString() });
+  // Trava dupla: nada que não pareça emoji entra na bolha, venha de onde vier.
+  // Isto também limpa o que a versão anterior gravou errado — na primeira
+  // reação da conversa, o id que estava lá é descartado junto.
+  const atuais = (Array.isArray(alvo.reacoes) ? alvo.reacoes : [])
+    .filter((r) => r && r.de !== de && pareceEmoji(r.emoji));
+  if (reacao.emoji && pareceEmoji(reacao.emoji)) {
+    atuais.push({ emoji: reacao.emoji, de, em: new Date().toISOString() });
+  }
 
   const { error } = await supabase.from('mensagens').update({ reacoes: atuais }).eq('id', alvo.id);
   if (error) {
