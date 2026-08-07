@@ -1261,10 +1261,19 @@ async function processarFilaDeEnvio() {
         if (ehEdicao) {
           const novoTexto = item.texto || '';
           let idNovo = null;
-          try {
-            const dados = await resposta.json();
-            idNovo = dados?.messageid || dados?.id || dados?.message?.messageid || null;
-          } catch (_) { /* sem JSON: mantém o id antigo */ }
+          // 200 NÃO É SUCESSO AQUI. A Uazapi aceita o pedido e responde OK
+          // mesmo quando o WhatsApp recusa a edição depois — foi o que
+          // aconteceu ao editar uma mensagem de mais de uma hora: o contato
+          // recebeu a notificação e o texto ficou como estava.
+          //
+          // Por isso o corpo é lido: se ele disser que não deu, o item vai
+          // para 'erro' e o banco NÃO é reescrito, senão o Zorvin mostraria
+          // uma correção que só existe aqui dentro.
+          const dados = await resposta.json().catch(() => null);
+          if (dados && (dados.success === false || dados.error)) {
+            throw new Error(`Uazapi recusou a edição: ${dados.error || dados.message || 'sem detalhe'}`);
+          }
+          idNovo = dados?.messageid || dados?.id || dados?.message?.messageid || null;
           const campos = { texto: novoTexto, editada: true };
           if (idNovo) campos.id_uazapi = String(idNovo).split(':').pop();
           let { error: erroEd } = await supabase.from('mensagens')
