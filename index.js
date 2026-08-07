@@ -596,8 +596,22 @@ app.post('/webhook', async (req, res) => {
     // reação não é uma linha: ela pertence à mensagem que já está na conversa.
     // Se `aplicarReacao` não conseguir prendê-la (mensagem alvo fora do Zorvin,
     // coluna ainda não criada), o código segue e ela vira mensagem, como antes.
-    const reacao = extrairReacao(m);
-    if (reacao && await aplicarReacao(reacao, m.fromMe ? 'advogado' : 'contato')) return;
+    // "ISTO É UMA REAÇÃO?" é uma pergunta diferente de "CONSIGO APLICÁ-LA?",
+    // e as duas têm consequências diferentes. Antes eram a mesma: quando a
+    // reação não podia ser aplicada, o código seguia adiante e gravava uma
+    // mensagem. Na RETIRADA da reação — que chega com todos os campos de texto
+    // vazios — isso criava uma BOLHA EM BRANCO na conversa, só com o horário.
+    //
+    // Agora, se o evento é de reação, ele nunca vira mensagem. Aplicada ou
+    // não, o webhook para aqui; o que não deu para ler fica no log.
+    const ehEventoDeReacao = /reaction/i.test(String(m.messageType || m.type || ''))
+      || (typeof m.reaction === 'string' && m.reaction !== '');
+    if (ehEventoDeReacao) {
+      const reacao = extrairReacao(m);
+      if (reacao) await aplicarReacao(reacao, m.fromMe ? 'advogado' : 'contato');
+      else console.log('Reação sem alvo identificável; ignorada (nada foi gravado).');
+      return;
+    }
 
     // TIPO da mensagem.
     let tipo = 'texto';
@@ -626,6 +640,20 @@ app.post('/webhook', async (req, res) => {
       const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
       const urlReal = await baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime);
       if (urlReal) midiaUrl = urlReal;
+    }
+
+    // BOLHA EM BRANCO, NUNCA.
+    //
+    // Texto sem texto e sem mídia não é mensagem: é um evento que não soubemos
+    // ler. Gravar cria uma bolha só com o horário — que ninguém consegue
+    // interpretar, e que a equipe não tem como apagar pela tela.
+    //
+    // Vale como rede para além da reação: qualquer evento novo que a Uazapi
+    // passe a mandar e que este código ainda não entenda cai aqui, e vira uma
+    // linha de log em vez de sujeira na conversa do cliente.
+    if (tipo === 'texto' && !texto && !midiaUrl) {
+      console.log('Ignorado: evento sem texto e sem mídia. Corpo:', JSON.stringify(m).slice(0, 500));
+      return;
     }
 
     const base = {
