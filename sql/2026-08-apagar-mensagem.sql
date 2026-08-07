@@ -1,0 +1,32 @@
+-- ------------------------------------------------------------
+--  APAGAR MENSAGEM
+--
+--  A Uazapi só oferece "apagar para TODOS": a mensagem sai da conversa dos dois
+--  lados, e vale tanto para o que nós mandamos quanto para o que recebemos.
+--  Não existe "apagar só para mim".
+--
+--  A bolha NÃO some do histórico do Zorvin: ela vira "Esta mensagem foi
+--  apagada", como no WhatsApp. Apagar a linha deixaria um buraco silencioso na
+--  conversa — a equipe veria a resposta sem a pergunta, sem saber que algo foi
+--  removido nem por quem. Num escritório de advocacia, o registro de que houve
+--  uma remoção vale mais do que a economia de uma linha no banco.
+--
+--  A ponte grava `apagada = true` e limpa o texto e a mídia. Se a coluna não
+--  existir, ela registra no log e a mensagem continua como está — melhor a
+--  bolha antiga na tela do que a exclusão pela metade.
+--
+--  E QUANDO O CONTATO APAGA?
+--
+--  A mensagem dele CONTINUA no Zorvin, com o texto e o anexo intactos. Só
+--  aparece um aviso na bolha dizendo que ele apagou no WhatsApp.
+--
+--  Este é um escritório de advocacia: o que o cliente escreveu é registro do
+--  atendimento, e um registro que a outra parte pode apagar depois não serve
+--  para nada — nem para conferir um combinado, nem para se defender de uma
+--  reclamação. É para isso que serve `apagada_pelo_contato`.
+--
+--  Rode INTEIRO no SQL Editor do Supabase.
+-- ------------------------------------------------------------
+alter table mensagens
+  add column if not exists apagada boolean default false,
+  add column if not exists apagada_pelo_contato boolean default false;
