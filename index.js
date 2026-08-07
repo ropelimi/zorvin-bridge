@@ -887,12 +887,28 @@ function extrairResposta(m) {
 //  atenção por causa de um emoji. No celular, a mesma reação aparece presa à
 //  bolha, que é o que ela é.
 //
-//  O formato exato da Uazapi não foi confirmado (a documentação não abre da
-//  rede onde este código foi escrito), então procuramos em vários lugares, como
-//  já se faz com a citação. E quando NÃO dá para identificar a mensagem alvo, a
-//  reação segue o caminho antigo e vira mensagem: continua feio, mas some sem
-//  deixar rastro seria pior. O log registra o corpo cru para ajustar depois com
-//  um exemplo real em mãos.
+//  O FORMATO REAL DA UAZAPI, confirmado por um exemplo de produção:
+//
+//    { "messageType": "ReactionMessage",
+//      "type": "reaction",
+//      "reaction": "3EB088E41ADA6D9DDA3B71",     <- ID DA MENSAGEM ALVO
+//      "text": "\u{1F622}",
+//      "content": { "key": { "ID": "3EB088E41ADA6D9DDA3B71", "fromMe": false },
+//                   "text": "\u{1F622}" },
+//      "messageid": "3ABE8968E64050E659D5" }     <- id da PRÓPRIA reação
+//
+//  A armadilha está no nome: o campo `reaction` NÃO é a reação, é o id da
+//  mensagem reagida. Foi exatamente por confiar nesse nome que a bolha passou a
+//  exibir "3EB080DB9CFFC33549C426" no lugar do emoji. O emoji mora em
+//  `content.text` (e também no `text` do topo), e o alvo em `content.key.ID` —
+//  com ID em maiúsculas, diferente do resto da API.
+//
+//  Mesmo com o formato conhecido, a busca continua olhando vários campos e
+//  filtrando pelo que TEM CARA DE EMOJI: uma versão nova da Uazapi que mude um
+//  nome de campo passa a falhar em silêncio, e não a exibir lixo na conversa.
+//  Quando NÃO dá para identificar a mensagem alvo, a reação segue o caminho
+//  antigo e vira mensagem: continua feio, mas some sem deixar rastro seria
+//  pior.
 // ------------------------------------------------------------
 // Diz se um texto TEM CARA DE EMOJI. É a trava que faltava.
 //
@@ -945,8 +961,11 @@ function extrairReacao(m) {
 
   // O id do ALVO, e nunca o id da própria reação: só vale campo que fale da
   // mensagem reagida. Por isso não há um `m.id` de recurso aqui.
+  // O id do ALVO, e nunca o id da própria reação (esse é `m.messageid`, e não
+  // aparece em lugar nenhum desta lista de propósito).
   const chave = (cru && cru.key) || (m.content && m.content.key) || null;
-  const alvo = (chave && (chave.id || chave.ID))
+  const alvo = (chave && (chave.ID || chave.id))
+    || (typeof m.reaction === 'string' ? m.reaction : null)   // o campo mal batizado
     || m.quotedMessageId || m.reactedMessageId
     || (cru && (cru.messageid || cru.stanzaId || cru.id))
     || null;
