@@ -1,0 +1,29 @@
+-- ------------------------------------------------------------
+--  ONDE A REAÇÃO MORA
+--
+--  A reação não é uma mensagem: é um emoji preso a UMA mensagem que já existe.
+--  Antes deste campo ela chegava como mensagem nova, e na conversa aparecia uma
+--  bolha solta com "😮" e um horário — sem ligação com o que estava sendo
+--  respondido, e contando como não lida.
+--
+--  Fica num campo da própria mensagem, e não numa tabela separada, porque é
+--  sempre lida junto com ela: a tela nunca pergunta "quais reações existem",
+--  pergunta "o que tem nesta bolha". Uma tabela à parte custaria uma segunda
+--  consulta em toda abertura de conversa para um dado que nunca é usado
+--  sozinho.
+--
+--  Formato: uma lista de objetos, um por pessoa.
+--    [{"emoji": "😮", "de": "contato",  "em": "2026-08-07T18:32:00.000Z"},
+--     {"emoji": "👍", "de": "advogado", "em": "2026-08-07T18:33:10.000Z"}]
+--
+--  "de" é o lado, não a pessoa: no atendimento um-para-um é o que basta, e a
+--  ponte já usa esse mesmo vocabulário em `mensagens.origem`.
+--
+--  Uma reação por lado — a ponte substitui a anterior quando chega outra, e
+--  emoji vazio é a retirada. Quem já reagiu e mudou de ideia não acumula dois
+--  emojis na mesma bolha.
+--
+--  Rode este arquivo INTEIRO no SQL Editor do Supabase. É um comando só, então
+--  não esbarra no problema de scripts com vários comandos.
+-- ------------------------------------------------------------
+alter table mensagens add column if not exists reacoes jsonb;

@@ -592,6 +592,13 @@ app.post('/webhook', async (req, res) => {
     // dela. Ver o bloco "o grupo saiu" mais abaixo.
     await definirFrente(contato, adv, conversa.id, body);
 
+    // REAÇÃO, e não mensagem. Vem antes de tudo o que monta a linha porque uma
+    // reação não é uma linha: ela pertence à mensagem que já está na conversa.
+    // Se `aplicarReacao` não conseguir prendê-la (mensagem alvo fora do Zorvin,
+    // coluna ainda não criada), o código segue e ela vira mensagem, como antes.
+    const reacao = extrairReacao(m);
+    if (reacao && await aplicarReacao(reacao, m.fromMe ? 'advogado' : 'contato')) return;
+
     // TIPO da mensagem.
     let tipo = 'texto';
     if (m.type === 'media') {
@@ -869,6 +876,75 @@ function extrairResposta(m) {
     resposta_previa: texto ? String(texto).slice(0, 120) : null,
     resposta_autor: ctx.fromMe === true ? 'advogado' : 'contato',
   };
+}
+
+// ------------------------------------------------------------
+//  REAÇÃO: o emoji que alguém prende NUMA MENSAGEM QUE JÁ EXISTE.
+//
+//  Sem isto, o emoji chegava como se fosse mensagem nova. Na tela aparecia uma
+//  bolha solta com "😮" e um horário, sem ligação nenhuma com o que estava
+//  sendo respondido — e ainda contava como não lida, então a conversa pedia
+//  atenção por causa de um emoji. No celular, a mesma reação aparece presa à
+//  bolha, que é o que ela é.
+//
+//  O formato exato da Uazapi não foi confirmado (a documentação não abre da
+//  rede onde este código foi escrito), então procuramos em vários lugares, como
+//  já se faz com a citação. E quando NÃO dá para identificar a mensagem alvo, a
+//  reação segue o caminho antigo e vira mensagem: continua feio, mas some sem
+//  deixar rastro seria pior. O log registra o corpo cru para ajustar depois com
+//  um exemplo real em mãos.
+// ------------------------------------------------------------
+function extrairReacao(m) {
+  const cru = m.reaction || (m.content && m.content.reactionMessage) || null;
+  const tipo = String(m.messageType || m.mediaType || m.type || '').toLowerCase();
+  if (!cru && !tipo.includes('reaction')) return null;
+
+  const fonte = cru || m.content || {};
+  const emoji = (typeof fonte === 'string' ? fonte : (fonte.text || fonte.emoji || fonte.body))
+    || m.text || '';
+
+  // O id do ALVO, e nunca o id da própria reação: só vale campo que fale da
+  // mensagem reagida. Por isso não há um `m.id` de recurso aqui.
+  const chave = (cru && cru.key) || (m.content && m.content.key) || null;
+  const alvo = (chave && (chave.id || chave.ID))
+    || m.quotedMessageId || m.reactedMessageId
+    || (cru && (cru.messageid || cru.stanzaId || cru.id))
+    || null;
+
+  console.log('Reação recebida. Corpo:', JSON.stringify(m).slice(0, 600));
+  if (!alvo) return null;
+  // Emoji vazio é a RETIRADA da reação — caso legítimo, não é falha.
+  return { alvo: String(alvo), emoji: String(emoji || '') };
+}
+
+// Prende a reação na mensagem. Devolve `true` quando conseguiu — e é esse
+// `true` que faz o webhook parar ali e não gravar uma mensagem nova.
+async function aplicarReacao(reacao, de) {
+  const { data: alvo, error: erroBusca } = await supabase
+    .from('mensagens').select('id, reacoes').eq('id_uazapi', reacao.alvo).maybeSingle();
+  if (erroBusca) {
+    console.log('Reação: não consegui procurar a mensagem alvo:', erroBusca.message);
+    return false;
+  }
+  if (!alvo) {
+    console.log(`Reação a uma mensagem que não está no Zorvin (${reacao.alvo}).`);
+    return false;
+  }
+
+  // UMA REAÇÃO POR PESSOA: a nova substitui a anterior e o emoji vazio a
+  // retira. É como o WhatsApp se comporta, e é o que evita a mesma pessoa
+  // acumular cinco emojis na mesma bolha por ter mudado de ideia.
+  const atuais = Array.isArray(alvo.reacoes) ? alvo.reacoes.filter((r) => r && r.de !== de) : [];
+  if (reacao.emoji) atuais.push({ emoji: reacao.emoji, de, em: new Date().toISOString() });
+
+  const { error } = await supabase.from('mensagens').update({ reacoes: atuais }).eq('id', alvo.id);
+  if (error) {
+    console.log('Reação: não consegui gravar. Falta a coluna "reacoes"? '
+              + 'Rode sql/2026-08-reacoes.sql no Supabase. Erro:', error.message);
+    return false;
+  }
+  console.log(`Reação ${reacao.emoji || '(retirada)'} de ${de} na mensagem ${reacao.alvo}.`);
+  return true;
 }
 
 // ============================================================
