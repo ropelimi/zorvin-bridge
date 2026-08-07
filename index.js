@@ -1024,9 +1024,26 @@ async function processarFilaDeEnvio() {
       try {
         // Esta mensagem é um ANEXO (imagem/documento/áudio/vídeo) ou texto?
         const ehMidia = item.tipo && item.tipo !== 'texto' && item.midia_url;
+        // REAÇÃO não é mensagem: não vira bolha nova nem entra no histórico.
+        // Reaproveita `responder_id_uazapi` porque é exatamente o que a coluna
+        // já significa — "a mensagem à qual isto se refere".
+        const ehReacao = item.tipo === 'reacao';
 
         let resposta;
-        if (ehMidia) {
+        if (ehReacao) {
+          // O número vai no formato de JID que a Uazapi documenta para esta
+          // rota. Ela aceita o número cru nas outras, mas aqui seguimos o
+          // exemplo da documentação em vez de supor.
+          resposta = await fetchComTimeout(`${servidor}/message/react`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify({
+              number: `${numeroDestino}@s.whatsapp.net`,
+              text: item.texto || '',          // vazio = retirar a reação
+              id: item.responder_id_uazapi,
+            })
+          }, 30000);
+        } else if (ehMidia) {
           const tipoUaz =
             item.tipo === 'imagem' ? 'image' :
             item.tipo === 'video' ? 'video' :
@@ -1112,6 +1129,16 @@ async function processarFilaDeEnvio() {
           } catch (e) {
             console.error('Não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
           }
+        }
+
+        // A REAÇÃO PARA AQUI. Ela não vira linha no histórico: prende-se à
+        // mensagem que já está lá, do mesmo jeito que a reação recebida. Sem
+        // este desvio, reagir pelo Zorvin criaria a bolha solta que este
+        // trabalho todo foi feito para eliminar.
+        if (ehReacao) {
+          await aplicarReacao({ alvo: item.responder_id_uazapi, emoji: item.texto || '' }, 'advogado');
+          console.log(`Reação ${item.texto || '(retirada)'} enviada para ${numeroDestino}.`);
+          continue;
         }
 
         const base = {
