@@ -298,6 +298,7 @@ app.get('/ping', (req, res) => {
 // ------------------------------------------------------------
 function tipoDaMidiaHist(m) {
   const mt = String(m.mediaType || m.messageType || m.type || '').toLowerCase();
+  if (mt === 'sticker' || mt.includes('sticker')) return 'figurinha';
   if (mt.includes('image')) return 'imagem';
   if (mt === 'ptt' || mt.includes('audio')) return 'audio';
   if (mt.includes('video')) return 'video';
@@ -305,6 +306,7 @@ function tipoDaMidiaHist(m) {
   return 'texto';
 }
 function previaMidiaHist(tipo) {
+  if (tipo === 'figurinha') return '🩹 Figurinha';
   if (tipo === 'imagem') return '📷 Foto';
   if (tipo === 'audio') return '🎤 Mensagem de voz';
   if (tipo === 'video') return '🎬 Vídeo';
@@ -617,6 +619,10 @@ app.post('/webhook', async (req, res) => {
     let tipo = 'texto';
     if (m.type === 'media') {
       if (m.mediaType === 'image') tipo = 'imagem';
+      // FIGURINHA tem tipo próprio na Uazapi e caía no `else` como documento:
+      // na conversa aparecia um anexo para baixar, em vez do desenho. Agora ela
+      // é exibida como imagem, que é o que ela é.
+      else if (m.mediaType === 'sticker') tipo = 'figurinha';
       else if (m.mediaType === 'ptt' || m.mediaType === 'audio') tipo = 'audio';
       else if (m.mediaType === 'video') tipo = 'video';
       else tipo = 'documento';
@@ -733,6 +739,34 @@ async function tratarStatusMensagem(body, evento) {
     }
 
     const s = String(bruto).toLowerCase();
+
+    // O CONTATO APAGOU UMA MENSAGEM PARA TODOS.
+    //
+    // No WhatsApp ela sumiria. AQUI ELA FICA. Este é um escritório de
+    // advocacia: o que o cliente escreveu é registro do atendimento, e um
+    // registro que a outra parte pode apagar depois não serve para nada — nem
+    // para conferir um combinado, nem para se defender de uma reclamação.
+    //
+    // O que muda é só o aviso na bolha: a equipe passa a saber que houve a
+    // tentativa. O texto e o anexo continuam intactos.
+    //
+    // Isto já acontecia por acidente (o status "Deleted" caía em "não mapeado"
+    // e nada era alterado). Agora é decisão escrita, para ninguém "consertar"
+    // achando que faltava tratar o evento.
+    if (s.includes('delet') || s.includes('revok') || s.includes('apagad')) {
+      const { error: erroAviso } = await supabase.from('mensagens')
+        .update({ apagada_pelo_contato: true })
+        .eq('id_uazapi', id).eq('origem', 'contato');
+      if (erroAviso && /apagada_pelo_contato/i.test(erroAviso.message || '')) {
+        console.log('Falta a coluna "apagada_pelo_contato"? Rode sql/2026-08-apagar-mensagem.sql.');
+      } else if (erroAviso) {
+        console.log('Não consegui marcar a exclusão do contato:', erroAviso.message);
+      } else {
+        console.log(`O contato apagou a mensagem ${id} no WhatsApp; ela CONTINUA no Zorvin.`);
+      }
+      return;
+    }
+
     let novo = null;
     if (s === '3' || s === '4' || s.includes('read') || s.includes('play')) {
       novo = 'lida';
@@ -1142,9 +1176,19 @@ async function processarFilaDeEnvio() {
         // EDIÇÃO: também não é mensagem nova. Reaproveita `responder_id_uazapi`
         // para apontar a mensagem que será reescrita, como a reação faz.
         const ehEdicao = item.tipo === 'edicao';
+        // APAGAR PARA TODOS. A documentação da Uazapi não oferece "apagar só
+        // para mim": esta rota tira a mensagem da conversa dos dois lados, e
+        // funciona tanto no que nós mandamos quanto no que recebemos.
+        const ehExclusao = item.tipo === 'exclusao';
 
         let resposta;
-        if (ehEdicao) {
+        if (ehExclusao) {
+          resposta = await fetchComTimeout(`${servidor}/message/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'token': token },
+            body: JSON.stringify({ id: item.responder_id_uazapi })
+          }, 30000);
+        } else if (ehEdicao) {
           resposta = await fetchComTimeout(`${servidor}/message/edit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'token': token },
@@ -1167,6 +1211,7 @@ async function processarFilaDeEnvio() {
           const tipoUaz =
             item.tipo === 'imagem' ? 'image' :
             item.tipo === 'video' ? 'video' :
+            item.tipo === 'figurinha' ? 'sticker' :
             item.tipo === 'audio' ? 'ptt' : 'document';
 
           // Chama /send/media com um "file" (URL pública ou base64).
@@ -1249,6 +1294,30 @@ async function processarFilaDeEnvio() {
           } catch (e) {
             console.error('Não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
           }
+        }
+
+        // A EXCLUSÃO PARA AQUI. A bolha não sai do histórico do Zorvin: ela
+        // vira "Esta mensagem foi apagada", como no WhatsApp. Apagar a linha
+        // deixaria um buraco silencioso na conversa — a equipe veria a resposta
+        // sem a pergunta, e não teria como saber que algo foi removido nem por
+        // quem.
+        if (ehExclusao) {
+          const dados = await resposta.json().catch(() => null);
+          if (dados && (dados.success === false || dados.error)) {
+            throw new Error(`Uazapi recusou apagar: ${dados.error || dados.message || 'sem detalhe'}`);
+          }
+          let { error: erroDel } = await supabase.from('mensagens')
+            .update({ apagada: true, texto: null, midia_url: null })
+            .eq('id_uazapi', item.responder_id_uazapi);
+          if (erroDel && /apagada/i.test(erroDel.message || '')) {
+            console.log('Falta a coluna "apagada"? Rode sql/2026-08-apagar-mensagem.sql. Erro:', erroDel.message);
+          } else if (erroDel) {
+            console.log('Exclusão: não consegui marcar a mensagem:', erroDel.message);
+          }
+          await supabase.from('fila_envio')
+            .update({ status: 'enviada', enviado_em: new Date().toISOString() }).eq('id', item.id);
+          console.log(`Mensagem ${item.responder_id_uazapi} apagada para todos.`);
+          continue;
         }
 
         // A EDIÇÃO PARA AQUI: ela reescreve uma bolha que já existe, em vez de
