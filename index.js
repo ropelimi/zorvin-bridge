@@ -296,15 +296,29 @@ app.get('/ping', (req, res) => {
 //  Ex.: /importar-historico?token=SENHA&advogado=5511...&contato=5511...&limite=500
 //  Seguro rodar de novo: id_uazapi é único, então não duplica.
 // ------------------------------------------------------------
-function tipoDaMidiaHist(m) {
+// QUE TIPO DE MENSAGEM É ESTA — um lugar só, para o webhook e para a
+// importação de histórico.
+//
+// Eram dois lugares. O do webhook só olhava `mediaType`, e só quando `type`
+// era exatamente 'media'; qualquer outro formato caía em 'texto', e uma
+// figurinha — que não tem texto — era descartada logo depois como "evento sem
+// conteúdo". Sumia dos dois lados: nada na conversa e nada no log dizendo que
+// uma figurinha havia chegado.
+//
+// Agora olha os três campos, como a importação já fazia. E um anexo que a
+// Uazapi anuncie de um jeito novo vira documento: um botão de baixar é melhor
+// que uma bolha vazia, e muito melhor que a mensagem desaparecer.
+function tipoDaMensagem(m) {
   const mt = String(m.mediaType || m.messageType || m.type || '').toLowerCase();
-  if (mt === 'sticker' || mt.includes('sticker')) return 'figurinha';
+  if (mt.includes('sticker') || mt.includes('figurinha')) return 'figurinha';
   if (mt.includes('image')) return 'imagem';
-  if (mt === 'ptt' || mt.includes('audio')) return 'audio';
+  if (mt === 'ptt' || mt.includes('audio') || mt.includes('voice')) return 'audio';
   if (mt.includes('video')) return 'video';
   if (mt.includes('document') || mt.includes('file')) return 'documento';
+  if (m.type === 'media') return 'documento';
   return 'texto';
 }
+const tipoDaMidiaHist = tipoDaMensagem;
 function previaMidiaHist(tipo) {
   if (tipo === 'figurinha') return '🩹 Figurinha';
   if (tipo === 'imagem') return '📷 Foto';
@@ -615,26 +629,19 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // TIPO da mensagem.
-    let tipo = 'texto';
-    if (m.type === 'media') {
-      if (m.mediaType === 'image') tipo = 'imagem';
-      // FIGURINHA tem tipo próprio na Uazapi e caía no `else` como documento:
-      // na conversa aparecia um anexo para baixar, em vez do desenho. Agora ela
-      // é exibida como imagem, que é o que ela é.
-      else if (m.mediaType === 'sticker') tipo = 'figurinha';
-      else if (m.mediaType === 'ptt' || m.mediaType === 'audio') tipo = 'audio';
-      else if (m.mediaType === 'video') tipo = 'video';
-      else tipo = 'documento';
-    }
+    // TIPO da mensagem. Mesma leitura da importação de histórico, agora que
+    // as duas usam a mesma função.
+    const tipo = tipoDaMensagem(m);
 
     const origem = m.fromMe ? 'advogado' : 'contato';
     const texto =
       m.text || (typeof m.content === 'string' ? m.content : '') || null;
 
-    // Miniatura embutida da imagem (prévia imediata, baixa resolução).
+    // Miniatura embutida (prévia imediata, baixa resolução). Vale para a
+    // FIGURINHA também: se o download do arquivo grande falhar, é ela que
+    // impede a bolha de nascer vazia.
     let midiaUrl = null;
-    if (tipo === 'imagem' && m.content && m.content.JPEGThumbnail) {
+    if ((tipo === 'imagem' || tipo === 'figurinha') && m.content && m.content.JPEGThumbnail) {
       midiaUrl = 'data:image/jpeg;base64,' + m.content.JPEGThumbnail;
     }
     const midiaMime = (m.content && m.content.mimetype) || null;
@@ -642,10 +649,15 @@ app.post('/webhook', async (req, res) => {
     // Mídia em ALTA RESOLUÇÃO: tenta baixar o arquivo real pela Uazapi e
     // salvar no Storage. Se conseguir, usa essa URL; se não, fica a miniatura
     // (ou nada, no caso de áudio) — comportamento de antes, sem quebrar.
-    if (m.type === 'media') {
+    //
+    // A condição era `m.type === 'media'`, a mesma que decidia o tipo. Onde a
+    // Uazapi anuncia o anexo por outro campo, nem o tipo saía certo nem o
+    // arquivo era buscado. Agora quem manda é o tipo já apurado.
+    if (tipo !== 'texto') {
       const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
       const urlReal = await baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime);
       if (urlReal) midiaUrl = urlReal;
+      else console.log(`Anexo (${tipo}) sem arquivo: o download falhou. Mensagem ${m.messageid} fica sem mídia.`);
     }
 
     // BOLHA EM BRANCO, NUNCA.
@@ -1392,7 +1404,24 @@ async function processarFilaDeEnvio() {
           extras.resposta_previa = item.resposta_previa || null;
           extras.resposta_autor = item.resposta_autor || null;
         }
-        await salvarMensagem(base, Object.keys(extras).length ? extras : null);
+        // O RESULTADO DESTA GRAVAÇÃO NÃO PODE SER JOGADO FORA.
+        //
+        // Ele era. A mensagem saía para o WhatsApp, o contato recebia, e se o
+        // banco recusasse a linha — coluna faltando, restrição no `tipo`,
+        // política de RLS — ninguém ficava sabendo: nem a tela, que não
+        // mostrava a bolha, nem o log, que não dizia nada. Era assim que uma
+        // figurinha podia chegar ao cliente e não existir no Zorvin.
+        //
+        // O item continua 'enviada', porque enviada ele foi. O motivo fica
+        // gravado em `erro_detalhe`, que é onde se procura quando algo não
+        // aparece.
+        const erroHist = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
+        if (erroHist) {
+          console.error(`ENVIADA MAS NÃO GRAVADA (item ${item.id}, tipo ${item.tipo || 'texto'}):`, erroHist.message);
+          await supabase.from('fila_envio')
+            .update({ erro_detalhe: `enviada ao WhatsApp, mas não gravada no histórico: ${erroHist.message}` })
+            .eq('id', item.id);
+        }
 
         console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
