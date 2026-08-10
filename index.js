@@ -1015,6 +1015,17 @@ function extrairResposta(m) {
 // documentado É a situação normal aqui, e o código tem de recusar o que não
 // serve em vez de exibir. Um emoji é curto e não é feito de letras e números
 // ASCII; um id de mensagem do WhatsApp tem 20 e poucos caracteres e é só isso.
+// O TELEFONE NA FORMA QUE A UAZAPI ESPERA: só dígitos, com o código do país.
+//
+// Um número de 10 ou 11 dígitos é brasileiro sem o 55 — é assim que a pessoa
+// digita e é assim que o cadastro guarda. Qualquer outro tamanho já vem com
+// DDI (ou é um id de grupo), e nesse caso só a pontuação sai.
+function numeroLimpo(bruto) {
+  const d = String(bruto || '').replace(/\D/g, '');
+  if (d.length === 10 || d.length === 11) return '55' + d;
+  return d;
+}
+
 function pareceEmoji(txt) {
   const t = String(txt == null ? '' : txt).trim();
   if (!t) return false;
@@ -1176,7 +1187,16 @@ async function processarFilaDeEnvio() {
 
       const servidor = (conv.advogado.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
       const token = conv.advogado.token;
-      const numeroDestino = conv.contato.numero;
+      // O DESTINO VAI LIMPO, seja como for que o contato tenha entrado.
+      //
+      // Aqui ia o número exatamente como está no banco. Enquanto todo caminho
+      // do painel gravava a forma canônica isso não incomodava — mas o caminho
+      // do cadastro do Vantoro gravava como o Vantoro devolve, com máscara
+      // ("(11) 93404-2997"), e era isso que saía para a Uazapi. O painel já
+      // foi corrigido; esta limpeza é a rede para os contatos que entraram
+      // torto antes disso, que continuam funcionando sem depender de arrumar
+      // o banco primeiro.
+      const numeroDestino = numeroLimpo(conv.contato.numero);
 
       try {
         // Esta mensagem é um ANEXO (imagem/documento/áudio/vídeo) ou texto?
