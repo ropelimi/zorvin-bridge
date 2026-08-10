@@ -579,6 +579,41 @@ app.post('/webhook', async (req, res) => {
     if (contatoNome) contatoUpsert.nome = contatoNome;
     if (fotoContato) contatoUpsert.foto_url = fotoContato;
 
+    // ANTES DE CRIAR, PROCURA O MESMO CELULAR NA OUTRA FORMA DO NONO DÍGITO.
+    //
+    // O bloco acima resolve o 55; este resolve o 9. O cadastro tem
+    // "+55 31 99945-6790" e o WhatsApp devolve "+55 31 9945-6790" — a mesma
+    // linha, com um dígito a menos. Sem esta procura nasce um segundo contato,
+    // e a resposta do cliente vai parar numa conversa separada daquela em que
+    // a equipe escreveu. Foi o caso da MARIA DE JESUS DA SILVA.
+    //
+    // Achando, o contato existente é PROMOVIDO para o número que o WhatsApp
+    // usa: a conversa e o histórico continuam os mesmos, e as próximas
+    // mensagens passam a casar. Se os dois já existirem, não se junta nada
+    // por conta própria — juntar histórico é decisão de gente, e o painel tem
+    // "Juntar duas conversas" para isso.
+    let contatoExistente = null;
+    if (!chat.ehGrupo) {
+      const { data: achados } = await supabase
+        .from('contatos').select('id, numero').in('numero', variantesDoNumero(contatoNumero));
+      const lista = achados || [];
+      contatoExistente = lista.find((c) => c.numero === contatoNumero) || null;
+      const outro = lista.find((c) => c.numero !== contatoNumero) || null;
+      if (!contatoExistente && outro) {
+        const { error: erroPromo } = await supabase
+          .from('contatos').update({ numero: contatoNumero }).eq('id', outro.id);
+        if (erroPromo) {
+          console.log(`Nono dígito: não consegui promover ${outro.numero} (${erroPromo.message}).`);
+        } else {
+          console.log(`Contato ${outro.numero} virou ${contatoNumero} (mesmo celular, nono dígito).`);
+          contatoExistente = { id: outro.id, numero: contatoNumero };
+        }
+      } else if (contatoExistente && outro) {
+        console.log(`Contato ${outro.numero} e ${contatoNumero} são o mesmo celular e coexistem; `
+                  + 'use "Juntar duas conversas".');
+      }
+    }
+
     // select('*') pelo mesmo motivo do advogado: traz frente/frente_em quando
     // essas colunas já existirem, sem exigir que existam.
     const { data: contato, error: contErro } = await supabase
@@ -1024,6 +1059,33 @@ function numeroLimpo(bruto) {
   const d = String(bruto || '').replace(/\D/g, '');
   if (d.length === 10 || d.length === 11) return '55' + d;
   return d;
+}
+
+// O NONO DÍGITO: as duas formas do mesmo celular.
+//
+// No Brasil o celular ganhou um 9 na frente do número local. O cadastro guarda
+// a forma nova ("+55 31 99945-6790") e o WhatsApp devolve a antiga
+// ("+55 31 9945-6790") — ou o contrário, dependendo de quando a conta foi
+// criada. São a MESMA linha, e nenhuma limpeza de máscara ou de DDI faz uma
+// virar a outra: uma tem um dígito a mais que a outra.
+//
+// Só vale para CELULAR. Fixo tem 8 dígitos começando em 2..5, e pôr um 9 nele
+// criaria um número que não existe — pior que não achar o par.
+function variantesDoNumero(bruto) {
+  const d = String(bruto || '').replace(/\D/g, '');
+  if (!d) return [];
+  const com55 = d.startsWith('55') && (d.length === 12 || d.length === 13);
+  const nacional = com55 ? d.slice(2) : d;
+  const formas = new Set([nacional]);
+
+  if (nacional.length === 11 && nacional[2] === '9') {
+    formas.add(nacional.slice(0, 2) + nacional.slice(3));      // tira o nono
+  } else if (nacional.length === 10 && '6789'.includes(nacional[2])) {
+    formas.add(nacional.slice(0, 2) + '9' + nacional.slice(2)); // põe o nono
+  }
+  const todas = [];
+  for (const f of formas) { todas.push(f, '55' + f); }
+  return todas;
 }
 
 function pareceEmoji(txt) {
