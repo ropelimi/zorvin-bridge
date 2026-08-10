@@ -2199,6 +2199,62 @@ app.post('/conversas/juntar', soAdmin(juntarConversas));
 
 
 // ------------------------------------------------------------
+//  HISTÓRICO DE ATENDIMENTO DE UM CLIENTE
+//
+//  Quem já falou com esta pessoa, quando, e por qual dos telefones do
+//  escritório. O painel montava isso sozinho, direto do Supabase — e por isso
+//  via só os telefones que a PESSOA LOGADA alcança: a regra de linha
+//  (`pode_ver_conversa`) recorta a consulta dela. Uma lista recortada respondia
+//  "ninguém falou com esse cliente" quando a resposta certa era "falaram, por
+//  um telefone que você não abre".
+//
+//  Aqui a chave é a de serviço, que enxerga o escritório inteiro. É por isso
+//  que esta rota existe em vez de uma política mais frouxa no banco: afrouxar
+//  a leitura de `conversas` abriria TODAS as conversas para todo mundo dentro
+//  do painel, e não é isso que se quer. O que sai daqui é só o RESUMO — nome
+//  de quem escreveu, data e telefone. Nenhum texto de mensagem atravessa.
+//
+//  Basta estar logado no Zorvin: a informação é de organização do trabalho, e
+//  guardá-la por permissão é justamente o que criava a resposta errada.
+// ------------------------------------------------------------
+app.options('/historico/contato/:id', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.get('/historico/contato/:id', rotaVantoro(async (req) => {
+  const contatoId = String(req.params.id || '').trim();
+  if (!contatoId) return { status: 400, corpo: { ok: false, erro: 'Informe o contato.' } };
+
+  const { data: convs, error } = await supabase
+    .from('conversas').select('id, advogado_id').eq('contato_id', contatoId);
+  if (error) return { status: 502, corpo: { ok: false, erro: 'Não consegui ler o histórico.' } };
+
+  const { data: advs } = await supabase.from('advogados').select('id, nome, numero');
+
+  // PRIMEIRA e ÚLTIMA por conversa, com `limit(1)` em cada sentido — e não uma
+  // leitura de tudo para depois escolher. Cliente antigo tem milhares de
+  // mensagens, e seriam todas na memória da ponte para mostrar duas.
+  const ponta = (convId, crescente) => supabase
+    .from('mensagens')
+    .select('enviado_por, enviado_por_foto, criado_em')
+    .eq('conversa_id', convId).eq('origem', 'advogado')
+    .order('criado_em', { ascending: crescente }).limit(1);
+
+  const linhas = await Promise.all((convs || []).map(async (v) => {
+    const [pri, ult] = await Promise.all([ponta(v.id, true), ponta(v.id, false)]);
+    const adv = (advs || []).find((a) => String(a.id) === String(v.advogado_id)) || null;
+    return {
+      conversa_id: v.id,
+      advogado_id: v.advogado_id,
+      advogado_nome: adv ? adv.nome : null,
+      advogado_numero: adv ? adv.numero : null,
+      primeira: (pri.data || [])[0] || null,
+      ultima: (ult.data || [])[0] || null,
+    };
+  }));
+
+  return { status: 200, corpo: { ok: true, linhas } };
+}));
+
+
+// ------------------------------------------------------------
 //  POR QUE FULANO NÃO VÊ AS CONVERSAS
 //
 //  A regra de visibilidade tem alguns elos, e quando um falha o sintoma é
