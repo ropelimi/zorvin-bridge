@@ -1726,6 +1726,41 @@ async function contaDoSupabase(email, nome) {
   throw new Error('A conta existe mas não foi encontrada.');
 }
 
+/**
+ * Deixa o nome guardado no Supabase Auth igual ao do cadastro do Vantoro.
+ *
+ * O painel lê o nome de `user_metadata`, e ele só era escrito na criação da
+ * conta. Trocar o nome no Vantoro não chegava aqui nunca.
+ *
+ * Não é uma escrita a cada login: só grava quando MUDOU. Login é caminho
+ * quente e uma ida à API de admin por entrada, para reescrever a mesma coisa,
+ * é desperdício puro.
+ *
+ * Falhar aqui não impede ninguém de entrar — a pessoa entra com o nome antigo
+ * e a próxima entrada tenta de novo. Barrar o login porque o nome não alinhou
+ * seria trocar um incômodo por um impedimento.
+ */
+async function alinharNomeDaConta(id, nomeDoVantoro) {
+  const nome = String(nomeDoVantoro || '').trim();
+  if (!id || !nome) return;
+  try {
+    const { data, error } = await supabase.auth.admin.getUserById(id);
+    if (error || !data || !data.user) return;
+    const meta = data.user.user_metadata || {};
+    if (String(meta.nome || '').trim() === nome) return;
+    const { error: erroGravar } = await supabase.auth.admin.updateUserById(id, {
+      user_metadata: { ...meta, nome },
+    });
+    if (erroGravar) {
+      console.log(`login: não alinhei o nome da conta (${erroGravar.message}).`);
+      return;
+    }
+    console.log(`login: nome da conta atualizado para "${nome}" (era "${meta.nome || ''}").`);
+  } catch (e) {
+    console.log(`login: não alinhei o nome da conta (${e.message}).`);
+  }
+}
+
 // ============================================================
 //  PERMISSÕES — o Vantoro decide, a Ponte aplica
 //
@@ -2388,6 +2423,19 @@ app.post('/auth/login', async (req, res) => {
     const u = corpo.usuario;
     const email = String(u.email || '').toLowerCase();
     const id = await contaDoSupabase(email, u.nome);
+
+    // O NOME VEM DO CADASTRO DO VANTORO, SEMPRE.
+    //
+    // `contaDoSupabase` grava o nome só no dia em que a conta nasce. Quem
+    // entrou antes de o Vantoro ter o nome completo ficou com o que havia na
+    // hora — em geral o começo do e-mail ("rodrigo", "max") — e nada nunca
+    // trocava aquilo. Era esse nome que assinava a bolha e que ia para o
+    // Painel, e por isso a mesma pessoa aparecia duas vezes no relatório.
+    //
+    // Agora cada entrada realinha. É de propósito que a fonte seja o Vantoro:
+    // é lá que o cadastro de pessoa mora e é lá que quem administra mexe. O
+    // Zorvin não é dono do nome de ninguém.
+    await alinharNomeDaConta(id, u.nome);
 
     // Espelha quem é a pessoa, para a tela de permissões mostrar nome em vez
     // de um código, e para as regras de visibilidade terem onde se apoiar.
