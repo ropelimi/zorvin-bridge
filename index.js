@@ -2646,15 +2646,30 @@ async function buscarAvisosDeAudiencia() {
         continue;
       }
 
-      // De qual WhatsApp esta mensagem sai: o do advogado da AÇÃO. Se ele não
-      // estiver cadastrado aqui, devolvemos o motivo em vez de mandar pelo
-      // número de outra pessoa — o cliente não reconheceria quem escreveu.
-      const { data: adv } = await supabase.from('advogados')
-        .select('id, nome').ilike('nome', `%${aviso.remetente || ''}%`)
-        .limit(1).maybeSingle();
-      if (!aviso.remetente || !adv) {
+      // DE QUAL WHATSAPP ESTA MENSAGEM SAI.
+      //
+      // O Vantoro manda o NÚMERO da linha de audiências — todos os avisos saem
+      // por ela, para o histórico do cliente não ficar espalhado por um número
+      // diferente a cada advogado. Casamos pela chave do número, que tolera as
+      // formas com e sem o 55 e com e sem o nono dígito.
+      //
+      // O nome continua aceito, e por isso a busca antiga ficou como segunda
+      // tentativa: avisos já enfileirados antes desta mudança trazem o nome do
+      // advogado da ação, e recusá-los faria o cliente não ser avisado por
+      // causa de uma troca que é nossa, não dele.
+      const pedido = String(aviso.remetente || '').trim();
+      let adv = null;
+      if (/^[\d\s()+-]+$/.test(pedido) && pedido.replace(/\D/g, '').length >= 10) {
+        const { data: todos } = await supabase.from('advogados').select('id, nome, numero');
+        adv = (todos || []).find((a) => chaveDoNumero(a.numero) === chaveDoNumero(pedido)) || null;
+      } else if (pedido) {
+        const { data } = await supabase.from('advogados')
+          .select('id, nome').ilike('nome', `%${pedido}%`).limit(1).maybeSingle();
+        adv = data || null;
+      }
+      if (!adv) {
         await avisoDeuErro(aviso.id,
-          `Advogado "${aviso.remetente || '(em branco)'}" não encontrado no Zorvin.`);
+          `Telefone "${pedido || '(em branco)'}" não encontrado no Zorvin.`);
         continue;
       }
 
