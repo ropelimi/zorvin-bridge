@@ -1481,6 +1481,12 @@ async function processarFilaDeEnvio() {
         const extras = {};
         if (item.enviado_por) extras.enviado_por = item.enviado_por;
         if (item.enviado_por_foto) extras.enviado_por_foto = item.enviado_por_foto;
+        // O ID de quem enviou viaja junto com o nome. O nome é o que a bolha
+        // mostra (o nome de então); o id é o que o painel conta, porque ele não
+        // muda quando alguém edita o próprio perfil. Entra como "extra" pelo
+        // mesmo motivo dos outros: numa base sem o SQL rodado a coluna não
+        // existe, e a mensagem não pode deixar de ser gravada por causa disso.
+        if (item.enviado_por_id) extras.enviado_por_id = item.enviado_por_id;
         if (item.responder_id_uazapi) {
           extras.responder_id_uazapi = item.responder_id_uazapi;
           extras.resposta_previa = item.resposta_previa || null;
