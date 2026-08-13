@@ -112,10 +112,49 @@ begin
     group by 1
     having count(*) = 1
   ),
+  -- O MESMO RÓTULO É A MESMA PESSOA.
+  --
+  -- Se alguma mensagem assinada "Max Canaverde" já traz um id, então TODAS as
+  -- mensagens com esse rótulo são daquela pessoa. É a evidência mais forte que
+  -- existe aqui dentro — mais forte do que casar nome com cadastro — e não
+  -- depende de o cadastro estar limpo.
+  --
+  -- É o que conserta o caso que apareceu na base: a mesma pessoa com DOIS
+  -- cadastros de mesmo nome. Dois cadastros desligam o desempate lá de cima
+  -- (`having count(*) = 1`), as mensagens sem id não achavam id nenhum, e
+  -- "Max Canaverde" aparecia duas vezes no ranking — 30 num grupo, 9 no outro.
+  --
+  -- Sem o corte por data de propósito: o vínculo entre rótulo e pessoa vale
+  -- para sempre, e não só para o período que está na tela. Se o corte
+  -- entrasse aqui, um mês sem nenhuma mensagem identificada quebraria o
+  -- vínculo e o defeito voltaria só naquele mês.
+  --
+  -- `count(distinct) = 1` porque um rótulo usado por duas pessoas diferentes
+  -- não dá para desempatar — e chutar ali seria pôr o trabalho de alguém na
+  -- conta de outro.
+  id_pelo_rotulo as (
+    select lower(btrim(enviado_por)) as chave, (array_agg(enviado_por_id))[1] as id
+    from mensagens
+    where origem = 'advogado'
+      and enviado_por_id is not null
+      and coalesce(btrim(enviado_por), '') <> ''
+    group by 1
+    having count(distinct enviado_por_id) = 1
+  ),
   msg as (
     select
       cru.origem, cru.criado_em, cru.advogado_id, cru.rotulo,
-      coalesce(cru.enviado_por_id, dp.usuario_id, pn.id) as quem_id,
+      -- A ORDEM É A ORDEM DA EVIDÊNCIA, da mais forte para a mais fraca:
+      -- o id gravado na própria mensagem; o id já visto nesse mesmo rótulo; o
+      -- id já visto no nome para o qual o de-para aponta; o que o de-para
+      -- aponta; e, por último, o casamento com o cadastro pelo nome.
+      --
+      -- O rótulo vem ANTES do de-para de propósito. O `usuario_id` do de-para
+      -- costuma ser preenchido casando nome com cadastro, e quando há dois
+      -- cadastros de mesmo nome esse casamento escolhe um dos dois sem
+      -- critério — o que dava dois grupos para a mesma pessoa, dependendo de
+      -- qual tivesse sido sorteado.
+      coalesce(cru.enviado_por_id, ir.id, irn.id, dp.usuario_id, pn.id) as quem_id,
       coalesce(nullif(btrim(dp.nome_novo), ''), nullif(btrim(cru.enviado_por), '')) as quem_nome,
       -- "WhatsApp" é o rótulo que a ponte grava quando a mensagem saiu pelo
       -- aparelho. Não depende do de-para: é sempre aparelho.
@@ -127,6 +166,10 @@ begin
     from cru
     left join atendentes_de_para dp
       on lower(btrim(dp.nome_antigo)) = lower(cru.rotulo)
+    left join id_pelo_rotulo ir
+      on ir.chave = lower(cru.rotulo)
+    left join id_pelo_rotulo irn
+      on irn.chave = lower(btrim(dp.nome_novo))
     left join pessoa_por_nome pn
       on pn.chave = lower(btrim(coalesce(nullif(btrim(dp.nome_novo), ''), cru.rotulo)))
   ),
