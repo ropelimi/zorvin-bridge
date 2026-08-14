@@ -1639,10 +1639,77 @@ app.get('/vantoro/cliente/:id', rotaVantoro(async (req) =>
 app.post('/vantoro/cliente', rotaVantoro(async (req) =>
   chamarVantoro('/clientes', { method: 'POST', body: JSON.stringify(req.body || {}) })));
 
+/**
+ * Guarda no histórico do Zorvin o que mudou no cadastro do cliente.
+ *
+ * AQUI, e não no navegador, porque é aqui que se sabe QUEM é quem: a ponte
+ * confere o login antes de deixar passar. O painel poderia mandar um nome
+ * qualquer no corpo do pedido, e um histórico em que o autor é o que o
+ * navegador disse ser não serve para responder "quem mexeu nisto?".
+ *
+ * O valor ANTERIOR também é lido daqui, do próprio Vantoro, e não recebido
+ * pronto: a tela pode estar aberta há meia hora e mostrar um "antes" que já
+ * não era o de antes.
+ *
+ * Nada disto pode impedir a edição de acontecer. Se o histórico falhar, a
+ * alteração vale do mesmo jeito e fica um aviso no log — o contrário seria
+ * trocar um registro perdido por um atendente travado.
+ */
+async function registrarEdicaoDeCadastro(clienteId, mudou, anterior, usuario) {
+  try {
+    const campos = Object.keys(mudou || {});
+    if (!campos.length) return;
+
+    // De qual contato do Zorvin é este cliente. Sem ele a linha continua
+    // valendo (o histórico geral a mostra), só não aparece na ficha daquela
+    // conversa.
+    let contatoId = null;
+    const { data: cont } = await supabase
+      .from('contatos').select('id').eq('vantoro_cliente_id', clienteId).limit(1);
+    if (cont && cont[0]) contatoId = cont[0].id;
+
+    const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
+    const linhas = campos
+      // Campo que não mudou de verdade não vira linha: o painel manda o que
+      // ele acha que mudou, e "  " para "" encheria o histórico de nada.
+      .filter((c) => String((anterior || {})[c] ?? '').trim() !== String(mudou[c] ?? '').trim())
+      .map((c) => ({
+        contato_id: contatoId,
+        tipo: 'cadastro',
+        alvo: c,
+        antes: String((anterior || {})[c] ?? ''),
+        depois: String(mudou[c] ?? ''),
+        autor: nome,
+        autor_id: (usuario && usuario.id) || null,
+      }));
+    if (!linhas.length) return;
+
+    const { error } = await supabase.from('alteracoes').insert(linhas);
+    if (error) console.log(`histórico: não gravei a edição do cadastro (${error.message}).`);
+  } catch (e) {
+    console.log('histórico: não gravei a edição do cadastro —', (e && e.message) || e);
+  }
+}
+
 // Atendente corrige/completa os dados sem sair da conversa.
-app.patch('/vantoro/cliente/:id', rotaVantoro(async (req) =>
-  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/editar`,
-    { method: 'PATCH', body: JSON.stringify(req.body || {}) })));
+app.patch('/vantoro/cliente/:id', rotaVantoro(async (req, usuario) => {
+  const id = encodeURIComponent(req.params.id);
+  const mudou = req.body || {};
+  // O "antes", lido agora. Best-effort: se o Vantoro não responder a esta,
+  // a edição segue e o histórico fica sem o valor anterior.
+  let anterior = {};
+  try {
+    const atual = await chamarVantoro(`/clientes/${id}`);
+    if (atual.status === 200 && atual.corpo && atual.corpo.cliente) anterior = atual.corpo.cliente;
+  } catch (_) { /* segue sem o "antes" */ }
+
+  const r = await chamarVantoro(`/clientes/${id}/editar`,
+    { method: 'PATCH', body: JSON.stringify(mudou) });
+  if (r.status === 200 && r.corpo && r.corpo.ok) {
+    await registrarEdicaoDeCadastro(req.params.id, mudou, anterior, usuario);
+  }
+  return r;
+}));
 
 // Manda para o cadastro um arquivo recebido no WhatsApp.
 app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
