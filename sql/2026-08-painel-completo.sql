@@ -365,9 +365,9 @@ begin
             select a.id from advogados a where a.departamento_id = p_departamento))
   ),
   -- As de origem desconhecida ficam fora de `base` (não são nem recebida nem
-  -- enviada), e por isso são contadas à parte. Direto de `mensagens`: passá-las
-  -- pela view seria resolver "quem enviou" para uma linha que nem entra em
-  -- nenhuma das contas.
+  -- enviada), e por isso são contadas à parte — mas com os MESMOS recortes de
+  -- lugar, senão elas apareceriam num painel filtrado por um telefone onde
+  -- nunca estiveram.
   outras_cte as (
     select count(*) as n from painel_mensagens
     where origem not in ('contato', 'advogado')
