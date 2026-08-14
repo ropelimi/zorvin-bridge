@@ -78,12 +78,25 @@
 -- que a pessoa não pode abrir.
 
 -- ------------------------------------------------------------------
---  0. O ÍNDICE
+--  0. OS ÍNDICES
 -- ------------------------------------------------------------------
 -- A conta percorre as mensagens de cada conversa EM ORDEM DE TEMPO, para achar
 -- os silêncios de 6 horas. Sem este índice o banco ordena tudo a cada abertura
 -- da tela.
 create index if not exists mensagens_conversa_tempo on mensagens (conversa_id, criado_em);
+
+-- Para achar a mensagem mais antiga da base sem varrer a base.
+create index if not exists mensagens_criado_em on mensagens (criado_em);
+
+-- PARA A REGRA "O MESMO RÓTULO É A MESMA PESSOA".
+-- Ela é de propósito SEM corte de data — o vínculo entre um rótulo e uma pessoa
+-- vale para sempre —, então ela varreria a tabela inteira toda vez. Este índice
+-- parcial cobre exatamente as duas colunas e exatamente as linhas que ela olha
+-- (as mensagens que já saem identificadas, de agosto/2026 em diante), e o banco
+-- resolve tudo dentro dele, sem tocar na tabela.
+create index if not exists mensagens_rotulo_identificado
+  on mensagens (enviado_por, enviado_por_id)
+  where origem = 'advogado' and enviado_por_id is not null;
 
 -- ------------------------------------------------------------------
 --  1. O DE-PARA (repetido aqui para este arquivo bastar sozinho)
@@ -240,9 +253,11 @@ declare
   v_quem    uuid := p_quem;
   v_notas   bigint := 0;
   v_primeira timestamptz;
+  v_leitura timestamptz;   -- de onde as mensagens começam a ser lidas
   v_dias    numeric;
   v_passo   text;
   v_ant     timestamptz;   -- início do período ANTERIOR, do mesmo tamanho
+  v_tem_antes boolean;     -- há histórico bastante para comparar?
   v_saida   jsonb;
 begin
   -- QUEM NÃO É ADMINISTRADOR NÃO ESCOLHE. Aqui, e não no navegador: recorte que
@@ -262,11 +277,22 @@ begin
     v_fuso := 'America/Campo_Grande';
   end if;
 
-  select min(criado_em) into v_primeira from painel_mensagens;
+  -- Direto de `mensagens`, e não da view: a view resolve quem enviou cada
+  -- mensagem, e pedir a ela só a data mais antiga fazia esse trabalho todo
+  -- para jogar fora. Com o índice em `criado_em`, isto é uma leitura só.
+  select min(criado_em) into v_primeira from mensagens;
   v_desde := coalesce(p_desde, v_primeira, v_ate);
   if v_desde > v_ate then v_desde := v_ate; end if;
   v_ant := v_desde - (v_ate - v_desde);
 
+  -- SEM PERÍODO ANTERIOR, NÃO SE LÊ O PERÍODO ANTERIOR. Não há com o que
+  -- comparar quando o período começa antes da primeira mensagem da base, e ler
+  -- para trás mesmo assim é dobrar o trabalho para devolver zero.
+  --
+  -- E há um teto: comparar UM ANO com o ano anterior obrigaria a ler dois anos
+  -- de mensagens para pôr uma setinha num cartão. Acima de 92 dias a comparação
+  -- não sai — e o que ela informaria, nesse tamanho, ninguém usa para decidir
+  -- nada.
   -- O PASSO DO GRÁFICO DE PERÍODO. Em "Tudo", com dois anos de histórico, um
   -- ponto por dia dá 700 colunas de 1 pixel — que não é um gráfico, é uma
   -- textura. Passado o tamanho, o ponto vira semana e depois mês.
@@ -274,6 +300,39 @@ begin
   v_passo := case when v_dias <=  62 then 'day'
                   when v_dias <= 400 then 'week'
                   else 'month' end;
+
+  v_tem_antes := p_desde is not null
+             and v_dias <= 92
+             and v_ant >= coalesce(v_primeira, v_ate);
+  if not v_tem_antes then v_ant := v_desde; end if;
+
+  -- ------------------------------------------------------------------
+  --  ATÉ ONDE É PRECISO LER PARA TRÁS
+  -- ------------------------------------------------------------------
+  -- A primeira versão lia a tabela INTEIRA a cada abertura da tela, com a
+  -- justificativa de que os silêncios de 6 horas só aparecem olhando a conversa
+  -- inteira. A justificativa estava errada, e o preço foi a tela morrendo com
+  -- "canceling statement due to statement timeout": a API do Supabase corta a
+  -- consulta em 8 segundos.
+  --
+  -- Basta ler a partir de UMA JANELA antes do começo do período, e o motivo é
+  -- exato, não aproximado:
+  --
+  --   Se a primeira mensagem de uma conversa dentro da leitura está em t, e
+  --   t >= o começo do período, então não houve mensagem nenhuma entre
+  --   (começo - janela) e t. O silêncio antes de t é, portanto, de pelo menos
+  --   uma janela — e t abre um atendimento DE VERDADE, não por falta de
+  --   informação.
+  --
+  --   E se a primeira mensagem lida está ANTES do começo do período, o
+  --   atendimento que ela abre — certo ou partido ao meio — começa antes do
+  --   período e sai da conta de qualquer forma, que é o que aconteceria com o
+  --   atendimento verdadeiro também.
+  --
+  -- Vale a mesma coisa para o período anterior, por isso a leitura recua até
+  -- ele. Em "Tudo" não há o que recortar: v_desde já é a primeira mensagem.
+  v_leitura := least(v_desde, v_ant) - v_janela;
+
 
   -- As notas nunca saíram daqui: não são mensagem, e por isso ficam num número
   -- à parte em vez de engordar as enviadas.
@@ -291,13 +350,21 @@ begin
   end if;
 
   with
-  -- Sem corte de data: os silêncios de 6 horas só aparecem olhando a conversa
-  -- inteira. Cortando antes, a primeira mensagem de todo período pareceria um
-  -- atendimento novo.
+  -- O corte é `v_leitura`, e não o começo do período: ver o raciocínio acima.
   base as (
     select conversa_id, advogado_id, criado_em, origem, rotulo, quem_id, quem_nome, e_aparelho, e_rotulo
     from painel_mensagens
     where origem in ('contato', 'advogado')
+      and criado_em >= v_leitura
+  ),
+  -- As de origem desconhecida ficam fora de `base` (não são nem recebida nem
+  -- enviada), e por isso são contadas à parte. Direto de `mensagens`: passá-las
+  -- pela view seria resolver "quem enviou" para uma linha que nem entra em
+  -- nenhuma das contas.
+  outras_cte as (
+    select count(*) as n from mensagens
+    where origem not in ('contato', 'advogado')
+      and criado_em >= v_desde and criado_em <= v_ate
   ),
   marcada as (
     select b.*,
@@ -576,7 +643,7 @@ begin
       'atendimentos', (select atendimentos from anteriores),
       'enviadas',     (select count(*) from msg_ant where origem = 'advogado'),
       'recebidas',    (select count(*) from msg_ant where origem = 'contato'),
-      'existe',       (v_ant >= coalesce(v_primeira, v_ate))
+      'existe',       v_tem_antes
     ),
     'por_periodo',   coalesce((select jsonb_agg(to_jsonb(s)) from serie s), '[]'::jsonb),
     'por_hora',      coalesce((select jsonb_agg(to_jsonb(m)) from mapa m), '[]'::jsonb),
@@ -586,9 +653,7 @@ begin
     'aparelho',      (select count(*) from msg where origem = 'advogado' and e_aparelho),
     'sem_id',        (select count(*) from msg
                        where origem = 'advogado' and not e_aparelho and not e_rotulo and quem_id is null),
-    'outras',        (select count(*) from painel_mensagens
-                       where origem not in ('contato', 'advogado')
-                         and criado_em >= v_desde and criado_em <= v_ate)
+    'outras',        (select n from outras_cte)
   ) into v_saida;
 
   return v_saida;
