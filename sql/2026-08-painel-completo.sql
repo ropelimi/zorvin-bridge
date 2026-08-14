@@ -285,6 +285,14 @@ begin
   if v_desde > v_ate then v_desde := v_ate; end if;
   v_ant := v_desde - (v_ate - v_desde);
 
+  -- O PASSO DO GRÁFICO DE PERÍODO. Um ano com um ponto por dia dá 365 colunas
+  -- de 1 pixel — que não é um gráfico, é uma textura. Passado o tamanho, o
+  -- ponto vira semana e depois mês.
+  v_dias := greatest(1, extract(epoch from (v_ate - v_desde)) / 86400.0);
+  v_passo := case when v_dias <=  62 then 'day'
+                  when v_dias <= 400 then 'week'
+                  else 'month' end;
+
   -- SEM PERÍODO ANTERIOR, NÃO SE LÊ O PERÍODO ANTERIOR. Não há com o que
   -- comparar quando o período começa antes da primeira mensagem da base, e ler
   -- para trás mesmo assim é dobrar o trabalho para devolver zero.
@@ -293,14 +301,6 @@ begin
   -- de mensagens para pôr uma setinha num cartão. Acima de 92 dias a comparação
   -- não sai — e o que ela informaria, nesse tamanho, ninguém usa para decidir
   -- nada.
-  -- O PASSO DO GRÁFICO DE PERÍODO. Em "Tudo", com dois anos de histórico, um
-  -- ponto por dia dá 700 colunas de 1 pixel — que não é um gráfico, é uma
-  -- textura. Passado o tamanho, o ponto vira semana e depois mês.
-  v_dias := greatest(1, extract(epoch from (v_ate - v_desde)) / 86400.0);
-  v_passo := case when v_dias <=  62 then 'day'
-                  when v_dias <= 400 then 'week'
-                  else 'month' end;
-
   v_tem_antes := p_desde is not null
              and v_dias <= 92
              and v_ant >= coalesce(v_primeira, v_ate);
@@ -330,9 +330,8 @@ begin
   --   atendimento verdadeiro também.
   --
   -- Vale a mesma coisa para o período anterior, por isso a leitura recua até
-  -- ele. Em "Tudo" não há o que recortar: v_desde já é a primeira mensagem.
+  -- ele quando ele existe.
   v_leitura := least(v_desde, v_ant) - v_janela;
-
 
   -- As notas nunca saíram daqui: não são mensagem, e por isso ficam num número
   -- à parte em vez de engordar as enviadas.
