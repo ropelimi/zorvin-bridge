@@ -14,8 +14,8 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar } = {}) {
-  const uaz = await subirFalsaUazapi();
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {} } = {}) {
+  const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
@@ -437,6 +437,214 @@ const mensagemDaUazapi = (texto, id) => ({
 
     await t.parar();
   }
+}
+
+// ==================================================================
+//  7. A IMPORTAÇÃO DE HISTÓRICO
+// ==================================================================
+//
+// Quando um número entra no Zorvin, a conversa começa vazia: tudo o que o
+// cliente e o escritório trocaram antes fica só no celular. A importação puxa
+// esse passado da Uazapi. É uso manual e administrativo, e a única resposta que
+// ela dá é uma frase com um número — então o número precisa ser verdade.
+{
+  console.log("\n7. A importação de histórico");
+
+  const ONTEM = Date.now() - 24 * 60 * 60 * 1000;
+  const historico = [
+    { messageid: "h-1", fromMe: false, text: "Bom dia, doutor",
+      messageTimestamp: Math.floor(ONTEM / 1000), messageType: "conversation" },
+    { messageid: "h-2", fromMe: true, text: "Bom dia! Pode falar",
+      messageTimestamp: Math.floor((ONTEM + 60000) / 1000), messageType: "conversation" },
+    { messageid: "h-3", fromMe: false, caption: "Segue o documento",
+      messageTimestamp: Math.floor((ONTEM + 120000) / 1000), messageType: "image",
+      fileURL: "https://mmg.whatsapp.net/expira-em-pouco-tempo.enc" },
+  ];
+
+  const comHistorico = (extra = {}) => ({
+    uazapi: { historico },
+    tabelas: {
+      contatos: [], conversas: [], mensagens: [],
+      // Uma conversa que já existe, com mensagem nova por ler.
+      ...(extra.tabelas || {}),
+    },
+    ...(extra.quebrar ? { quebrar: extra.quebrar } : {}),
+  });
+
+  const importar = (porta, extra = "") =>
+    fetch(`http://127.0.0.1:${porta}/importar-historico?token=senha-do-escritorio`
+          + `&advogado=${TELEFONE.numero}&contato=5511999998888${extra}`);
+
+  // ---- 7a. traz o passado, com a data do passado ----
+  {
+    const t = await subirTudo({ IMPORT_TOKEN: "senha-do-escritorio" }, comHistorico());
+    const r = await importar(t.porta);
+    const frase = await r.text();
+    ok("a importação responde 200", r.status === 200, `veio ${r.status}: ${frase.slice(0, 200)}`);
+    ok("traz as três mensagens do histórico", t.sb.dados.mensagens.length === 3,
+       `vieram ${t.sb.dados.mensagens.length}`);
+
+    const primeira = t.sb.dados.mensagens.find((m) => m.id_uazapi === "h-1");
+    ok("com o horário original, e não a hora da importação",
+       primeira && new Date(primeira.criado_em).getTime() < Date.now() - 20 * 60 * 60 * 1000,
+       primeira && primeira.criado_em);
+    ok("quem mandou cada uma é preservado",
+       t.sb.dados.mensagens.find((m) => m.id_uazapi === "h-2")?.origem === "advogado");
+
+    // A FOTO DO HISTÓRICO.
+    //
+    // O endereço que a Uazapi devolve aponta para o servidor do WhatsApp, é
+    // temporário e vem cifrado. Guardá-lo na mensagem faz a foto aparecer hoje
+    // — se aparecer — e virar bolha quebrada depois, sem nada explicando.
+    // O caminho do webhook já baixa o arquivo e guarda no Storage; a
+    // importação precisa fazer o mesmo, senão importa fotos que não abrem.
+    const foto = t.sb.dados.mensagens.find((m) => m.id_uazapi === "h-3");
+    ok("a foto do histórico é guardada no Storage, não deixada no link que expira",
+       foto && String(foto.midia_url || "").includes("/storage/"),
+       `ficou apontando para: ${foto && foto.midia_url}`);
+
+    // ---- 7b. rodar de novo não duplica — e não mente no número ----
+    const r2 = await importar(t.porta);
+    const frase2 = await r2.text();
+    ok("rodar de novo não duplica nada", t.sb.dados.mensagens.length === 3,
+       `ficaram ${t.sb.dados.mensagens.length}`);
+    ok("e a frase final não diz que importou o que já estava lá",
+       /Importei 0 /.test(frase2) || /nenhuma mensagem nova/i.test(frase2),
+       `disse: "${frase2.trim()}"`);
+
+    await t.parar();
+  }
+
+  // ---- 7c. quando o banco recusa, a resposta precisa ser compreensível ----
+  //
+  // Quem roda isto é uma pessoa, num navegador, e o que ela recebe é uma frase.
+  // "Cannot read properties of null (reading 'id')" não é uma frase — é o
+  // sintoma de um erro que não foi conferido, mostrado a quem não pode fazer
+  // nada com ele.
+  {
+    const t = await subirTudo({ IMPORT_TOKEN: "senha-do-escritorio" }, comHistorico({
+      quebrar: (metodo, tabela) =>
+        (metodo === "POST" && tabela === "contatos") ? "o banco recusou" : null,
+    }));
+    const r = await importar(t.porta);
+    const frase = await r.text();
+    ok("banco recusando dá uma frase em português, não o erro cru",
+       !/Cannot read|undefined|null \(reading/.test(frase),
+       `respondeu: "${frase.trim().slice(0, 160)}"`);
+    await t.parar();
+  }
+
+  // ---- 7d. importar o passado não apaga o aviso de mensagem nova ----
+  {
+    const t = await subirTudo({ IMPORT_TOKEN: "senha-do-escritorio" }, {
+      uazapi: { historico },
+      tabelas: {
+        contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+        conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 3,
+                      ultima_atividade: new Date().toISOString() }],
+        mensagens: [{ id: 90, conversa_id: 1, origem: "contato", tipo: "texto",
+                      texto: "Chegou agora, ninguém leu", id_uazapi: "nova-1",
+                      criado_em: new Date().toISOString() }],
+      },
+    });
+    await importar(t.porta);
+    const conversa = t.sb.dados.conversas.find((c) => c.id === 1);
+    ok("importar o passado não zera as mensagens por ler",
+       conversa && conversa.nao_lidas === 3,
+       `o selo foi para ${conversa && conversa.nao_lidas} — havia 3 mensagens novas por ler, `
+       + "e nenhuma delas foi lida por causa de uma importação de histórico");
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  8. A MÍDIA QUE CHEGA
+// ==================================================================
+{
+  console.log("\n8. A mídia que chega");
+
+  const fotoDaUazapi = (id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageType: "image", type: "media", mediaType: "image",
+      caption: "olha só", messageTimestamp: Date.now(), senderName: "Cliente Teste",
+      content: { mimetype: "image/jpeg", JPEGThumbnail: "bWluaWF0dXJh" },
+    },
+  });
+
+  // A rota que funciona nesta "versão" da Uazapi é a TERCEIRA da lista que a
+  // ponte tenta. É o pior caso, e é o caso que revela o desperdício.
+  const t = await subirTudo({}, { uazapi: { rotaDeDownload: "/downloadmedia" } });
+
+  for (const id of ["f-1", "f-2", "f-3"]) {
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fotoDaUazapi(id)),
+    });
+    await espera(900);
+  }
+
+  ok("a foto vira mensagem", t.sb.dados.mensagens.length === 3,
+     `vieram ${t.sb.dados.mensagens.length}`);
+  ok("e o arquivo é guardado no Storage", t.sb.arquivos.size === 3,
+     `foram ${t.sb.arquivos.size} arquivo(s)`);
+  ok("a mensagem aponta para o Storage, e não para a miniatura",
+     t.sb.dados.mensagens.every((m) => String(m.midia_url || "").includes("/storage/")),
+     JSON.stringify(t.sb.dados.mensagens.map((m) => String(m.midia_url || "").slice(0, 40))));
+
+  // O DESPERDÍCIO.
+  //
+  // A ponte tenta três rotas de download, sempre na mesma ordem, e nunca
+  // guarda qual funcionou. Se a que serve é a terceira, cada foto que chega
+  // custa duas tentativas jogadas fora — e uma delas pode esperar 20 segundos
+  // se o servidor não responder, com a mensagem parada até lá.
+  const perdidas = t.uaz.recebidas.filter(
+    (c) => c.caminho === "/message/downloadmedia" || c.caminho === "/message/download").length;
+  console.log(`     3 fotos → ${perdidas} tentativa(s) de rota jogada(s) fora`);
+  ok("a ponte lembra qual rota de download funciona",
+     perdidas <= 2,
+     `foram ${perdidas} para 3 fotos — a rota certa é descoberta na primeira e `
+     + "não deveria ser procurada de novo a cada mídia");
+
+  // O SIGILO NO LOG.
+  //
+  // Havia uma linha de diagnóstico que despejava o conteúdo de toda mídia
+  // recebida no log — legenda, nome de arquivo, miniatura. Num escritório de
+  // advocacia, log é lugar onde muita gente entra e nada se apaga.
+  ok("o conteúdo da mídia não é despejado no log quando dá tudo certo",
+     !t.registro.join("").includes("Mídia recebida (content)"),
+     "o log traz o conteúdo da mensagem do cliente");
+
+  await t.parar();
+}
+
+// ---- 8b. download impossível não pode perder a mensagem ----
+{
+  const t = await subirTudo({}, { uazapi: { rotaDeDownload: "/nenhuma" } });
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      EventType: "messages", owner: TELEFONE.numero,
+      message: {
+        id: "sem-download", messageid: "sem-download",
+        chatid: "5511999998888@s.whatsapp.net", sender: "5511999998888@s.whatsapp.net",
+        fromMe: false, messageType: "image", mediaType: "image", caption: "tenta essa",
+        messageTimestamp: Date.now(), senderName: "Cliente",
+        content: { mimetype: "image/jpeg", JPEGThumbnail: "bWluaWF0dXJh" },
+      },
+    }),
+  });
+  await espera(1200);
+  const m = t.sb.dados.mensagens[0];
+  ok("download que falha não faz a mensagem sumir", t.sb.dados.mensagens.length === 1,
+     `ficaram ${t.sb.dados.mensagens.length}`);
+  ok("e sobra a miniatura para a bolha não nascer vazia",
+     m && String(m.midia_url || "").startsWith("data:image/jpeg"),
+     m && String(m.midia_url || "").slice(0, 40));
+  await t.parar();
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

@@ -44,3 +44,5 @@ seção 6 leva cerca de 45 segundos.
 | **rotas protegidas** | sem login, com sessão inválida, e a importação de histórico sem senha |
 | **sessão** | seis chamadas seguidas conferem a sessão uma vez só, e sessão recusada não fica lembrada como recusada |
 | **permissões** | a cópia do Vantoro chega a quem está depois da milésima linha; telefone escrito com parênteses e traço encontra o número; "ninguém definiu" não vira "não vê nada"; permissão que não mudou **não é reescrita**; gravação que falha não deixa ninguém sem ver nada; e o custo da rodada não cresce por pessoa |
+| **importação de histórico** | traz o passado com a data do passado; a foto vai para o Storage e não fica no link que expira; rodar de novo não duplica **nem mente no número**; banco recusando dá uma frase em português; e importar o passado não apaga o aviso de mensagem por ler |
+| **mídia recebida** | a foto vira mensagem e arquivo no Storage; a rota de download que serve é lembrada em vez de reprocurada a cada mídia; o conteúdo do cliente não vai para o log quando dá certo; e download impossível deixa a miniatura, nunca perde a mensagem |
