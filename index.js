@@ -376,11 +376,29 @@ app.get('/importar-historico', async (req, res) => {
     if (!adv || !adv.token) return res.status(404).send('Advogado não encontrado (ou sem token) no banco.');
 
     // Garante contato e conversa.
-    const { data: contUp } = await supabase.from('contatos')
+    //
+    // O erro destas duas era jogado fora, e o `contUp.id` da linha seguinte
+    // estourava em cima do nulo. Quem roda isto é uma pessoa, num navegador, e
+    // o que ela recebia era "Cannot read properties of null (reading 'id')" —
+    // o sintoma de um erro que ninguém conferiu, mostrado a quem não pode
+    // fazer nada com ele.
+    const { data: contUp, error: erroContato } = await supabase.from('contatos')
       .upsert({ numero: contatoNumero }, { onConflict: 'numero' }).select('id').single();
-    const { data: conv } = await supabase.from('conversas')
+    if (erroContato || !contUp) {
+      console.error('Histórico: não consegui garantir o contato —', erroContato && erroContato.message);
+      return res.status(502).send(
+        'Não consegui preparar o contato no banco, então parei antes de importar qualquer coisa. '
+        + 'Nada foi alterado. Tente de novo em alguns minutos.');
+    }
+    const { data: conv, error: erroConversa } = await supabase.from('conversas')
       .upsert({ advogado_id: adv.id, contato_id: contUp.id }, { onConflict: 'advogado_id,contato_id' })
       .select('id').single();
+    if (erroConversa || !conv) {
+      console.error('Histórico: não consegui garantir a conversa —', erroConversa && erroConversa.message);
+      return res.status(502).send(
+        'Não consegui preparar a conversa no banco, então parei antes de importar qualquer coisa. '
+        + 'Nada foi alterado. Tente de novo em alguns minutos.');
+    }
 
     const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
     const PAG = 100;
@@ -407,12 +425,45 @@ app.get('/importar-historico', async (req, res) => {
       if (tent && tent.length) { chatid = alt; primeira = tent; }
     }
 
-    let importadas = 0, vistas = 0, offset = 0;
+    let importadas = 0, vistas = 0, offset = 0, comArquivo = 0, semArquivo = 0;
     let pagina = primeira || [];
     while (pagina && pagina.length && vistas < limiteTotal) {
-      for (const m of pagina) {
-        const linha = mapearMensagemHistorico(m, conv.id);
-        if (!linha) continue;
+      // O QUE JÁ ESTÁ AQUI.
+      //
+      // A gravação ignora repetida em silêncio (é o que torna seguro rodar de
+      // novo), então "não deu erro" NÃO quer dizer "entrou". Contando assim, a
+      // segunda execução anunciava "Importei 500 mensagens" tendo importado
+      // zero — e esse número é a única resposta que a tela dá.
+      //
+      // Saber de antemão o que já existe serve para duas coisas: contar a
+      // verdade, e não baixar de novo as fotos que já estão guardadas.
+      const linhas = pagina.map((m) => ({ m, linha: mapearMensagemHistorico(m, conv.id) }))
+                           .filter((x) => x.linha);
+      const idsDaPagina = linhas.map((x) => x.linha.id_uazapi);
+      const conhecidas = new Set();
+      if (idsDaPagina.length) {
+        const { data: jaTem } = await supabase.from('mensagens')
+          .select('id_uazapi').in('id_uazapi', idsDaPagina);
+        for (const x of jaTem || []) conhecidas.add(x.id_uazapi);
+      }
+
+      for (const { m, linha } of linhas) {
+        if (conhecidas.has(linha.id_uazapi)) continue;
+
+        // A FOTO DO HISTÓRICO PRECISA SER BAIXADA, IGUAL À QUE CHEGA AGORA.
+        //
+        // O endereço que a Uazapi devolve aponta para o servidor do WhatsApp:
+        // é temporário e vem cifrado. Guardá-lo na mensagem importa uma bolha
+        // que não abre — hoje ou daqui a alguns dias —, e nada na tela
+        // explicaria por quê. O caminho do webhook já copia o arquivo para o
+        // Storage; aqui faltava fazer o mesmo.
+        if (linha.tipo !== 'texto') {
+          const guardada = await baixarMidiaRecebida(
+            servidor, adv.token, { messageid: linha.id_uazapi, content: m.content }, linha.midia_mime);
+          if (guardada) { linha.midia_url = guardada; comArquivo++; }
+          else semArquivo++;
+        }
+
         const erro = await salvarMensagem(linha, null);
         if (!erro) importadas++;
       }
@@ -422,8 +473,16 @@ app.get('/importar-historico', async (req, res) => {
       pagina = await buscarPagina(chatid, offset);
     }
 
-    // Conserta a conversa: ordena pela mensagem mais recente e zera "não lidas"
-    // (histórico importado não é mensagem nova).
+    // Conserta a prévia e a ordem da conversa: a mensagem mais recente pode ter
+    // mudado se o histórico trouxe algo posterior ao que havia aqui.
+    //
+    // O `nao_lidas: 0` que existia aqui saiu. A intenção era "histórico
+    // importado não é mensagem nova" — e não é mesmo: esta rotina grava direto
+    // em `mensagens`, sem passar pela contagem que o webhook faz, então ela
+    // nunca somou nada ao selo. Zerar não corrigia um efeito colateral: apagava
+    // aviso de mensagem de verdade, ainda por ler, que nada tinha a ver com a
+    // importação. Quem importasse o passado de um cliente marcava como lidas as
+    // mensagens que ele mandou hoje de manhã.
     const { data: ult } = await supabase.from('mensagens')
       .select('texto, tipo, criado_em').eq('conversa_id', conv.id)
       .order('criado_em', { ascending: false }).limit(1);
@@ -432,14 +491,20 @@ app.get('/importar-historico', async (req, res) => {
       await supabase.from('conversas').update({
         ultima_mensagem: u.texto || previaMidiaHist(u.tipo) || '[mídia]',
         ultima_atividade: u.criado_em,
-        nao_lidas: 0,
       }).eq('id', conv.id);
     }
 
-    console.log(`Histórico: ${importadas} importadas de ${vistas} vistas (contato ${contatoNumero}).`);
+    console.log(`Histórico: ${importadas} novas de ${vistas} vistas (contato ${contatoNumero}).`);
+    const sobreArquivos = comArquivo || semArquivo
+      ? ` Guardei ${comArquivo} arquivo(s)`
+        + (semArquivo ? `; ${semArquivo} não deu(ram) para baixar da Uazapi.` : '.')
+      : '';
     return res.status(200).send(
-      `Pronto! Importei ${importadas} mensagem(ns) do contato ${contatoNumero} ` +
-      `(vistas ${vistas}). Abra o painel para conferir.`
+      importadas === 0
+        ? `Pronto! Nenhuma mensagem nova: as ${vistas} que a Uazapi tinha do contato `
+          + `${contatoNumero} já estavam aqui.${sobreArquivos}`
+        : `Pronto! Importei ${importadas} mensagem(ns) do contato ${contatoNumero} `
+          + `(vistas ${vistas}).${sobreArquivos} Abra o painel para conferir.`
     );
   } catch (e) {
     console.error('Erro ao importar histórico:', e.message);
@@ -942,13 +1007,33 @@ async function tratarPresenca(body, evento) {
 //  no log a estrutura real, para ajustar com precisão depois. Nada
 //  quebra se falhar.
 // ------------------------------------------------------------
+// A ROTA DE DOWNLOAD QUE SERVE NESTE SERVIDOR.
+//
+// As três rotas abaixo são a mesma coisa em versões diferentes da Uazapi: cada
+// servidor atende uma. A ponte tentava as três, sempre na mesma ordem, e nunca
+// guardava qual tinha funcionado. Onde a que serve é a última, toda foto que
+// chega custa duas tentativas jogadas fora — e uma delas pode ficar 20 segundos
+// esperando resposta, com a mensagem do cliente parada até lá.
+//
+// Um servidor não troca de versão entre uma foto e a seguinte. Descobre-se uma
+// vez e lembra-se. Se um dia a lembrada parar de servir, a busca recomeça
+// sozinha pelas três.
+const ROTAS_DE_DOWNLOAD = ['/message/downloadmedia', '/message/download', '/downloadmedia'];
+const rotaQueServe = new Map();
+
 async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
   try {
-    try { console.log('Mídia recebida (content):', JSON.stringify(m.content).slice(0, 600)); } catch (_) { /* ignora */ }
     if (!token || !m.messageid) return null;
 
+    // A lembrada primeiro; as outras continuam na fila, para o dia em que ela
+    // deixar de responder.
+    const lembrada = rotaQueServe.get(servidor);
+    const ordem = lembrada
+      ? [lembrada, ...ROTAS_DE_DOWNLOAD.filter((r) => r !== lembrada)]
+      : ROTAS_DE_DOWNLOAD;
+
     let dados = null;
-    for (const rota of ['/message/downloadmedia', '/message/download', '/downloadmedia']) {
+    for (const rota of ordem) {
       try {
         const r = await fetchComTimeout(`${servidor}${rota}`, {
           method: 'POST',
@@ -957,13 +1042,32 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
         }, 20000);
         if (r.ok) {
           dados = await r.json().catch(() => null);
-          if (dados) { console.log(`downloadmedia OK via ${rota}`); break; }
-        } else {
-          console.log(`downloadmedia ${rota} -> ${r.status}`);
+          if (dados) {
+            if (lembrada !== rota) {
+              console.log(`downloadmedia: este servidor atende por ${rota}.`);
+              rotaQueServe.set(servidor, rota);
+            }
+            break;
+          }
+        } else if (rota === lembrada) {
+          // A que servia parou de servir: esquece e deixa as outras tentarem.
+          rotaQueServe.delete(servidor);
         }
-      } catch (e) { console.log(`downloadmedia ${rota} erro: ${e.message}`); }
+      } catch (e) {
+        if (rota === lembrada) rotaQueServe.delete(servidor);
+        console.log(`downloadmedia ${rota} erro: ${e.message}`);
+      }
     }
-    if (!dados) return null;
+    if (!dados) {
+      // O conteúdo da mensagem só vai para o log QUANDO DÁ ERRADO, que é
+      // quando ele serve para alguma coisa. Antes ia sempre — legenda, nome de
+      // arquivo, miniatura, de toda mídia recebida. Num escritório de
+      // advocacia, log é lugar onde muita gente entra e nada se apaga.
+      try {
+        console.log('Mídia que não deu para baixar (content):', JSON.stringify(m.content).slice(0, 600));
+      } catch (_) { /* ignora */ }
+      return null;
+    }
 
     const mime = dados.mimetype || dados.mime || mimeInformado || 'application/octet-stream';
     let bytes = null;

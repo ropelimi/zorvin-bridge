@@ -277,15 +277,50 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {})
   });
 }
 
-/** Uma Uazapi de mentira: aceita tudo e anota o que recebeu. */
-export function subirFalsaUazapi({ porta = 0 } = {}) {
+// Uma Uazapi de mentira: aceita tudo e anota o que recebeu.
+//
+// `historico` é o que ela devolve em /message/find, paginado como a de verdade.
+// `sufixo` é a terminação de chatid que ela reconhece — a Uazapi varia entre
+// `@s.whatsapp.net` e `@c.us` conforme a versão, e a ponte descobre qual é
+// tentando as duas.
+//
+// `rotaDeDownload` é a única rota de download que responde; as outras devolvem
+// 404, como as que não existem naquela versão. É por isso que dá para MEDIR
+// quantas tentativas perdidas a ponte faz por mídia.
+export function subirFalsaUazapi({
+  porta = 0, historico = [], sufixo = "@s.whatsapp.net",
+  rotaDeDownload = "/message/downloadmedia", arquivo = null,
+} = {}) {
   const recebidas = [];
+  const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
   const servidor = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://x");
     let corpo = "";
     for await (const p of req) corpo += p;
-    recebidas.push({ caminho: req.url, corpo: (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })() });
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ id: "uazapi-" + recebidas.length, messageid: "uazapi-" + recebidas.length }));
+    const json = (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })();
+    recebidas.push({ caminho: req.url, corpo: json });
+    const responder = (codigo, obj) => {
+      res.writeHead(codigo, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(obj));
+    };
+
+    if (url.pathname === "/message/find") {
+      const pedido = json || {};
+      if (!String(pedido.chatid || "").endsWith(sufixo)) return responder(200, { messages: [] });
+      const de = Number(pedido.offset || 0);
+      const quantas = Number(pedido.limit || 100);
+      return responder(200, { messages: historico.slice(de, de + quantas) });
+    }
+
+    if (ROTAS_DE_DOWNLOAD.includes(url.pathname)) {
+      if (url.pathname !== rotaDeDownload) return responder(404, { erro: "não existe nesta versão" });
+      return responder(200, {
+        mimetype: "image/jpeg",
+        file: (arquivo || Buffer.from("uma-foto-de-mentira".repeat(20))).toString("base64"),
+      });
+    }
+
+    responder(200, { id: "uazapi-" + recebidas.length, messageid: "uazapi-" + recebidas.length });
   });
   return new Promise((resolve) => {
     servidor.listen(porta, "127.0.0.1", () => {
