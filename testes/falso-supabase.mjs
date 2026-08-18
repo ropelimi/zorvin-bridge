@@ -51,7 +51,20 @@ function lerSelect(sel, esquema) {
   return { embutidos };
 }
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar } = {}) {
+// O TETO DE MIL LINHAS.
+//
+// O PostgREST devolve no máximo 1000 linhas por consulta e NÃO avisa: a
+// resposta vem com 1000 linhas e cara de resposta inteira. Quem escreveu
+// `select(...)` sem paginar acha que leu tudo, e o que passar de mil some em
+// silêncio. É o defeito que mais se repetiu neste projeto — apareceu no Painel,
+// na busca, na lista de conversas, nos selos de não lidas, na agenda.
+//
+// Um falso que devolve tudo esconde justamente esse defeito: o teste passa aqui
+// e quebra em produção, no dia em que a tabela cresce. Então este falso também
+// corta em mil.
+const TETO_POSTGREST = 1000;
+
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -130,6 +143,17 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       if (!dados[tabela]) dados[tabela] = [];
       const linhas = dados[tabela];
 
+      // Para provar o que acontece quando UMA escrita falha no meio de uma
+      // rotina de várias. A rede cai, o banco recusa, o Supabase devolve 500 —
+      // e o que importa é o estado em que a rotina deixa os dados.
+      if (quebrar) {
+        const motivo = quebrar(req.method, tabela, url.search);
+        if (motivo) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ message: String(motivo), code: "XX000" }));
+        }
+      }
+
       const filtros = [];
       let ordem = null, limite = Infinity, deslocamento = 0, sel = "*";
       for (const [k, v] of url.searchParams.entries()) {
@@ -158,7 +182,7 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
           const cmp = x === y ? 0 : (x > y ? 1 : -1);
           return ordem.asc ? cmp : -cmp;
         });
-        saida = saida.slice(deslocamento, deslocamento + limite);
+        saida = saida.slice(deslocamento, deslocamento + Math.min(limite, TETO_POSTGREST));
         const { embutidos } = lerSelect(sel, esquema);
         if (embutidos.length) {
           saida = saida.map((l) => {
@@ -217,6 +241,36 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       resolve({
         url: `http://127.0.0.1:${servidor.address().port}`,
         dados, contas, arquivos, chamadas,
+        parar: () => new Promise((r) => servidor.close(r)),
+      });
+    });
+  });
+}
+
+// UM VANTORO DE MENTIRA — o dono da permissão.
+//
+// Quem pode ver o quê é decidido no Vantoro; a ponte só copia a decisão para
+// dentro do Zorvin. Para conferir essa cópia sem um Vantoro de verdade, basta
+// alguém que responda `/usuarios` com a mesma forma que ele responde.
+export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {}) {
+  const recebidas = [];
+  const lista = usuarios.slice();
+  const servidor = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://x");
+    let corpo = "";
+    for await (const p of req) corpo += p;
+    const json = corpo ? (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })() : null;
+    recebidas.push({ metodo: req.method, caminho: url.pathname, corpo: json });
+    if (demora) await new Promise((r) => setTimeout(r, demora));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
+    res.end(JSON.stringify({ ok: true }));
+  });
+  return new Promise((resolve) => {
+    servidor.listen(porta, "127.0.0.1", () => {
+      resolve({
+        url: `http://127.0.0.1:${servidor.address().port}`,
+        recebidas, usuarios: lista,
         parar: () => new Promise((r) => servidor.close(r)),
       });
     });

@@ -1,7 +1,7 @@
 // PROVA DA PONTE — o `index.js` de verdade, contra um Supabase e uma Uazapi
 // de mentira que falam o mesmo protocolo.
 import { spawn } from "node:child_process";
-import { subirFalsoSupabase, subirFalsaUazapi } from "./falso-supabase.mjs";
+import { subirFalsoSupabase, subirFalsaUazapi, subirFalsoVantoro } from "./falso-supabase.mjs";
 
 let falhas = 0, feitas = 0;
 const ok = (nome, cond, det = "") => {
@@ -14,15 +14,18 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar } = {}) {
   const uaz = await subirFalsaUazapi();
   TELEFONE.servidor = uaz.url;
+  const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
+    quebrar,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
       usuarios: [], contatos: [], conversas: [], mensagens: [], fila_envio: [],
       permissoes: [], conversa_tags: [], notas: [],
+      ...tabelas,
     },
     usuarios: [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
   });
@@ -30,7 +33,8 @@ async function subirTudo(env = {}) {
   const filho = spawn("node", ["../index.js"], {
     env: { ...process.env, PORT: String(porta),
            SUPABASE_URL: sb.url, SUPABASE_SERVICE_KEY: "chave-de-mentira",
-           VANTORO_API_URL: "", VANTORO_API_TOKEN: "", ...env },
+           VANTORO_API_URL: van ? van.url : "", VANTORO_API_TOKEN: van ? "tok-vantoro" : "",
+           ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const registro = [];
@@ -40,8 +44,23 @@ async function subirTudo(env = {}) {
   for (let i = 0; i < 60; i++) {
     try { await fetch(`http://127.0.0.1:${porta}/ping`); break; } catch (_) { await espera(120); }
   }
-  return { sb, uaz, porta, registro,
-           parar: async () => { filho.kill(); await sb.parar(); await uaz.parar(); } };
+  return { sb, uaz, van, porta, registro,
+           parar: async () => {
+             filho.kill(); await sb.parar(); await uaz.parar();
+             if (van) await van.parar();
+           } };
+}
+
+// A rodada de sincronização sai 20 segundos depois de a ponte subir, e daí em
+// diante a cada 3 minutos. Esperar por ela é o preço de exercitar a rotina de
+// verdade, pela porta por onde ela roda em produção — em vez de chamar uma
+// função exportada só para o teste, que provaria a função e não o sistema.
+async function esperarARodada(t) {
+  for (let i = 0; i < 120; i++) {
+    await espera(500);
+    if (t.van && t.van.recebidas.some((c) => c.caminho === "/usuarios")) { await espera(1500); return true; }
+  }
+  return false;
 }
 
 /** Uma mensagem recebida, no formato que a Uazapi manda. */
@@ -259,6 +278,165 @@ const mensagemDaUazapi = (texto, id) => ({
      ruim.status === 401 && agoraVale.status !== 401,
      `antes ${ruim.status}, depois ${agoraVale.status}`);
   await t.parar();
+}
+
+// ==================================================================
+//  6. A CÓPIA DA PERMISSÃO DO VANTORO
+// ==================================================================
+//
+// Quem pode ver o quê é decidido no Vantoro. A ponte copia essa decisão para
+// dentro do Zorvin de três em três minutos, para quem já está com o painel
+// aberto passar a enxergar sem sair e entrar de novo.
+//
+// Esta é a rotina mais delicada do arquivo: ela APAGA a permissão de alguém e
+// grava de novo. Tudo o que acontecer entre uma coisa e outra, a pessoa passa
+// sem ver conversa nenhuma.
+{
+  console.log("\n6. A cópia da permissão do Vantoro");
+
+  // 1103 pessoas espelhadas: as três primeiras logo no começo, e a quarta lá
+  // atrás, depois da milésima linha. O PostgREST corta em mil e não avisa.
+  const espelhados = [
+    { id: "ana",   login: "ana",   email: "ana@x",   nome: "Ana",   ativo: true },
+    { id: "bruno", login: "bruno", email: "bruno@x", nome: "Bruno", ativo: true },
+    { id: "carla", login: "carla", email: "carla@x", nome: "Carla", ativo: true },
+  ];
+  // Mais quarenta pessoas de verdade, para a rodada ter tamanho: é com elas que
+  // dá para ver se o custo cresce por pessoa ou não.
+  const turma = [];
+  for (let i = 0; i < 40; i++) turma.push(`turma${i}`);
+  for (const t of turma) espelhados.push({ id: t, login: t, email: `${t}@x`, ativo: true });
+  for (let i = 0; i < 1100; i++) {
+    espelhados.push({ id: `enche-${i}`, login: `enche${i}`, email: `enche${i}@x`, ativo: true });
+  }
+  espelhados.push({ id: "davi", login: "davi", email: "davi@x", nome: "Davi", ativo: true });
+
+  const doVantoro = [
+    // Departamento — o corte normal.
+    { login: "ana", email: "ana@x", nome: "Ana", admin: false,
+      zorvin_definido: true, zorvin: ["comercial"] },
+    // Só um telefone, escrito como gente escreve: com parênteses e traço.
+    { login: "bruno", email: "bruno@x", nome: "Bruno", admin: false,
+      zorvin_definido: true, zorvin_so_telefones: true,
+      zorvin_telefones: ["(67) 90000-0001"] },
+    // Ninguém definiu ainda: não pode virar "não vê nada".
+    { login: "carla", email: "carla@x", nome: "Carla", admin: false,
+      zorvin_definido: false },
+    // Igual à Ana — mas espelhada depois da milésima linha.
+    { login: "davi", email: "davi@x", nome: "Davi", admin: false,
+      zorvin_definido: true, zorvin: ["comercial"] },
+    ...turma.map((t) => ({ login: t, email: `${t}@x`, nome: t, admin: false,
+                           zorvin_definido: true, zorvin: ["comercial"] })),
+  ];
+
+  // ---- 6a. a rodada normal ----
+  {
+    const t = await subirTudo({}, {
+      vantoro: { usuarios: doVantoro },
+      tabelas: {
+        usuarios: espelhados.map((u) => ({ ...u })),
+        // A Ana JÁ TEM a permissão certa. A rodada não deveria mexer em nada.
+        // A Carla também já tem — e ninguém definiu nada para ela no Vantoro,
+        // então a rodada não pode tirar o que ela tem.
+        permissoes: [
+          { id: 1, usuario_id: "ana", departamento_id: 1 },
+          { id: 2, usuario_id: "carla", departamento_id: 1 },
+        ],
+      },
+    });
+    const chegou = await esperarARodada(t);
+    ok("a rodada de permissões acontece sozinha", chegou);
+
+    const de = (quem) => t.sb.dados.permissoes.filter((p) => p.usuario_id === quem);
+
+    ok("quem tem departamento marcado recebe o departamento",
+       de("ana").length === 1 && de("ana")[0].departamento_id === 1,
+       JSON.stringify(de("ana")));
+
+    ok("telefone escrito com parênteses e traço encontra o número",
+       de("bruno").length === 1 && de("bruno")[0].telefone_id === TELEFONE.id,
+       JSON.stringify(de("bruno")) + " — log: "
+         + (t.registro.join("").match(/não tem os telefones.*/) || [""])[0]);
+
+    ok("quem ninguém definiu no Vantoro não perde o que já tinha",
+       de("carla").length === 1,
+       `a Carla ficou com ${de("carla").length} — o Vantoro não diz nada sobre ela, `
+       + "e 'ninguém definiu' não é a mesma coisa que 'não pode ver nada'");
+
+    // O TETO DE MIL LINHAS.
+    ok("a pessoa espelhada depois da milésima linha também recebe permissão",
+       de("davi").length === 1 && de("davi")[0].departamento_id === 1,
+       `o Davi ficou com ${de("davi").length} linha(s) — se ficou com zero, `
+       + "a leitura de `usuarios` parou em mil e ele nunca é encontrado");
+
+    // A JANELA CEGA.
+    //
+    // A permissão da Ana já estava certa antes da rodada. Apagá-la e gravar a
+    // mesma coisa de volta não muda nada no fim — mas entre o apagar e o
+    // gravar ela fica sem permissão nenhuma, e quem estiver carregando as
+    // conversas nesse instante não vê nada. Três em três minutos, para cada
+    // pessoa do escritório.
+    const escritas = t.sb.chamadas.filter(
+      (c) => c.caminho === "/rest/v1/permissoes" && c.metodo !== "GET"
+             && (String(c.busca || "") + JSON.stringify(c.corpo || "")).includes("ana"));
+    ok("permissão que não mudou não é reescrita",
+       escritas.length === 0,
+       `houve ${escritas.length} escrita(s) na permissão da Ana sem nada ter mudado: `
+       + escritas.map((c) => c.metodo).join(", "));
+
+    // O CUSTO DA RODADA NÃO PODE CRESCER POR PESSOA.
+    //
+    // A lista de telefones e a de departamentos são as MESMAS para todo mundo,
+    // e a rotina relia as duas para cada pessoa: quarenta e três pessoas, mais
+    // de quarenta consultas idênticas, de três em três minutos, para sempre.
+    const releituras = t.sb.chamadas.filter(
+      (c) => c.metodo === "GET"
+             && (c.caminho === "/rest/v1/advogados" || c.caminho === "/rest/v1/departamentos")).length;
+    console.log(`     43 pessoas na rodada → ${releituras} leitura(s) de telefones/departamentos`);
+    ok("a rodada não relê telefones e departamentos uma vez por pessoa",
+       releituras <= 10,
+       `foram ${releituras} para 43 pessoas — deveria ser um punhado, não uma por pessoa`);
+
+    await t.parar();
+  }
+
+  // ---- 6b. quando a gravação falha no meio ----
+  //
+  // A rotina apaga e depois grava. Se a gravação falhar — a rede caiu, o banco
+  // recusou —, o apagar já aconteceu: a pessoa fica cega até a próxima rodada
+  // dar certo. E se o defeito for permanente (uma constraint, uma coluna que
+  // sumiu), ela fica cega para sempre, com a tela do Vantoro mostrando a
+  // permissão marcada, certinha.
+  {
+    const t = await subirTudo({}, {
+      vantoro: { usuarios: [
+        { login: "elias", email: "elias@x", nome: "Elias", admin: false,
+          zorvin_definido: true, zorvin: ["comercial", "financeiro"] },
+      ] },
+      tabelas: {
+        usuarios: [{ id: "elias", login: "elias", email: "elias@x", ativo: true }],
+        departamentos: [
+          { id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true },
+          { id: 2, nome: "Financeiro", slug: "financeiro", ordem: 2, ativo: true },
+        ],
+        permissoes: [{ id: 1, usuario_id: "elias", departamento_id: 1 }],
+      },
+      quebrar: (metodo, tabela) =>
+        (metodo === "POST" && tabela === "permissoes") ? "a rede caiu na hora de gravar" : null,
+    });
+    await esperarARodada(t);
+
+    const dele = t.sb.dados.permissoes.filter((p) => p.usuario_id === "elias");
+    ok("gravação que falha não deixa a pessoa sem ver nada",
+       dele.length >= 1,
+       `o Elias ficou com ${dele.length} permissão(ões) — ele TINHA o comercial antes, `
+       + "e a única coisa que falhou foi acrescentar o financeiro");
+    ok("e o que ele já tinha continua valendo",
+       dele.some((p) => p.departamento_id === 1),
+       JSON.stringify(dele));
+
+    await t.parar();
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
