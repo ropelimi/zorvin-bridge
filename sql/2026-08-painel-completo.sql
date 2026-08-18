@@ -239,7 +239,12 @@ create function painel_dashboard(
   p_fuso         text        default 'America/Campo_Grande',
   -- Em HORAS, e aceita fração: 0.5 é meia hora. Ver "o que é um atendimento",
   -- no alto do arquivo.
-  p_janela_horas numeric     default 6
+  p_janela_horas numeric     default 6,
+  -- OS DOIS RECORTES DE LUGAR. Um telefone, ou um departamento inteiro. Eles
+  -- entram já na leitura das mensagens: além de recortar, deixam a conta mais
+  -- leve, porque o banco lê menos.
+  p_telefone     uuid        default null,
+  p_departamento bigint      default null
 )
 returns jsonb
 language plpgsql
@@ -355,15 +360,21 @@ begin
     from painel_mensagens
     where origem in ('contato', 'advogado')
       and criado_em >= v_leitura
+      and (p_telefone is null or advogado_id = p_telefone)
+      and (p_departamento is null or advogado_id in (
+            select a.id from advogados a where a.departamento_id = p_departamento))
   ),
   -- As de origem desconhecida ficam fora de `base` (não são nem recebida nem
-  -- enviada), e por isso são contadas à parte. Direto de `mensagens`: passá-las
-  -- pela view seria resolver "quem enviou" para uma linha que nem entra em
-  -- nenhuma das contas.
+  -- enviada), e por isso são contadas à parte — mas com os MESMOS recortes de
+  -- lugar, senão elas apareceriam num painel filtrado por um telefone onde
+  -- nunca estiveram.
   outras_cte as (
-    select count(*) as n from mensagens
+    select count(*) as n from painel_mensagens
     where origem not in ('contato', 'advogado')
       and criado_em >= v_desde and criado_em <= v_ate
+      and (p_telefone is null or advogado_id = p_telefone)
+      and (p_departamento is null or advogado_id in (
+            select a.id from advogados a where a.departamento_id = p_departamento))
   ),
   marcada as (
     select b.*,
@@ -612,6 +623,8 @@ begin
     'janela_horas', extract(epoch from v_janela) / 3600,
     'so_meu',    (v_quem is not null),
     'quem',      v_quem,
+    'telefone',  p_telefone,
+    'departamento', p_departamento,
     'total', jsonb_build_object(
       'atendimentos', (select count(*) from meus),
       -- OS TRÊS ESTADOS SÃO EXCLUDENTES, e têm de somar o total: são as três
@@ -662,7 +675,7 @@ $$;
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
-    execute 'grant execute on function painel_dashboard(timestamptz, timestamptz, uuid, text, numeric) to authenticated';
+    execute 'grant execute on function painel_dashboard(timestamptz, timestamptz, uuid, text, numeric, uuid, bigint) to authenticated';
   end if;
 end;
 $$;
