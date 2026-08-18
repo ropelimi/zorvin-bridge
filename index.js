@@ -450,7 +450,52 @@ app.get('/importar-historico', async (req, res) => {
 // ============================================================
 //  PARTE 1 — RECEBER mensagens
 // ============================================================
+//
+// QUEM PODE ESCREVER AQUI.
+//
+// Este endereço não pedia nada. Qualquer pessoa que descobrisse a URL da ponte
+// podia mandar um POST e a mensagem entrava no banco como se tivesse chegado do
+// cliente: aparecia na conversa, contava no Painel, e ficava no histórico do
+// escritório. Num escritório de advocacia isso não é um incômodo — é um
+// registro forjado.
+//
+// A trava é um segredo combinado, aceito de duas formas (na URL ou no
+// cabeçalho), porque nem todo provedor deixa mandar cabeçalho no webhook.
+//
+// ENQUANTO `WEBHOOK_TOKEN` NÃO ESTIVER CONFIGURADO, tudo passa — e a ponte
+// avisa no log. É de propósito: ligar a exigência antes de o endereço na Uazapi
+// ter o segredo faria as mensagens dos clientes pararem de chegar, em silêncio.
+// A ordem certa é: primeiro põe o `?token=` no endereço da Uazapi, depois cria
+// a variável aqui.
+let avisouSemSegredo = false;
+function webhookAutorizado(req) {
+  const esperado = String(process.env.WEBHOOK_TOKEN || '').trim();
+  if (!esperado) {
+    if (!avisouSemSegredo) {
+      avisouSemSegredo = true;
+      console.warn(
+        'ATENÇÃO: /webhook está SEM segredo. Qualquer um que saiba o endereço ' +
+        'pode inserir mensagens. Configure WEBHOOK_TOKEN (e ponha ?token=… no ' +
+        'endereço do webhook na Uazapi).');
+    }
+    return true;
+  }
+  const veio = String(
+    req.query.token || req.headers['x-webhook-token'] || req.headers['x-api-key'] || '').trim();
+  // Comparação de tamanho fixo não faz diferença prática aqui (o segredo vai na
+  // URL, e o atacante não tem como medir microssegundos pela internet), mas o
+  // custo de fazer certo é zero.
+  if (veio.length !== esperado.length) return false;
+  let diferenca = 0;
+  for (let i = 0; i < esperado.length; i += 1) diferenca |= veio.charCodeAt(i) ^ esperado.charCodeAt(i);
+  return diferenca === 0;
+}
+
 app.post('/webhook', async (req, res) => {
+  if (!webhookAutorizado(req)) {
+    console.warn('Webhook recusado: segredo ausente ou errado.');
+    return res.status(403).send('nao autorizado');
+  }
   res.status(200).send('OK'); // responde rápido para a Uazapi não reenviar
 
   try {
@@ -1191,14 +1236,35 @@ async function processarFilaDeEnvio() {
     // Recuperação: se um item ficou preso em 'enviando' por mais de 5 min
     // (ex.: o Render reiniciou/dormiu no meio de um envio), volta para
     // 'pendente' para ser reprocessado — senão a mensagem some sem aviso.
+    //
+    // PELO MOMENTO EM QUE O ENVIO COMEÇOU, e não pelo momento em que o item foi
+    // criado. Era `criado_em`, e a diferença manda uma mensagem duas vezes para
+    // o cliente: um item que esperou 6 minutos na fila e ACABOU de ser
+    // reivindicado já se encaixava na regra de "preso há mais de 5 minutos" —
+    // então outro ciclo o devolvia para 'pendente' enquanto o primeiro ainda
+    // estava falando com a Uazapi, e a mensagem saía de novo.
+    //
+    // Dentro de um processo só, `filaRodando` evitava o cruzamento. Basta uma
+    // segunda instância no ar — o que acontece em toda publicação, com a nova
+    // subindo antes de a antiga sair — para o caso acontecer.
     const limiteTravado = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { data: destravadas } = await supabase
       .from('fila_envio')
       .update({ status: 'pendente' })
       .eq('status', 'enviando')
+      .lt('enviando_em', limiteTravado)
+      .select('id');
+    // Os itens de antes desta mudança não têm `enviando_em`. Para eles, e só
+    // para eles, vale a regra antiga — senão ficariam presos para sempre.
+    const { data: antigas } = await supabase
+      .from('fila_envio')
+      .update({ status: 'pendente' })
+      .eq('status', 'enviando')
+      .is('enviando_em', null)
       .lt('criado_em', limiteTravado)
       .select('id');
-    if (destravadas && destravadas.length) console.log(`Fila: ${destravadas.length} item(ns) preso(s) em 'enviando' devolvido(s) para 'pendente'.`);
+    const quantas = (destravadas || []).length + (antigas || []).length;
+    if (quantas) console.log(`Fila: ${quantas} item(ns) preso(s) em 'enviando' devolvido(s) para 'pendente'.`);
 
     // Pega até 10 mensagens pendentes de cada vez.
     const { data: pendentes, error } = await supabase
@@ -1226,7 +1292,8 @@ async function processarFilaDeEnvio() {
       // Reivindica o item de forma ATÔMICA: só processa se ainda estava
       // 'pendente'. Evita envio duplicado se dois ciclos se cruzarem.
       const { data: claim, error: claimErr } = await supabase.from('fila_envio')
-        .update({ status: 'enviando', tentativas: (item.tentativas || 0) + 1 })
+        .update({ status: 'enviando', tentativas: (item.tentativas || 0) + 1,
+                  enviando_em: new Date().toISOString() })
         .eq('id', item.id)
         .eq('status', 'pendente')
         .select('id');
@@ -1556,6 +1623,26 @@ function liberarCors(res) {
   res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
 }
 
+// QUEM JÁ FOI CONFERIDO HÁ POUCO NÃO É CONFERIDO DE NOVO.
+//
+// `auth.getUser` é uma ida à API do Supabase — rede, ida e volta — e ela
+// acontecia em TODA chamada do painel: abrir a ficha do cliente são duas (a
+// ficha e o histórico), digitar na busca é mais uma a cada pausa. O tempo
+// somava na cara da pessoa sem servir para nada: a mesma sessão, conferida
+// cinco vezes em dez segundos, dá cinco vezes a mesma resposta.
+//
+// A lembrança dura 60 segundos. É o preço de sair: quem for desligado continua
+// entrando por até um minuto. Para uma ferramenta interna, onde desligar
+// alguém é um ato deliberado e acompanhado, um minuto é aceitável — e a conta
+// no Vantoro, que é o que manda, já foi cortada.
+const sessoesLembradas = new Map();   // jwt -> { usuario, ate }
+const LEMBRAR_MS = 60 * 1000;
+
+function limparLembradas() {
+  const agora = Date.now();
+  for (const [k, v] of sessoesLembradas) if (v.ate < agora) sessoesLembradas.delete(k);
+}
+
 // Só passa quem está logado no Zorvin (sessão válida do Supabase).
 async function exigirLogin(req, res) {
   const cabecalho = String(req.headers.authorization || '');
@@ -1565,11 +1652,19 @@ async function exigirLogin(req, res) {
     res.status(401).json({ ok: false, erro: 'Faça login no Zorvin.' });
     return null;
   }
+  const lembrada = sessoesLembradas.get(jwt);
+  if (lembrada && lembrada.ate > Date.now()) return lembrada.usuario;
+
   const { data, error } = await supabase.auth.getUser(jwt);
   if (error || !data || !data.user) {
+    // Sessão ruim NÃO é lembrada: senão um token expirado ficaria recusado por
+    // um minuto depois de a pessoa entrar de novo.
+    sessoesLembradas.delete(jwt);
     res.status(401).json({ ok: false, erro: 'Sessão expirada. Entre de novo.' });
     return null;
   }
+  limparLembradas();
+  sessoesLembradas.set(jwt, { usuario: data.user, ate: Date.now() + LEMBRAR_MS });
   return data.user;
 }
 
@@ -1762,6 +1857,14 @@ function freioBateu(chave) {
 }
 
 function freioLimpa(chave) { tentativas.delete(chave); }
+
+// O mapa do freio só crescia: cada par (ip, login) que já tentou entrar ficava
+// lá para sempre. Numa ponte que fica meses no ar, é memória que nunca volta.
+// Uma varredura a cada 10 minutos custa nada e fecha o vazamento.
+setInterval(() => {
+  const agora = Date.now();
+  for (const [k, v] of tentativas) if (agora - v.desde > TENTATIVAS_JANELA_MS) tentativas.delete(k);
+}, 10 * 60 * 1000).unref();
 
 // Acha (ou cria) a conta do Supabase daquele e-mail e devolve o id.
 async function contaDoSupabase(email, nome) {

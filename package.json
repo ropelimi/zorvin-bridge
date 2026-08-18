@@ -4,7 +4,8 @@
   "description": "Ponte entre a Uazapi (WhatsApp) e o banco de dados do Zorvin (Supabase)",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node testes/prova.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
