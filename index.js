@@ -1983,6 +1983,38 @@ async function mandarDepartamentosAoVantoro() {
   }
 }
 
+// ------------------------------------------------------------
+//  LER A TABELA INTEIRA — E NÃO AS MIL PRIMEIRAS LINHAS
+//
+//  O PostgREST devolve no máximo 1000 linhas por consulta, e não avisa: a
+//  resposta chega com mil linhas e cara de resposta inteira. Quem escreveu
+//  `select(...)` sem paginar acredita que leu tudo, e o que passar de mil some
+//  em silêncio — o pior tipo de falta, porque não há erro nenhum para procurar.
+//
+//  Nas rotinas de permissão isso tem uma consequência exata: a pessoa espelhada
+//  depois da milésima linha de `usuarios` nunca é encontrada, e a permissão dela
+//  nunca é reaplicada. A tela do Vantoro mostra tudo marcado, certinho, e ela
+//  continua sem ver as conversas. Ninguém procuraria a causa num teto de leitura.
+//
+//  A ordem por `id` não é enfeite: sem `order`, o Postgres não promete a mesma
+//  ordem entre uma página e a seguinte, e daria para pular e para repetir linha.
+// ------------------------------------------------------------
+const PAGINA_POSTGREST = 1000;
+
+async function lerTudo(tabela, colunas, ajustar, ordem = 'id') {
+  const tudo = [];
+  for (let pagina = 0; pagina < 500; pagina++) {
+    let consulta = supabase.from(tabela).select(colunas).order(ordem)
+      .range(pagina * PAGINA_POSTGREST, (pagina + 1) * PAGINA_POSTGREST - 1);
+    if (ajustar) consulta = ajustar(consulta);
+    const { data, error } = await consulta;
+    if (error) return { data: null, error };
+    tudo.push(...(data || []));
+    if (!data || data.length < PAGINA_POSTGREST) break;
+  }
+  return { data: tudo, error: null };
+}
+
 // O NÚMERO COMO O VANTORO GUARDA: só dígitos, sem o 55 na frente, últimos 11.
 //
 // É a mesma redução que o cadastro do Vantoro usa para casar telefone
@@ -2006,8 +2038,8 @@ async function mandarTelefonesAoVantoro() {
   // `select('*')` e não a lista de colunas: o formato de `advogados` varia com o
   // que já foi rodado no banco, e pedir uma coluna que ainda não existe devolve
   // erro e mata a rotina inteira. Mesmo cuidado que a rotina do departamento.
-  const { data: fones, error } = await supabase
-    .from('advogados').select('*').eq('ativo', true);
+  const { data: fones, error } = await lerTudo(
+    'advogados', '*', (q) => q.eq('ativo', true));
   if (error) {
     console.log(`Telefones: não consegui ler (${error.message}).`);
     return;
@@ -2040,7 +2072,13 @@ async function mandarTelefonesAoVantoro() {
   }
 }
 
-async function aplicarPermissoes(usuarioId, u) {
+// `emMaos` é a lista de telefones e a de departamentos já lidas por quem
+// chamou. A rodada percorre o escritório inteiro, e essas duas listas são as
+// MESMAS para todo mundo: relê-las por pessoa fazia dezenas de consultas
+// idênticas a cada três minutos, para sempre. Quem chama por uma pessoa só
+// (a entrada no sistema, a tela de permissões) não passa nada e a rotina lê
+// como sempre leu.
+async function aplicarPermissoes(usuarioId, u, emMaos = null) {
   // `zorvin_definido` distingue "não pode ver nada" de "ninguém definiu ainda".
   // Sem essa distinção, o primeiro login depois desta mudança apagaria a
   // permissão de todo mundo que ainda não tem perfil no Vantoro — o sistema
@@ -2070,10 +2108,14 @@ async function aplicarPermissoes(usuarioId, u) {
   if (soTelefones) {
     // `select('*')` e não a lista de colunas, pelo mesmo motivo das outras
     // rotinas: o formato de `advogados` varia com o que já foi rodado no banco.
-    const { data: fones, error } = await supabase.from('advogados').select('*');
-    if (error) {
-      console.log(`Permissões: não consegui ler os telefones (${error.message}).`);
-      return;
+    let fones = emMaos && emMaos.fones;
+    if (!fones) {
+      const lido = await lerTudo('advogados', '*');
+      if (lido.error) {
+        console.log(`Permissões: não consegui ler os telefones (${lido.error.message}).`);
+        return;
+      }
+      fones = lido.data;
     }
     const porChave = new Map((fones || []).map((f) => [chaveDoNumero(f.numero), f.id]));
     const perdidos = [];
@@ -2090,11 +2132,17 @@ async function aplicarPermissoes(usuarioId, u) {
     // diferente dos dois lados — e o sintoma não apontaria para a causa.
     if (!linhas.length) return;
   } else if (chaves.length) {
-    const { data, error } = await supabase
-      .from('departamentos').select('id, slug').in('slug', chaves);
-    if (error) {
-      console.log(`Permissões: não consegui ler os departamentos (${error.message}).`);
-      return;
+    let data = null;
+    if (emMaos && emMaos.deps) {
+      data = emMaos.deps.filter((d) => chaves.includes(d.slug));
+    } else {
+      const lido = await supabase
+        .from('departamentos').select('id, slug').in('slug', chaves);
+      if (lido.error) {
+        console.log(`Permissões: não consegui ler os departamentos (${lido.error.message}).`);
+        return;
+      }
+      data = lido.data;
     }
     for (const d of data || []) linhas.push({ usuario_id: usuarioId, departamento_id: d.id });
     // Chave marcada no Vantoro que não existe aqui é erro de digitação lá. Fica
@@ -2115,20 +2163,76 @@ async function aplicarPermissoes(usuarioId, u) {
   // o que a tela diz que ela não vê — e ninguém procuraria o resto da resposta
   // num segundo lugar.
   //
-  // A consulta não cita `grupo_id` de propósito: a coluna ainda existe, mas os
-  // grupos saíram e ela está esperando o painel parar de mencioná-la para ser
-  // apagada. Amarrar esta rotina a ela faria a permissão parar de ser aplicada
-  // no dia em que a coluna sumir — e sem nada dizendo por quê.
-  const { error: erroApaga } = await supabase
-    .from('permissoes').delete().eq('usuario_id', usuarioId);
-  if (erroApaga) {
-    console.log(`Permissões: não consegui limpar as antigas (${erroApaga.message}).`);
+  // ------------------------------------------------------------
+  //  MAS SUBSTITUIR NÃO É APAGAR TUDO E GRAVAR TUDO DE VOLTA
+  //
+  //  Era o que esta rotina fazia, e ela roda de três em três minutos para cada
+  //  pessoa do escritório. Entre o `delete` e o `insert` — dois pedidos de
+  //  rede, algumas dezenas de milissegundos — a pessoa não tem permissão
+  //  nenhuma. Quem estivesse carregando a lista de conversas naquele instante
+  //  não via nada, e ao recarregar via tudo de novo. Um sumiço curto, sem erro,
+  //  que volta sozinho: exatamente o feitio de "às vezes aparece, às vezes não".
+  //
+  //  E quando a gravação falhava — a rede caiu, o banco recusou —, o apagar já
+  //  tinha acontecido: a pessoa ficava cega até uma rodada seguinte dar certo.
+  //  Se a causa fosse permanente, ficava cega para sempre, com a tela do
+  //  Vantoro mostrando a permissão marcada, certinha.
+  //
+  //  A correção é comparar antes de escrever. Quase sempre nada mudou desde a
+  //  rodada anterior, e então não se escreve NADA — a janela nem chega a abrir.
+  //  Quando mudou, mexe-se só na diferença: tira o que não vale mais, depois
+  //  acrescenta o que passou a valer. Nessa ordem de propósito. Se a segunda
+  //  metade falhar, a pessoa fica vendo de menos por alguns minutos; na ordem
+  //  inversa, ela ficaria vendo o que a tela já diz que ela não pode ver. Num
+  //  escritório de advocacia, errar para menos é o único lado aceitável.
+  //
+  //  A consulta não cita `grupo_id` de propósito: a coluna ainda existe, mas os
+  //  grupos saíram e ela está esperando o painel parar de mencioná-la para ser
+  //  apagada. Amarrar esta rotina a ela faria a permissão parar de ser aplicada
+  //  no dia em que a coluna sumir — e sem nada dizendo por quê. Linha herdada
+  //  de grupo (sem departamento e sem telefone) entra como sobra e sai, que é o
+  //  mesmo destino que tinha antes.
+  // ------------------------------------------------------------
+  const chaveDaLinha = (l) => (l.telefone_id ? `t:${l.telefone_id}`
+                             : l.departamento_id ? `d:${l.departamento_id}` : null);
+
+  const { data: atuais, error: erroLe } = await supabase
+    .from('permissoes').select('id, departamento_id, telefone_id').eq('usuario_id', usuarioId);
+  if (erroLe) {
+    console.log(`Permissões: não consegui ler as atuais (${erroLe.message}).`);
     return;
   }
-  if (!linhas.length) return;
 
-  const { error: erroInsere } = await supabase.from('permissoes').insert(linhas);
-  if (erroInsere) console.log(`Permissões: não consegui gravar (${erroInsere.message}).`);
+  const querido = new Map();
+  for (const l of linhas) querido.set(chaveDaLinha(l), l);
+
+  const jaTem = new Set();
+  const sobrando = [];
+  for (const p of atuais || []) {
+    const chave = chaveDaLinha(p);
+    // `jaTem.has` cobre a linha repetida: duas rodadas que se atropelaram no
+    // passado podem ter deixado a mesma permissão duas vezes. A primeira fica,
+    // a segunda sai.
+    if (chave && querido.has(chave) && !jaTem.has(chave)) jaTem.add(chave);
+    else sobrando.push(p.id);
+  }
+  const faltando = [];
+  for (const [chave, linha] of querido) if (!jaTem.has(chave)) faltando.push(linha);
+
+  // Nada mudou: não se escreve nada. É o caso de quase toda rodada.
+  if (!sobrando.length && !faltando.length) return;
+
+  if (sobrando.length) {
+    const { error } = await supabase.from('permissoes').delete().in('id', sobrando);
+    if (error) {
+      console.log(`Permissões: não consegui tirar as que não valem mais (${error.message}).`);
+      return;
+    }
+  }
+  if (faltando.length) {
+    const { error } = await supabase.from('permissoes').insert(faltando);
+    if (error) console.log(`Permissões: não consegui gravar (${error.message}).`);
+  }
 }
 
 // ------------------------------------------------------------
@@ -2160,8 +2264,7 @@ async function sincronizarPermissoes() {
     return;
   }
 
-  const { data: espelhados, error } = await supabase
-    .from('usuarios').select('id, login, email');
+  const { data: espelhados, error } = await lerTudo('usuarios', 'id, login, email');
   if (error) {
     console.log(`Permissões: não consegui ler os usuários (${error.message}).`);
     return;
@@ -2177,13 +2280,23 @@ async function sincronizarPermissoes() {
     if (u.email) porEmail.set(String(u.email).toLowerCase(), u.id);
   }
 
+  // Os telefones e os departamentos são os mesmos para todo mundo: lidos uma
+  // vez aqui e emprestados a cada pessoa. Se a leitura falhar, `emMaos` fica
+  // sem a lista e cada chamada lê por conta própria — a rodada fica mais cara,
+  // mas não deixa de acontecer.
+  const emMaos = {};
+  const lidosFones = await lerTudo('advogados', '*');
+  if (!lidosFones.error) emMaos.fones = lidosFones.data;
+  const lidosDeps = await supabase.from('departamentos').select('id, slug');
+  if (!lidosDeps.error) emMaos.deps = lidosDeps.data;
+
   let aplicadas = 0;
   for (const u of corpo.usuarios) {
     const id = porLogin.get(String(u.login || '').toLowerCase())
             || porEmail.get(String(u.email || '').toLowerCase());
     if (!id) continue;   // ainda não entrou no Zorvin nenhuma vez
     try {
-      await aplicarPermissoes(id, u);
+      await aplicarPermissoes(id, u, emMaos);
       aplicadas += 1;
     } catch (e) {
       console.log(`Permissões de ${u.login}: ${(e && e.message) || e}`);
@@ -2213,8 +2326,8 @@ async function garantirDepartamentoDosTelefones() {
   // o que já foi rodado no banco, e pedir uma coluna que ainda não existe
   // devolve erro e mata a rotina inteira. É o mesmo cuidado que a busca do
   // advogado no webhook já toma, e pelo mesmo motivo.
-  const { data: fones, error } = await supabase
-    .from('advogados').select('*').is('departamento_id', null);
+  const { data: fones, error } = await lerTudo(
+    'advogados', '*', (q) => q.is('departamento_id', null));
   if (error || !fones || !fones.length) return;
 
   const { data: deps } = await supabase.from('departamentos').select('id, slug');
@@ -2238,7 +2351,31 @@ async function garantirDepartamentoDosTelefones() {
 // A primeira rodada sai logo depois de subir (dando tempo de o processo ficar
 // de pé), e daí em diante no intervalo. `unref` para o temporizador não segurar
 // o processo se ele for encerrado.
+// UMA RODADA DE CADA VEZ.
+//
+// A rodada percorre todo mundo, e cada pessoa custa algumas idas ao banco. Com
+// o escritório crescendo, ou com o Vantoro lento (a chamada espera até 20
+// segundos), uma rodada pode passar dos três minutos do intervalo — e então a
+// seguinte começa em cima dela. Duas rodadas mexendo na permissão da mesma
+// pessoa ao mesmo tempo se atropelam: uma tira o que a outra acabou de pôr.
+//
+// É a mesma trava que a fila de envio já tem, pelo mesmo motivo.
+let rodadaRodando = false;
+
 async function rodada() {
+  if (rodadaRodando) {
+    console.log('Rodada: a anterior ainda está correndo — esta fica para o próximo intervalo.');
+    return;
+  }
+  rodadaRodando = true;
+  try {
+    await umaRodada();
+  } finally {
+    rodadaRodando = false;
+  }
+}
+
+async function umaRodada() {
   // A ordem importa: o telefone precisa ter departamento ANTES de a permissão
   // ser conferida, senão a primeira rodada aplica permissão que ainda não
   // alcança conversa nenhuma.
@@ -2296,7 +2433,7 @@ async function listarAtendentes() {
   // Quem nunca entrou no Zorvin ainda não tem conta aqui — e a permissão dele só
   // vira linha no dia em que entrar. A tela precisa dizer isso, senão o
   // administrador marca, confere e não vê efeito nenhum.
-  const { data: contas } = await supabase.from('usuarios').select('id, login, email');
+  const { data: contas } = await lerTudo('usuarios', 'id, login, email');
   const conhecidos = new Set();
   for (const c of contas || []) {
     if (c.login) conhecidos.add(String(c.login).toLowerCase());
@@ -2329,7 +2466,7 @@ async function gravarAtendente(req) {
   let aplicada = false;
   try {
     const login = String(corpo.usuario.login || '').toLowerCase();
-    const { data: contas } = await supabase.from('usuarios').select('id, login, email');
+    const { data: contas } = await lerTudo('usuarios', 'id, login, email');
     const conta = (contas || []).find(
       (c) => String(c.login || '').toLowerCase() === login
           || String(c.email || '').toLowerCase() === login);
