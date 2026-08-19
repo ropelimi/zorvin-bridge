@@ -3309,6 +3309,29 @@ app.post('/auth/login', async (req, res) => {
   } catch (e) {
     const motivo = (e && e.message) || String(e);
     console.error('entrada: FALHOU —', motivo);
+
+    // O SUPABASE TEM DUAS METADES, E ELAS CAEM SEPARADAS.
+    //
+    // Banco e autenticação são serviços diferentes atrás do mesmo endereço. Em
+    // 19/08 o banco respondeu em 168ms enquanto o `/auth/v1/*` devolvia erro
+    // 521 do Cloudflare — "o servidor de origem não está respondendo". Metade
+    // do projeto de pé, metade no chão.
+    //
+    // Sem isto, a tela mandava "tente de novo" para uma coisa que não vai dar
+    // certo tentando de novo: o escritório inteiro repetindo a senha, achando
+    // que errou. "Não é a sua senha" é a informação que falta.
+    const PASSOS_DO_AUTH = ['conta no Supabase', 'alinhar o nome', 'gerar o bilhete',
+                            'gerar o bilhete (2ª tentativa)'];
+    if (e && e.passo && PASSOS_DO_AUTH.includes(e.passo)) {
+      console.error('entrada: a AUTENTICAÇÃO do Supabase não está respondendo (o banco está). '
+                  + 'Reinicie o projeto em Settings → General → Restart project, '
+                  + 'e confira status.supabase.com.');
+      return res.status(503).json({
+        ok: false,
+        erro: 'O serviço de autenticação está fora do ar — não é a sua senha. '
+            + 'Já avisamos quem administra; tente de novo daqui a alguns minutos.',
+      });
+    }
     // O PASSO VAI NA RESPOSTA. Quem está na porta não precisa do detalhe
     // técnico, mas precisa saber que não foi a senha dele — e quem administra
     // precisa saber ONDE. Sem isso o relato volta como "não entrou", que é
