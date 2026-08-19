@@ -843,5 +843,81 @@ console.log("\n10. A foto do contato em tamanho cheio");
   }
 }
 
+// ============================================================
+//  11. UMA VARIÁVEL MAL COLADA NÃO PODE DERRUBAR A ENTRADA
+//
+//  Aconteceu numa manhã de expediente: `PAINEL_ORIGEM` foi preenchida com uma
+//  quebra de linha invisível no fim. O Node recusa pôr "\n" num cabeçalho e
+//  lança `ERR_INVALID_CHAR` — DENTRO da rota, que morre antes de responder. O
+//  navegador vê a conexão falhar e escreve "Load failed"; o log mostra uma
+//  pilha de erro que não menciona a variável. Ninguém do escritório entrou.
+//
+//  O que se prova aqui é que a entrada RESPONDE mesmo com a variável torta.
+// ============================================================
+console.log("\n11. PAINEL_ORIGEM torta não derruba a entrada");
+{
+  const pedirPermissao = async (t) => {
+    const r = await fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+      method: "OPTIONS",
+      headers: { Origin: "https://zorvin.exemplo.com.br" },
+    });
+    return { status: r.status, origem: r.headers.get("access-control-allow-origin") };
+  };
+
+  // ---- 11a. com quebra de linha no fim — o caso real ----
+  {
+    const t = await subirTudo({ PAINEL_ORIGEM: "https://zorvin.exemplo.com.br\n" });
+    const { status, origem } = await pedirPermissao(t);
+    ok("com quebra de linha, o pedido de permissão ainda responde", status === 204,
+       `veio ${status} — antes a rota estourava e o navegador dizia "Load failed"`);
+    ok("e o cabeçalho sai limpo", origem === "https://zorvin.exemplo.com.br",
+       `veio: ${JSON.stringify(origem)}`);
+    await espera(200);
+    ok("e o log conta o que arrumou", /PAINEL_ORIGEM tinha espaço/.test(t.registro.join("")),
+       "consertar calado esconde a configuração errada");
+    await t.parar();
+  }
+
+  // ---- 11b. com barra no fim — o engano mais comum ----
+  //
+  // A barra não estoura, mas não CASA: o navegador compara letra por letra e
+  // descarta a resposta. Falha silenciosa, do tipo que ninguém acha.
+  {
+    const t = await subirTudo({ PAINEL_ORIGEM: "https://zorvin.exemplo.com.br/" });
+    const { origem } = await pedirPermissao(t);
+    ok("a barra no fim é tirada", origem === "https://zorvin.exemplo.com.br",
+       `veio: ${JSON.stringify(origem)}`);
+    await t.parar();
+  }
+
+  // ---- 11c. valor que não é endereço nenhum ----
+  {
+    const t = await subirTudo({ PAINEL_ORIGEM: "sim" });
+    const { status, origem } = await pedirPermissao(t);
+    ok("valor sem sentido não derruba nada", status === 204);
+    ok("e cai no padrão de aceitar qualquer origem", origem === "*",
+       `veio: ${JSON.stringify(origem)} — degradar avisando é melhor do que parar`);
+    await espera(200);
+    ok("dizendo no log o que a variável deveria ser",
+       /PAINEL_ORIGEM não parece um endereço/.test(t.registro.join("")));
+    await t.parar();
+  }
+
+  // ---- 11d. e a entrada de verdade continua respondendo ----
+  {
+    const t = await subirTudo({ PAINEL_ORIGEM: "https://zorvin.exemplo.com.br\n" });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://zorvin.exemplo.com.br" },
+      body: JSON.stringify({ login: "alguem", senha: "x" }),
+    });
+    ok("a entrada responde em vez de estourar", r.status < 500 || r.status === 503,
+       `veio ${r.status}`);
+    ok("com o cabeçalho de origem no lugar",
+       r.headers.get("access-control-allow-origin") === "https://zorvin.exemplo.com.br");
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

@@ -1836,8 +1836,47 @@ const VANTORO_URL = (process.env.VANTORO_API_URL || '').replace(/\/+$/, '');
 const VANTORO_TOKEN = process.env.VANTORO_API_TOKEN || '';
 
 // O painel fica em outro endereço, então o navegador exige estes cabeçalhos.
+// A ORIGEM PERMITIDA, LIMPA — e o motivo de ela existir separada.
+//
+// `PAINEL_ORIGEM` é preenchida à mão num campo de site. Colar ali arrasta
+// espaço, barra no fim e, sobretudo, QUEBRA DE LINHA. O Node recusa pôr um
+// "\n" dentro de um cabeçalho e lança `ERR_INVALID_CHAR` — e como isso
+// acontece DENTRO da rota, ela morre antes de responder. O navegador vê a
+// conexão falhar e escreve "Load failed"; do lado de cá, o log só mostra uma
+// pilha de erro que não menciona a variável.
+//
+// Foi assim que uma quebra de linha invisível derrubou a entrada de todo o
+// escritório numa manhã de expediente. Uma variável mal colada pode fazer o
+// sistema funcionar pior; não pode fazer ele parar.
+//
+// Então: o que dá para consertar sozinho é consertado (espaço, barra no fim),
+// e o que não dá vira aviso e cai no `*`, que é o padrão de sempre. Degradar
+// para permissivo com aviso é melhor do que derrubar tudo em silêncio.
+let origemLembrada = null;
+function origemPermitida() {
+  if (origemLembrada) return origemLembrada;
+  const cru = String(process.env.PAINEL_ORIGEM || '');
+  const limpa = cru.replace(/[\r\n\t]/g, '').trim().replace(/\/+$/, '');
+
+  if (!limpa) {
+    origemLembrada = '*';
+  } else if (!/^https?:\/\/[A-Za-z0-9.:-]+$/.test(limpa)) {
+    console.log(`PAINEL_ORIGEM não parece um endereço (${JSON.stringify(cru)}). `
+              + 'Aceitando qualquer origem, que é o padrão. Ela deve ser só o '
+              + 'endereço do painel, assim: https://zorvin.exemplo.com.br');
+    origemLembrada = '*';
+  } else {
+    if (limpa !== cru) {
+      console.log(`PAINEL_ORIGEM tinha espaço, barra ou quebra de linha sobrando `
+                + `(${JSON.stringify(cru)}). Usando "${limpa}".`);
+    }
+    origemLembrada = limpa;
+  }
+  return origemLembrada;
+}
+
 function liberarCors(res, req) {
-  const permitida = process.env.PAINEL_ORIGEM || '*';
+  const permitida = origemPermitida();
   res.set('Access-Control-Allow-Origin', permitida);
   res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
   res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
