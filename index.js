@@ -3834,6 +3834,57 @@ setInterval(processarFilaDeEnvio, 3000);
 setInterval(buscarAvisosDeAudiencia, 5 * 60 * 1000);
 
 const port = process.env.PORT || 3000;
+// ------------------------------------------------------------
+//  AO SUBIR, A PONTE DIZ SE SABE ASSINAR A SESSÃO
+//
+//  A saída para o Auth fora do ar só aparece no dia em que o Auth cair. Até
+//  lá, ligada ou desligada, a ponte se comporta igual — e quem configurou a
+//  variável não tem como saber se acertou. Descobrir no dia seria descobrir
+//  do pior jeito.
+//
+//  E MAIS UMA CONFERÊNCIA, que vale a ida à rede: se o projeto tiver migrado
+//  para chave assimétrica (o Supabase oferece isso num botão chamado
+//  "Migrate JWT secret"), o banco passa a recusar os bilhetes assinados aqui —
+//  eles são HS256. A saída continuaria existindo no código e não funcionaria
+//  mais, em silêncio, até o dia em que fosse precisa. Uma linha no log no dia
+//  da migração é o aviso mais barato que existe.
+//
+//  A lista de chaves é pública de propósito (é assim que qualquer um confere
+//  uma assinatura), então não há nada de sigiloso nesta chamada. Ela é
+//  best-effort: falhando, não diz nada e não atrapalha nada.
+// ------------------------------------------------------------
+async function contarComoEstaAEntrada() {
+  if (!souCapazDeAssinar()) {
+    console.log('entrada: SUPABASE_JWT_SECRET não está configurada. A entrada '
+              + 'funciona normalmente, mas se o Auth do Supabase cair de novo '
+              + 'ninguém entra — foi o que houve em 19/08. O valor está em '
+              + 'Settings → JWT Keys → Legacy JWT Secret.');
+    return;
+  }
+  console.log('entrada: sei assinar a sessão por conta própria — se o Auth do '
+            + 'Supabase cair, o escritório continua entrando.');
+
+  const base = String(process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+  if (!base) return;
+  try {
+    const r = await fetchComTimeout(`${base}/auth/v1/.well-known/jwks.json`, {}, 8000);
+    const corpo = await r.json();
+    const chaves = (corpo && corpo.keys) || [];
+    const assimetricas = chaves.filter((k) => k && k.kty && k.kty !== 'oct');
+    if (assimetricas.length) {
+      console.error('entrada: ATENÇÃO — este projeto do Supabase passou a assinar com chave '
+                  + `assimétrica (${assimetricas.map((k) => k.alg || k.kty).join(', ')}). `
+                  + 'Os bilhetes que a ponte assina são HS256 e o banco vai recusá-los, '
+                  + 'então a saída para o Auth fora do ar deixou de funcionar. '
+                  + 'Isso precisa ser refeito antes da próxima queda.');
+    }
+  } catch (_e) {
+    // Sem resposta agora não quer dizer nada: pode ser justamente o Auth fora
+    // do ar, que é o dia para o qual tudo isto existe.
+  }
+}
+
 app.listen(port, () => {
   console.log('Ponte do Zorvin rodando na porta', port);
+  contarComoEstaAEntrada().catch(() => {});
 });

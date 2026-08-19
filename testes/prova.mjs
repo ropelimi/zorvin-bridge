@@ -16,7 +16,7 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
@@ -32,7 +32,7 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
     // As contas do Auth. Separadas da tabela `usuarios` de propósito: são duas
     // coisas diferentes no Supabase de verdade, e a entrada mexe nas duas.
     usuarios: contas || [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
-    authNoChao,
+    authNoChao, jwksAssimetrico,
   });
   const porta = 3000 + Math.floor(Math.random() * 900);
   // O caminho sai DESTE arquivo, e não do diretório de onde se chamou. Com
@@ -1198,6 +1198,49 @@ console.log("\n14. Sem o Auth, a ponte assina a sessão");
     ok("e o log diz o que falta configurar",
        /SUPABASE_JWT_SECRET/.test(t.registro.join("")),
        "quem administra precisa saber que existe conserto");
+    await t.parar();
+  }
+}
+
+// ============================================================
+//  15. AO SUBIR, A PONTE DIZ COMO ESTÁ A ENTRADA
+//
+//  A saída para o Auth fora do ar só aparece no dia em que o Auth cair. Até
+//  lá, ligada ou desligada, a ponte se comporta igual — e quem configurou a
+//  variável não teria como saber se acertou. Descobrir no dia seria descobrir
+//  do pior jeito possível.
+// ============================================================
+console.log("\n15. O log conta se a ponte sabe assinar");
+{
+  const SEGREDO = "um-segredo-de-teste-com-tamanho-suficiente";
+
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, {});
+    await espera(800);
+    const log = t.registro.join("");
+    ok("com a variável posta, o log diz que sabe", /sei assinar a sessão/.test(log), log.slice(-300));
+    await t.parar();
+  }
+
+  {
+    const t = await subirTudo({}, {});
+    await espera(800);
+    const log = t.registro.join("");
+    ok("sem ela, o log diz o que falta", /SUPABASE_JWT_SECRET não está configurada/.test(log),
+       log.slice(-300));
+    ok("e onde achar o valor", /JWT Keys/.test(log), log.slice(-300));
+    await t.parar();
+  }
+
+  // O PROJETO QUE MIGROU PARA CHAVE ASSIMÉTRICA. O Supabase oferece isso num
+  // botão; depois dele, o banco recusa os bilhetes HS256 que a ponte assina, e
+  // a saída deixaria de funcionar EM SILÊNCIO até o dia em que fosse precisa.
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, { jwksAssimetrico: true });
+    await espera(1200);
+    const log = t.registro.join("");
+    ok("migrando para chave assimétrica, o log avisa em letras grandes",
+       /passou a assinar com chave assimétrica/.test(log), log.slice(-400));
     await t.parar();
   }
 }

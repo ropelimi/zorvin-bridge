@@ -64,7 +64,7 @@ function lerSelect(sel, esquema) {
 // corta em mil.
 const TETO_POSTGREST = 1000;
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0, authNoChao = false } = {}) {
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -107,6 +107,15 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     if (authNoChao && caminho.startsWith("/auth/v1/")) {
       res.writeHead(521, { "Content-Type": "text/html" });
       return res.end("<html><title>xnhc… | 521: Web server is down</title></html>");
+    }
+    // A LISTA PÚBLICA DE CHAVES. Vazia quer dizer "este projeto assina com o
+    // segredo compartilhado de sempre"; com uma chave de curva elíptica
+    // dentro, quer dizer que ele migrou — e aí os bilhetes que a ponte assina
+    // deixam de valer.
+    if (caminho === "/auth/v1/.well-known/jwks.json") {
+      return responder(200, { keys: jwksAssimetrico
+        ? [{ kty: "EC", crv: "P-256", alg: "ES256", kid: "abc", x: "x", y: "y" }]
+        : [] });
     }
     if (caminho === "/auth/v1/user") {
       const jwt = String(req.headers.authorization || "").replace(/^Bearer /i, "");
