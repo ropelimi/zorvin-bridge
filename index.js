@@ -630,8 +630,20 @@ app.post('/webhook', async (req, res) => {
     }
 
     // Foto de perfil do contato (vem no próprio webhook, no chat).
+    //
+    // A ORDEM IMPORTA, e ela estava invertida. `imagePreview` é a MINIATURA: o
+    // WhatsApp manda duas versões da foto de perfil — uma de umas dezenas de
+    // pixels, para desenhar em lista, e a cheia, de algumas centenas. Pegando a
+    // miniatura primeiro, era a miniatura que ficava guardada. Deu para viver
+    // com isso enquanto a foto só aparecia num avatar de 40 pixels; quando o
+    // painel passou a abri-la em tamanho grande, ela apareceu embaçada — não
+    // está borrada, está sendo ampliada muito além do que tem.
+    //
+    // A cheia na frente, a miniatura por último: melhor miniatura do que
+    // contato sem foto nenhuma.
     const fotoContato =
-      (body.chat && (body.chat.imagePreview || body.chat.imgUrl || body.chat.image || body.chat.profilePicUrl || body.chat.profilePictureUrl)) || null;
+      (body.chat && (body.chat.imgUrl || body.chat.image || body.chat.profilePicUrl
+                  || body.chat.profilePictureUrl || body.chat.imagePreview)) || null;
 
     // NOME do contato: só confiamos em mensagens RECEBIDAS. Numa mensagem fromMe
     // (o advogado escrevendo pelo próprio WhatsApp), os campos de nome trazem o
