@@ -23,6 +23,23 @@
 --  mesmo a foto da pessoa, num dia em que ela escreveu. Pega-se a mais
 --  recente, que é a mais parecida com a de hoje.
 --
+--  ---------------------------------------------------------------
+--  CORREÇÃO DA VERSÃO ANTERIOR DESTE ARQUIVO
+--
+--  Ela lia `notas.autor_foto`, e essa coluna NÃO EXISTE. Nunca existiu: o
+--  painel tenta gravá-la e, quando o banco recusa, grava a nota sem ela — é
+--  por isso que ninguém nunca percebeu.
+--
+--  E o estrago não ficou na metade das notas: o editor do Supabase roda tudo
+--  numa transação só, então o erro derrubou junto o preenchimento pelas
+--  MENSAGENS, que estava certo. Ninguém ficou com foto.
+--
+--  Agora cada metade só roda se as colunas de que ela precisa existirem, e o
+--  fim diz o que rodou e o que foi pulado. Uma consulta que se escreve para
+--  rodar "no banco de produção" tem de aguentar o banco de produção ser
+--  diferente do que se imaginou.
+--  ---------------------------------------------------------------
+--
 --  Rodar no SQL Editor do Supabase. Seguro rodar de novo — só toca em quem
 --  ainda está sem foto, então não atropela quem já trocou a dele.
 -- ============================================================
@@ -41,42 +58,72 @@ select count(*) filter (where foto_url is null) as sem_foto,
 -- ------------------------------------------------------------
 --  O PREENCHIMENTO
 --
---  `distinct on (enviado_por_id)` com `order by ... criado_em desc` é o jeito
---  do Postgres de dizer "a linha mais recente de cada pessoa" — e ele lê pelo
---  índice, em vez de ordenar a tabela inteira de mensagens.
+--  `distinct on (...)` com `order by ... criado_em desc` é o jeito do Postgres
+--  de dizer "a linha mais recente de cada pessoa".
+--
+--  As duas metades vão dentro de um `do`, com a consulta montada em texto: sem
+--  isso, o Postgres recusa o arquivo inteiro ao ANALISAR uma coluna que não
+--  existe, mesmo que a linha nunca fosse rodar. É o que aconteceu.
 -- ------------------------------------------------------------
-with ultima_foto as (
-  select distinct on (m.enviado_por_id)
-         m.enviado_por_id as usuario_id,
-         m.enviado_por_foto as foto
-    from mensagens m
-   where m.enviado_por_id is not null
-     and m.enviado_por_foto is not null
-     and m.enviado_por_foto <> ''
-   order by m.enviado_por_id, m.criado_em desc
-)
-update usuarios u
-   set foto_url = f.foto
-  from ultima_foto f
- where u.id = f.usuario_id
-   and u.foto_url is null;
+do $$
+declare
+  tem_col boolean;
+  quantas int;
+begin
+  -- ---- pelas MENSAGENS ----
+  select count(*) = 2 into tem_col from information_schema.columns
+   where table_schema = 'public' and table_name = 'mensagens'
+     and column_name in ('enviado_por_id', 'enviado_por_foto');
 
--- E o mesmo pelas NOTAS, para quem só escreveu nota e nunca mensagem.
-with ultima_foto as (
-  select distinct on (n.autor_id)
-         n.autor_id as usuario_id,
-         n.autor_foto as foto
-    from notas n
-   where n.autor_id is not null
-     and n.autor_foto is not null
-     and n.autor_foto <> ''
-   order by n.autor_id, n.criado_em desc
-)
-update usuarios u
-   set foto_url = f.foto
-  from ultima_foto f
- where u.id = f.usuario_id
-   and u.foto_url is null;
+  if tem_col then
+    execute $q$
+      with ultima_foto as (
+        select distinct on (m.enviado_por_id)
+               m.enviado_por_id as usuario_id, m.enviado_por_foto as foto
+          from mensagens m
+         where m.enviado_por_id is not null
+           and m.enviado_por_foto is not null and m.enviado_por_foto <> ''
+         order by m.enviado_por_id, m.criado_em desc
+      )
+      update usuarios u set foto_url = f.foto
+        from ultima_foto f
+       where u.id = f.usuario_id and u.foto_url is null
+    $q$;
+    get diagnostics quantas = row_count;
+    raise notice 'pelas mensagens: % pessoa(s) ganharam foto', quantas;
+  else
+    raise notice 'pelas mensagens: PULADO (a tabela não tem as colunas)';
+  end if;
+
+  -- ---- pelas NOTAS ----
+  --
+  -- `notas.autor_foto` não existe nesta base, e é aqui que a versão anterior
+  -- quebrava. Fica no arquivo porque a coluna pode existir noutra instalação —
+  -- e porque, existindo, ela é a única fonte para quem só escreveu notas.
+  select count(*) = 2 into tem_col from information_schema.columns
+   where table_schema = 'public' and table_name = 'notas'
+     and column_name in ('autor_id', 'autor_foto');
+
+  if tem_col then
+    execute $q$
+      with ultima_foto as (
+        select distinct on (n.autor_id)
+               n.autor_id as usuario_id, n.autor_foto as foto
+          from notas n
+         where n.autor_id is not null
+           and n.autor_foto is not null and n.autor_foto <> ''
+         order by n.autor_id, n.criado_em desc
+      )
+      update usuarios u set foto_url = f.foto
+        from ultima_foto f
+       where u.id = f.usuario_id and u.foto_url is null
+    $q$;
+    get diagnostics quantas = row_count;
+    raise notice 'pelas notas: % pessoa(s) ganharam foto', quantas;
+  else
+    raise notice 'pelas notas: PULADO (a tabela não guarda foto de autor)';
+  end if;
+end $$;
 
 
 -- ------------------------------------------------------------
