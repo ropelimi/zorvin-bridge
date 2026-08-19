@@ -1836,10 +1836,29 @@ const VANTORO_URL = (process.env.VANTORO_API_URL || '').replace(/\/+$/, '');
 const VANTORO_TOKEN = process.env.VANTORO_API_TOKEN || '';
 
 // O painel fica em outro endereço, então o navegador exige estes cabeçalhos.
-function liberarCors(res) {
-  res.set('Access-Control-Allow-Origin', process.env.PAINEL_ORIGEM || '*');
+function liberarCors(res, req) {
+  const permitida = process.env.PAINEL_ORIGEM || '*';
+  res.set('Access-Control-Allow-Origin', permitida);
   res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
   res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+
+  // O ERRO MAIS INVISÍVEL QUE ESTA PONTE PODE DAR.
+  //
+  // `Access-Control-Allow-Origin` tem de casar com a origem do pedido LETRA
+  // POR LETRA — uma barra a mais no fim, `www.` a mais, `http` no lugar de
+  // `https`, e o navegador descarta a resposta. Do lado de cá parece que deu
+  // tudo certo: a rota respondeu 200 e nada foi para o log. Do lado de lá, o
+  // Safari escreve "Load failed" e o Chrome, "Failed to fetch".
+  //
+  // Este aviso existe para esse caso não ser mais invisível. Ele não muda o
+  // comportamento — só conta o que está acontecendo, com os dois valores lado
+  // a lado, que é o que falta para consertar em trinta segundos.
+  const origem = req && req.headers && req.headers.origin;
+  if (permitida !== '*' && origem && origem !== permitida) {
+    console.log(`CORS: o painel pediu de "${origem}" mas PAINEL_ORIGEM está "${permitida}". `
+              + 'O navegador vai descartar a resposta e dizer "Load failed". '
+              + 'Ajuste a variável PAINEL_ORIGEM (sem barra no fim) ou deixe-a vazia.');
+  }
 }
 
 // QUEM JÁ FOI CONFERIDO HÁ POUCO NÃO É CONFERIDO DE NOVO.
@@ -3046,11 +3065,20 @@ app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
     telefones_sem_departamento: orfaos.length, problema } };
 }));
 
-app.options('/auth/login', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.options('/auth/login', (req, res) => {
+  liberarCors(res, req);
+  // O PEDIDO DE PERMISSÃO, que vem ANTES do de verdade. Uma entrada com corpo
+  // em JSON sempre manda este primeiro; se ele não passa, o pedido de verdade
+  // nunca sai do navegador — e no log da ponte não aparece nada, porque nada
+  // chegou. Registrado, ele separa "não chegou aqui" de "chegou e falhou".
+  console.log(`entrada: pedido de permissão (OPTIONS) de "${req.headers.origin || 'sem origem'}"`);
+  res.sendStatus(204);
+});
 
 app.post('/auth/login', async (req, res) => {
-  liberarCors(res);
+  liberarCors(res, req);
   const login = String((req.body && (req.body.login || req.body.email)) || '').trim();
+  console.log(`entrada: tentativa de "${login || '(sem usuário)'}" de "${req.headers.origin || 'sem origem'}"`);
   const senha = String((req.body && req.body.senha) || '');
   if (!login || !senha) {
     return res.status(400).json({ ok: false, erro: 'Informe usuário e senha.' });
@@ -3130,6 +3158,11 @@ app.post('/auth/login', async (req, res) => {
     }
 
     freioLimpa(chaveFreio);
+    // O FIM FELIZ TAMBÉM VAI PARA O LOG. Sem ele, "nenhuma linha de entrada no
+    // log" tanto pode ser "ninguém tentou" quanto "todo mundo entrou" — e a
+    // primeira vez que isso importou foi justamente numa manhã em que ninguém
+    // conseguia entrar.
+    console.log(`entrada: "${u.login}" entrou.`);
     return res.json({
       ok: true,
       token_hash: link.properties.hashed_token,
