@@ -1441,6 +1441,16 @@ let filaRodando = false; // impede que dois ciclos processem a fila ao mesmo tem
 //  genérica. Ele vai para a tela como está, e para o log com um aviso, para o
 //  vocabulário ser aprendido dos casos de verdade em vez de adivinhado.
 // ============================================================
+/** A linha do escritório caiu do WhatsApp?
+ *
+ *  Sai daqui e não de dentro de `motivoDoErro` porque duas pessoas diferentes
+ *  precisam da resposta: a atendente, que lê a frase na bolha vermelha, e
+ *  quem administra, que precisa saber POR QUAL TELEFONE nada mais sai. */
+function ehLinhaDesconectada(bruto) {
+  const t = String(bruto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return /(disconnected|not connected|desconect|instance.{0,20}(closed|down)|qrcode|qr code|需要)/.test(t);
+}
+
 function motivoDoErro(bruto) {
   const cru = String(bruto || '');
   const t = cru.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -1478,7 +1488,7 @@ function motivoDoErro(bruto) {
     return 'Este número não tem conta no WhatsApp, ou está escrito errado. '
          + 'Confira o número na ficha do cliente.';
   }
-  if (/(disconnected|not connected|desconect|instance.{0,20}(closed|down)|qrcode|qr code|需要)/.test(t)) {
+  if (ehLinhaDesconectada(cru)) {
     return 'A linha do escritório está desconectada do WhatsApp. '
          + 'Avise quem administra: é preciso reconectar o aparelho.';
   }
@@ -1526,6 +1536,29 @@ async function marcarErroNaFila(itemId, bruto, avisoVantoroId) {
   }
   if (error) console.error(`Não consegui marcar o item ${itemId} como erro:`, error.message);
   if (avisoVantoroId) await avisoDeuErro(avisoVantoroId, String(bruto || ''));
+}
+
+// LINHA CAÍDA É AVISO, E NÃO MAIS UMA FALHA NA PILHA.
+//
+// "Uazapi respondeu 503: WhatsApp disconnected: session is not reconnectable"
+// não é uma mensagem que deu errado: é um TELEFONE DO ESCRITÓRIO fora do ar,
+// e nada mais sai por ele até alguém reconectar. A atendente vê a bolha
+// vermelha com a frase certa; quem administra não via nada, e só ficava
+// sabendo quando alguém reclamasse.
+//
+// Uma linha por telefone a cada dez minutos: repetir a cada mensagem
+// afogaria o log justamente quando ele mais importa, e calar de vez faria a
+// linha ficar caída o fim de semana inteiro sem ninguém notar.
+const linhasAvisadas = new Map();
+function avisarQueALinhaCaiu(bruto, numero, nome) {
+  if (!ehLinhaDesconectada(bruto)) return;
+  const ultimo = linhasAvisadas.get(numero) || 0;
+  if (Date.now() - ultimo < 10 * 60 * 1000) return;
+  linhasAvisadas.set(numero, Date.now());
+  console.error(`LINHA DESCONECTADA: o telefone ${numero}${nome ? ` (${nome})` : ''} `
+    + 'perdeu a conexão com o WhatsApp e NADA MAIS SAI por ele. '
+    + 'É preciso reconectar o aparelho na Uazapi — ler o QR de novo. '
+    + 'As mensagens ficam na fila marcadas como erro, e podem ser reenviadas depois.');
 }
 
 async function processarFilaDeEnvio() {
@@ -1600,7 +1633,7 @@ async function processarFilaDeEnvio() {
       // Descobre para qual número enviar e por qual advogado (token/servidor).
       const { data: conv } = await supabase
         .from('conversas')
-        .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor)')
+        .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor, numero, nome)')
         .eq('id', item.conversa_id)
         .single();
 
@@ -1878,7 +1911,14 @@ async function processarFilaDeEnvio() {
         // O aviso de audiência volta a aparecer como "Falhou" no Vantoro, com o
         // motivo — em vez de sumir e só dar as caras quando o cliente faltar.
         await marcarErroNaFila(item.id, envioErro.message, item.aviso_vantoro_id);
-        console.error(`Falha ao enviar (${item.id}):`, envioErro.message);
+        // POR QUAL LINHA E PARA QUEM. O identificador do item é um código que
+        // não diz nada a ninguém; em 19/08 o log trazia só ele, e para
+        // descobrir qual telefone tinha caído era preciso ir ao banco.
+        const linha = conv.advogado.numero || 'telefone desconhecido';
+        const deQuem = conv.advogado.nome ? ` (${conv.advogado.nome})` : '';
+        console.error(`Falha ao enviar pela linha ${linha}${deQuem} para ${numeroDestino} `
+                    + `[item ${item.id}]:`, envioErro.message);
+        avisarQueALinhaCaiu(envioErro.message, linha, conv.advogado.nome);
       }
     }
   } catch (e) {
