@@ -1,6 +1,7 @@
 // PROVA DA PONTE — o `index.js` de verdade, contra um Supabase e uma Uazapi
 // de mentira que falam o mesmo protocolo.
 import { spawn } from "node:child_process";
+import http from "node:http";
 import { subirFalsoSupabase, subirFalsaUazapi, subirFalsoVantoro } from "./falso-supabase.mjs";
 
 let falhas = 0, feitas = 0;
@@ -917,6 +918,50 @@ console.log("\n11. PAINEL_ORIGEM torta não derruba a entrada");
        r.headers.get("access-control-allow-origin") === "https://zorvin.exemplo.com.br");
     await t.parar();
   }
+}
+
+// ============================================================
+//  12. UM PASSO DA ENTRADA QUE TRAVA NÃO TRAVA A ENTRADA
+//
+//  O caso real: o log dizia "tentativa de rodrigo.sousa" e depois SILÊNCIO. A
+//  entrada é uma fila de cinco idas à rede e só a primeira tinha prazo; as
+//  outras, travando, penduravam tudo. A tela esperou 75 segundos e desistiu,
+//  sem que ninguém pudesse dizer qual passo estava parado.
+//
+//  Aqui o Vantoro de mentira simplesmente não responde. Antes, a entrada ficava
+//  pendurada junto; agora ela desiste, diz QUAL passo e devolve o botão.
+// ============================================================
+console.log("\n12. Um passo travado não pendura a entrada");
+{
+  // Um Vantoro que aceita a conexão e nunca responde — o pior tipo de falha,
+  // porque não dá erro: só não volta.
+  const mudo = http.createServer(() => { /* nunca responde */ });
+  await new Promise((r) => mudo.listen(0, "127.0.0.1", r));
+  const urlMudo = `http://127.0.0.1:${mudo.address().port}`;
+
+  const t = await subirTudo({ VANTORO_API_URL: urlMudo, VANTORO_API_TOKEN: "tok" });
+  const comecou = Date.now();
+  const r = await fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "rodrigo.sousa", senha: "x" }),
+  });
+  const levou = Date.now() - comecou;
+  const corpo = await r.json().catch(() => ({}));
+
+  ok("a entrada responde em vez de ficar pendurada", r.status >= 400 && r.status < 600,
+     `veio ${r.status} depois de ${levou}ms`);
+  ok("e responde antes dos 75 segundos que a tela espera", levou < 40000,
+     `levou ${levou}ms`);
+  ok("dizendo qual passo não respondeu", /não respondeu/.test(corpo.erro || ""),
+     `veio: ${JSON.stringify(corpo.erro)}`);
+  await espera(300);
+  ok("e o log marca o passo e o tempo",
+     /entrada · perguntar ao Vantoro: FALHOU/.test(t.registro.join("")),
+     "sem isso, 'não entrou' continua sendo tudo o que se sabe");
+
+  await t.parar();
+  await new Promise((r) => mudo.close(r));
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

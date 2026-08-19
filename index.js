@@ -3104,6 +3104,50 @@ app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
     telefones_sem_departamento: orfaos.length, problema } };
 }));
 
+// ------------------------------------------------------------
+//  CADA PASSO DA ENTRADA TEM PRAZO, E CADA PASSO APARECE NO LOG
+//
+//  A entrada é uma fila de cinco idas à rede: Vantoro, criar/achar a conta,
+//  alinhar o nome, espelhar o usuário, gerar o bilhete. Só a primeira tinha
+//  prazo. Qualquer uma das outras, travando, travava a entrada inteira — e o
+//  log não dizia nada, porque nenhuma delas escreve ao começar.
+//
+//  Foi o que aconteceu numa manhã de expediente: "tentativa de rodrigo.sousa"
+//  no log e depois silêncio; a tela esperou 75 segundos e desistiu, sem que
+//  ninguém pudesse dizer QUAL passo estava pendurado.
+//
+//  Agora cada um tem prazo próprio e deixa no log quanto demorou. Uma entrada
+//  que falha em cinco segundos dizendo onde falhou vale mais do que uma que
+//  fica pendurada dando esperança.
+// ------------------------------------------------------------
+function comPrazo(promessa, ms, oQue) {
+  return new Promise((resolve, reject) => {
+    const relogio = setTimeout(
+      () => reject(new Error(`o passo "${oQue}" não respondeu em ${Math.round(ms / 1000)}s`)), ms);
+    Promise.resolve(promessa).then(
+      (v) => { clearTimeout(relogio); resolve(v); },
+      (e) => { clearTimeout(relogio); reject(e); });
+  });
+}
+
+async function passoDaEntrada(oQue, ms, fazer) {
+  const comecou = Date.now();
+  try {
+    const r = await comPrazo(fazer(), ms, oQue);
+    console.log(`entrada · ${oQue}: ${Date.now() - comecou}ms`);
+    return r;
+  } catch (e) {
+    console.error(`entrada · ${oQue}: FALHOU depois de ${Date.now() - comecou}ms — ${(e && e.message) || e}`);
+    // O NOME DO PASSO VIAJA COM O ERRO, e não dentro do texto dele. O passo
+    // falha de vários jeitos — prazo estourado aqui, prazo estourado lá dentro,
+    // conexão recusada — e procurar o nome no meio da frase só acertaria o
+    // primeiro. Numa propriedade, ele sobrevive a qualquer mensagem.
+    const erro = (e instanceof Error) ? e : new Error(String(e));
+    if (!erro.passo) erro.passo = oQue;
+    throw erro;
+  }
+}
+
 app.options('/auth/login', (req, res) => {
   liberarCors(res, req);
   // O PEDIDO DE PERMISSÃO, que vem ANTES do de verdade. Uma entrada com corpo
@@ -3132,10 +3176,8 @@ app.post('/auth/login', async (req, res) => {
   }
 
   try {
-    const { status, corpo } = await chamarVantoro('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ login, senha }),
-    });
+    const { status, corpo } = await passoDaEntrada('perguntar ao Vantoro', 25000, () =>
+      chamarVantoro('/auth/login', { method: 'POST', body: JSON.stringify({ login, senha }) }));
     if (status !== 200 || !corpo || !corpo.ok) {
       // Repassa 401/403 como vieram; qualquer outra coisa é problema nosso, e
       // dizer "usuário ou senha incorretos" quando o Vantoro está fora do ar
@@ -3152,7 +3194,7 @@ app.post('/auth/login', async (req, res) => {
 
     const u = corpo.usuario;
     const email = String(u.email || '').toLowerCase();
-    const id = await contaDoSupabase(email, u.nome);
+    const id = await passoDaEntrada('conta no Supabase', 20000, () => contaDoSupabase(email, u.nome));
 
     // O NOME VEM DO CADASTRO DO VANTORO, SEMPRE.
     //
@@ -3165,15 +3207,21 @@ app.post('/auth/login', async (req, res) => {
     // Agora cada entrada realinha. É de propósito que a fonte seja o Vantoro:
     // é lá que o cadastro de pessoa mora e é lá que quem administra mexe. O
     // Zorvin não é dono do nome de ninguém.
-    await alinharNomeDaConta(id, u.nome);
+    // ALINHAR O NOME NÃO PODE SEGURAR NINGUÉM NA PORTA. O comentário acima já
+    // dizia que falhar aqui não impede a entrada — mas TRAVAR aqui impedia,
+    // porque não havia prazo. Agora tem, e o erro é engolido de propósito: a
+    // pessoa entra com o nome de antes e a próxima entrada tenta de novo.
+    await passoDaEntrada('alinhar o nome', 10000, () => alinharNomeDaConta(id, u.nome))
+      .catch(() => {});
 
     // Espelha quem é a pessoa, para a tela de permissões mostrar nome em vez
     // de um código, e para as regras de visibilidade terem onde se apoiar.
     // `admin` do Vantoro manda: quem é superusuário lá administra aqui.
-    const { error: erroUsuario } = await supabase.from('usuarios').upsert({
-      id, login: u.login, nome: u.nome || '', email,
-      admin: Boolean(u.admin), ativo: true, visto_em: new Date().toISOString(),
-    }, { onConflict: 'id' });
+    const { error: erroUsuario } = await passoDaEntrada('espelhar o usuário', 15000, () =>
+      supabase.from('usuarios').upsert({
+        id, login: u.login, nome: u.nome || '', email,
+        admin: Boolean(u.admin), ativo: true, visto_em: new Date().toISOString(),
+      }, { onConflict: 'id' }));
     if (erroUsuario) {
       console.log(`login: não espelhei o usuário (${erroUsuario.message}). Falta rodar o SQL de departamentos?`);
     }
@@ -3188,9 +3236,8 @@ app.post('/auth/login', async (req, res) => {
 
     // O bilhete de entrada. É de uso único e curta duração — o painel troca
     // por uma sessão na hora. A senha não vai junto, e não existe do lado de cá.
-    const { data: link, error: erroLink } = await supabase.auth.admin.generateLink({
-      type: 'magiclink', email,
-    });
+    const { data: link, error: erroLink } = await passoDaEntrada('gerar o bilhete', 20000, () =>
+      supabase.auth.admin.generateLink({ type: 'magiclink', email }));
     if (erroLink || !link || !link.properties || !link.properties.hashed_token) {
       console.error('login: generateLink falhou —', erroLink && erroLink.message);
       return res.status(502).json({ ok: false, erro: 'Não consegui abrir a sessão. Tente de novo.' });
@@ -3209,8 +3256,18 @@ app.post('/auth/login', async (req, res) => {
       usuario: { login: u.login, nome: u.nome, admin: Boolean(u.admin) },
     });
   } catch (e) {
-    console.error('login:', (e && e.message) || e);
-    return res.status(502).json({ ok: false, erro: 'Não foi possível entrar agora. Tente de novo.' });
+    const motivo = (e && e.message) || String(e);
+    console.error('entrada: FALHOU —', motivo);
+    // O PASSO VAI NA RESPOSTA. Quem está na porta não precisa do detalhe
+    // técnico, mas precisa saber que não foi a senha dele — e quem administra
+    // precisa saber ONDE. Sem isso o relato volta como "não entrou", que é
+    // onde esta manhã começou.
+    return res.status(502).json({
+      ok: false,
+      erro: e && e.passo
+        ? `Não foi possível entrar agora: ${e.passo} não respondeu. Tente de novo.`
+        : 'Não foi possível entrar agora. Tente de novo.',
+    });
   }
 });
 
