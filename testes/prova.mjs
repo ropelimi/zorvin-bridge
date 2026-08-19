@@ -15,7 +15,7 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {} } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
@@ -28,7 +28,9 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
       permissoes: [], conversa_tags: [], notas: [],
       ...tabelas,
     },
-    usuarios: [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
+    // As contas do Auth. Separadas da tabela `usuarios` de propósito: são duas
+    // coisas diferentes no Supabase de verdade, e a entrada mexe nas duas.
+    usuarios: contas || [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
   });
   const porta = 3000 + Math.floor(Math.random() * 900);
   // O caminho sai DESTE arquivo, e não do diretório de onde se chamou. Com
@@ -962,6 +964,67 @@ console.log("\n12. Um passo travado não pendura a entrada");
 
   await t.parar();
   await new Promise((r) => mudo.close(r));
+}
+
+// ============================================================
+//  13. QUEM JÁ ENTROU UMA VEZ NÃO PASSA MAIS PELO AUTH
+//
+//  A entrada chamava `createUser` A CADA LOGIN, contando com o erro "já
+//  registrado" para descobrir que a conta existe. Uma ESCRITA na API de
+//  administração do Auth por login de cada pessoa, para responder o que o
+//  banco responde num piscar.
+//
+//  No dia em que essa API ficou lenta: entrada de 6 minutos e meio, e depois
+//  nem isso. O escritório inteiro na porta, e o passo que travava era a
+//  criação de contas que existiam há meses.
+// ============================================================
+console.log("\n13. Quem já entrou não passa mais pelo Auth");
+{
+  const VANTORO = { usuarios: [{ login: "rodrigo.sousa", nome: "Rodrigo Sousa",
+                                 email: "rodrigo.sousa@x", admin: true }] };
+  const entrar = (t) => fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "rodrigo.sousa", senha: "certa" }),
+  });
+
+  // ---- 13a. já está em `usuarios`: nem toca no Auth ----
+  {
+    const t = await subirTudo({}, {
+      vantoro: VANTORO,
+      tabelas: { usuarios: [{ id: "11111111-1111-1111-1111-111111111111", login: "rodrigo.sousa",
+                              nome: "Rodrigo Sousa", email: "rodrigo.sousa@x", admin: true }] },
+      // A conta no Auth existe, como existe em produção para quem já entrou.
+      contas: [{ id: "11111111-1111-1111-1111-111111111111", email: "rodrigo.sousa@x", jwt: "jwt-bom",
+                 user_metadata: { nome: "Rodrigo Sousa" } }],
+    });
+    const r = await entrar(t);
+    const corpo = await r.json().catch(() => ({}));
+    ok("entra", r.status === 200 && corpo.ok, `veio ${r.status} ${JSON.stringify(corpo.erro)}`);
+
+    const criacoes = t.sb.chamadas.filter(
+      (c) => c.caminho === "/auth/v1/admin/users" && c.metodo === "POST").length;
+    ok("sem criar conta nenhuma no Auth", criacoes === 0,
+       `bateu ${criacoes}× na criação de contas — era uma escrita por login de cada pessoa`);
+    await t.parar();
+  }
+
+  // ---- 13b. primeira entrada da vida: o caminho antigo continua ----
+  //
+  // Quem nunca entrou não está em `usuarios`, e a conta precisa nascer. Se
+  // esta parte quebrasse, ninguém novo entraria nunca — e isso só apareceria
+  // no dia da contratação.
+  {
+    const t = await subirTudo({}, { vantoro: VANTORO, tabelas: { usuarios: [] } });
+    const r = await entrar(t);
+    const corpo = await r.json().catch(() => ({}));
+    ok("quem nunca entrou continua entrando", r.status === 200 && corpo.ok,
+       `veio ${r.status} ${JSON.stringify(corpo.erro)}`);
+    ok("e fica gravado para a próxima ser barata",
+       (t.sb.dados.usuarios || []).some((u) => u.email === "rodrigo.sousa@x"),
+       JSON.stringify(t.sb.dados.usuarios));
+    await t.parar();
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

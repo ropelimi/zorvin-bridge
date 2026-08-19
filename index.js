@@ -2145,6 +2145,31 @@ setInterval(() => {
 
 // Acha (ou cria) a conta do Supabase daquele e-mail e devolve o id.
 async function contaDoSupabase(email, nome) {
+  // ------------------------------------------------------------
+  //  PRIMEIRO O BANCO, QUE JÁ SABE A RESPOSTA
+  //
+  //  Isto aqui começava chamando `createUser` A CADA ENTRADA, contando com o
+  //  erro "já registrado" para descobrir que a conta existe. Funcionava, e era
+  //  uma ESCRITA na API de administração do Auth por login de cada pessoa —
+  //  o caminho mais caro e mais frágil que havia para responder uma pergunta
+  //  que o banco responde num piscar.
+  //
+  //  No dia em que essa API ficou lenta, o efeito foi este: entrada de 6
+  //  minutos e meio, e depois nem isso. O escritório inteiro na porta, e o
+  //  passo que travava era a criação de contas que já existiam há meses.
+  //
+  //  `usuarios` guarda o id e o e-mail de todo mundo que já entrou — a própria
+  //  ponte grava isso ao fim de cada entrada. Para quem já entrou uma vez (que
+  //  é todo mundo, todo dia), a resposta sai daí: uma leitura indexada, sem
+  //  tocar no Auth.
+  //
+  //  O caminho antigo continua embaixo, para quem entra pela primeira vez —
+  //  ou para quem foi apagado de `usuarios` e continua existindo no Auth.
+  // ------------------------------------------------------------
+  const { data: jaConhecido } = await supabase
+    .from('usuarios').select('id').eq('email', email).maybeSingle();
+  if (jaConhecido && jaConhecido.id) return jaConhecido.id;
+
   // `listUsers` não filtra por e-mail na API atual, então a criação vem
   // primeiro: se já existir, o erro diz isso e aí sim procuramos. Evita
   // varrer a lista inteira de usuários a cada login.
