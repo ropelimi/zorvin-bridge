@@ -699,11 +699,42 @@ const mensagemDaUazapi = (texto, id) => ({
   }
 
   // ---- 9b. a linha do escritório desconectada ----
+  //
+  // Aqui há DUAS pessoas para avisar, e elas precisam de coisas diferentes: a
+  // atendente lê a frase na bolha vermelha; quem administra precisa saber POR
+  // QUAL TELEFONE nada mais sai. Em 19/08 o log trazia só o código do item —
+  // "Falha ao enviar (7dbc4b7e-3fdc-…)" — e para descobrir qual linha tinha
+  // caído era preciso ir ao banco.
   {
-    const { linha } = await tentarEnviar({ status: 400, corpo: { error: "instance is disconnected" } });
+    const { linha, registro } = await tentarEnviar({
+      status: 503, corpo: { error: true, message: "WhatsApp disconnected: session is not reconnectable" } });
     ok("linha desconectada diz que é preciso reconectar",
        /desconectada|reconectar/i.test(linha?.erro_motivo || ""),
        `veio: ${JSON.stringify(linha?.erro_motivo)}`);
+    ok("e o log diz qual telefone do escritório caiu",
+       new RegExp(TELEFONE.numero).test(registro), registro.slice(-400));
+    ok("com o nome dele, para quem não decora número",
+       new RegExp(TELEFONE.nome).test(registro), registro.slice(-400));
+    ok("e para quem a mensagem ia",
+       /5511999998888/.test(registro), registro.slice(-400));
+    // O AVISO ALTO, separado da falha da mensagem: não é uma mensagem que deu
+    // errado, é um telefone fora do ar.
+    ok("e grita que NADA MAIS SAI por aquela linha",
+       /LINHA DESCONECTADA/.test(registro) && /NADA MAIS SAI/.test(registro),
+       registro.slice(-500));
+    ok("dizendo o conserto — reconectar o aparelho",
+       /reconectar o aparelho na Uazapi/.test(registro), registro.slice(-500));
+  }
+
+  // ---- 9b-bis. um erro comum NÃO vira aviso de linha caída ----
+  //
+  // Gritar "LINHA DESCONECTADA" por um número errado faria quem administra ir
+  // reconectar um aparelho que está de pé. Aviso que grita à toa é aviso que
+  // se aprende a ignorar.
+  {
+    const { registro } = await tentarEnviar({ status: 400, corpo: { error: "number not exists" } });
+    ok("número inexistente não grita linha caída",
+       !/LINHA DESCONECTADA/.test(registro), registro.slice(-300));
   }
 
   // ---- 9c. a Uazapi fora do ar ----
