@@ -905,8 +905,15 @@ app.post('/webhook', async (req, res) => {
     // importação de histórico já preenchia, então a bolha mostra igual.
     if (chat.ehGrupo) base.enviado_por = autorNoGrupo(body, m);
     // Se a mensagem recebida é uma RESPOSTA a outra, guarda a citação.
-    const extras = extrairResposta(m);
-    const msgErro = await salvarMensagem(base, extras);
+    // A duração vai junto dos campos de citação, e não dentro de `base`, de
+    // propósito: `salvarMensagem` já sabe regravar sem os extras quando o banco
+    // não tem a coluna. Numa base sem o script rodado, a mensagem entra do
+    // mesmo jeito — só sem o tempo.
+    const extras = { ...(extrairResposta(m) || {}) };
+    const segundos = segundosDaMidia(m, tipo);
+    if (segundos) extras.midia_segundos = segundos;
+
+    const msgErro = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
 
     // A CONVERSA ARQUIVADA VOLTA quando o contato escreve.
@@ -1214,6 +1221,48 @@ async function salvarMensagem(base, extras) {
       .upsert(base, { onConflict: 'id_uazapi', ignoreDuplicates: true }));
   }
   return error;
+}
+
+// ------------------------------------------------------------
+//  QUANTO TEMPO TEM O ÁUDIO
+//
+//  No WhatsApp a lista de conversas mostra "Mensagem de voz (1:19)", e o tempo
+//  não é enfeite: é o que separa um "ok" de dez segundos de um relato de três
+//  minutos, na hora de decidir o que ouvir primeiro. Sem ele, a prévia do
+//  Zorvin dizia só que havia um áudio.
+//
+//  O NOME DO CAMPO NÃO ESTÁ CONFIRMADO. A Uazapi entrega o nó cru da mensagem
+//  em `content`, e o WhatsApp guarda a duração ali em `seconds` — mas isso é o
+//  que a documentação sugere, não o que eu vi. Então procuramos em vários
+//  cantos e por vários nomes, e quando um áudio chega sem nenhum deles o log
+//  diz QUAIS campos vieram. É assim que o nome certo se descobre, com um áudio
+//  de verdade, em vez de por adivinhação.
+// ------------------------------------------------------------
+const NOMES_DE_DURACAO = ['seconds', 'duration', 'duracao', 'audioDuration',
+                          'mediaDuration', 'durationInSeconds'];
+let avisouSemDuracao = false;
+
+function segundosDaMidia(m, tipo) {
+  const c = m.content && typeof m.content === 'object' ? m.content : {};
+  const cantos = [m, c, c.audioMessage, c.videoMessage, c.message,
+                  c.message && c.message.audioMessage];
+  for (const canto of cantos) {
+    if (!canto || typeof canto !== 'object') continue;
+    for (const nome of NOMES_DE_DURACAO) {
+      const v = Number(canto[nome]);
+      // Um dia inteiro é o teto do absurdo: campos chamados "duration" às
+      // vezes vêm em milissegundos, e 79000 viraria "1316:40" na tela.
+      if (Number.isFinite(v) && v > 0 && v < 24 * 3600) return Math.round(v);
+    }
+  }
+  if ((tipo === 'audio' || tipo === 'video') && !avisouSemDuracao) {
+    avisouSemDuracao = true;
+    const chaves = Object.keys(c).slice(0, 25);
+    console.log(`Áudio/vídeo sem duração reconhecida. Os campos que vieram em `
+      + `content foram: ${JSON.stringify(chaves)}. Se um deles for a duração, `
+      + 'é só acrescentar o nome em NOMES_DE_DURACAO.');
+  }
+  return null;
 }
 
 // ------------------------------------------------------------
