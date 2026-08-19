@@ -2822,6 +2822,131 @@ app.get('/historico/contato/:id', rotaVantoro(async (req) => {
 
 
 // ------------------------------------------------------------
+//  A FOTO DO CONTATO EM TAMANHO CHEIO
+//
+//  A foto de perfil chegava pelo webhook e ficava guardada. Só que o campo que
+//  vinha na frente era `imagePreview` — a MINIATURA. Corrigida a ordem, as
+//  novas passam a vir cheias; as que já estão guardadas, não: o webhook só
+//  traz foto quando o contato manda mensagem, e um cliente que não escreve há
+//  um mês fica com a miniatura de um mês atrás para sempre.
+//
+//  Esta rota vai buscar a foto DE NOVO, sob demanda. O painel só a oferece
+//  quando a foto aberta é pequena de verdade — não adianta pedir de novo o que
+//  já está bom.
+//
+//  A ROTA DA UAZAPI VARIA COM A VERSÃO, como já variava a de download de mídia.
+//  Mesma solução, e pelo mesmo motivo: tenta as conhecidas, LEMBRA a que
+//  serviu, e quando nenhuma serve diz isso em português em vez de falhar
+//  calada. Se um dia o servidor mudar de rota, uma linha nesta lista resolve.
+// ------------------------------------------------------------
+const ROTAS_DE_FOTO = [
+  { rota: '/chat/details',          corpo: (n) => ({ number: n }) },
+  { rota: '/chat/GetNameAndImageURL', corpo: (n) => ({ number: n, preview: false }) },
+  { rota: '/contact/picture',       corpo: (n) => ({ number: n }) },
+];
+const rotaDeFotoQueServe = new Map();
+
+/** Acha a maior foto dentro da resposta, seja qual for o formato.
+ *
+ *  Procurar por NOME de campo (`imgUrl`, `profilePicUrl`, …) obrigaria a
+ *  conhecer de antemão o formato de cada versão, que é justamente o que não se
+ *  sabe. Aqui a regra é a que vale para todas: um endereço http que pareça
+ *  imagem, preferindo o que NÃO é miniatura. */
+function acharFotoNaResposta(dados) {
+  const achados = [];
+  const andar = (v, caminho) => {
+    if (!v) return;
+    if (typeof v === 'string') {
+      if (/^https?:\/\//.test(v) && /(img|image|pic|photo|foto|avatar)/i.test(caminho)) {
+        achados.push({ url: v, miniatura: /(preview|thumb|small)/i.test(caminho) });
+      }
+      return;
+    }
+    if (typeof v !== 'object') return;
+    for (const k of Object.keys(v)) andar(v[k], caminho + '.' + k);
+  };
+  andar(dados, '');
+  const cheia = achados.find((a) => !a.miniatura);
+  return (cheia || achados[0] || {}).url || null;
+}
+
+async function buscarFotoNaUazapi(servidor, token, numero) {
+  const lembrada = rotaDeFotoQueServe.get(servidor);
+  const ordem = lembrada
+    ? [lembrada, ...ROTAS_DE_FOTO.filter((r) => r.rota !== lembrada.rota)]
+    : ROTAS_DE_FOTO;
+
+  const tentadas = [];
+  for (const candidata of ordem) {
+    try {
+      const r = await fetchComTimeout(`${servidor}${candidata.rota}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', token },
+        body: JSON.stringify(candidata.corpo(numero)),
+      }, 15000);
+      tentadas.push(`${candidata.rota} → ${r.status}`);
+      if (!r.ok) {
+        if (lembrada && candidata.rota === lembrada.rota) rotaDeFotoQueServe.delete(servidor);
+        continue;
+      }
+      const dados = await r.json().catch(() => null);
+      const url = acharFotoNaResposta(dados);
+      if (!url) continue;
+      if (!lembrada || lembrada.rota !== candidata.rota) {
+        console.log(`foto do contato: este servidor atende por ${candidata.rota}.`);
+        rotaDeFotoQueServe.set(servidor, candidata);
+      }
+      return { url };
+    } catch (e) {
+      tentadas.push(`${candidata.rota} → ${e.message}`);
+      if (lembrada && candidata.rota === lembrada.rota) rotaDeFotoQueServe.delete(servidor);
+    }
+  }
+  console.log('foto do contato: nenhuma rota serviu — ' + tentadas.join(' · '));
+  return { url: null, tentadas };
+}
+
+app.options('/contato/foto', (req, res) => { liberarCors(res); res.sendStatus(204); });
+// `rotaVantoro` é o embrulho de CORS + login + erro. O nome vem de onde ele
+// nasceu; o que ele faz serve para qualquer rota que exija estar logado.
+app.post('/contato/foto', rotaVantoro(async (req) => {
+  const conversaId = String((req.body && req.body.conversa_id) || '').trim();
+  if (!conversaId) return { status: 400, corpo: { ok: false, erro: 'Informe a conversa.' } };
+
+  const { data: conv } = await supabase
+    .from('conversas')
+    .select('id, contato:contato_id (id, numero, foto_url), advogado:advogado_id (servidor, token)')
+    .eq('id', conversaId).maybeSingle();
+  if (!conv || !conv.contato || !conv.advogado) {
+    return { status: 404, corpo: { ok: false, erro: 'Não achei essa conversa.' } };
+  }
+  if (!conv.advogado.token) {
+    return { status: 503, corpo: { ok: false, erro: 'Este telefone não está conectado à Uazapi.' } };
+  }
+  // Grupo não tem foto de perfil de pessoa; pedir seria pedir o que não existe.
+  const numero = String(conv.contato.numero || '');
+  if (!numero || numero.startsWith('grupo:')) {
+    return { status: 400, corpo: { ok: false, erro: 'Esta conversa não tem foto de perfil para buscar.' } };
+  }
+
+  const servidor = (conv.advogado.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+  const { url } = await buscarFotoNaUazapi(servidor, conv.advogado.token, numero);
+  if (!url) {
+    return { status: 502, corpo: { ok: false,
+      erro: 'Não consegui buscar a foto agora. Ela aparece maior sozinha na próxima mensagem deste contato.' } };
+  }
+  if (url === conv.contato.foto_url) {
+    return { status: 200, corpo: { ok: true, foto_url: url, trocou: false } };
+  }
+  const { error } = await supabase.from('contatos').update({ foto_url: url }).eq('id', conv.contato.id);
+  if (error) {
+    return { status: 502, corpo: { ok: false, erro: 'Achei a foto, mas não consegui guardá-la.' } };
+  }
+  return { status: 200, corpo: { ok: true, foto_url: url, trocou: true } };
+}));
+
+
+// ------------------------------------------------------------
 //  POR QUE FULANO NÃO VÊ AS CONVERSAS
 //
 //  A regra de visibilidade tem alguns elos, e quando um falha o sintoma é

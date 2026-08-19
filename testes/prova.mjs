@@ -731,5 +731,117 @@ const mensagemDaUazapi = (texto, id) => ({
   }
 }
 
+// ============================================================
+//  10. A FOTO DO CONTATO EM TAMANHO CHEIO
+//
+//  A foto guardada era a MINIATURA, porque `imagePreview` vinha na frente da
+//  lista de campos do webhook. Corrigida a ordem, as novas chegam cheias; as
+//  já guardadas só melhorariam quando o contato voltasse a escrever — um
+//  cliente calado há um mês ficaria com a miniatura para sempre.
+//
+//  Esta rota vai buscar de novo, sob demanda. E, como no download de mídia, a
+//  rota da Uazapi varia com a versão: o que se prova aqui é que ela PROCURA,
+//  que LEMBRA a que serviu, e que quando nenhuma serve ela diz isso em vez de
+//  falhar calada.
+// ============================================================
+console.log("\n10. A foto do contato em tamanho cheio");
+{
+  const CONTATO = { id: "ct-1", numero: "5567988887777", nome: "MARIA", foto_url: "https://falsa/mini.jpg" };
+  const CONVERSA = { id: "cv-1", advogado_id: "adv-1", contato_id: "ct-1", nao_lidas: 0 };
+
+  const pedirFoto = async (t, corpo = { conversa_id: "cv-1" }) => {
+    const r = await fetch(`http://127.0.0.1:${t.porta}/contato/foto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer jwt-bom" },
+      body: JSON.stringify(corpo),
+    });
+    return { status: r.status, corpo: await r.json().catch(() => ({})) };
+  };
+
+  // ---- 10a. acha a cheia, e não a miniatura ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: { contatos: [{ ...CONTATO }], conversas: [{ ...CONVERSA }] },
+      uazapi: { rotaDeFoto: "/chat/details" },
+    });
+    const { corpo } = await pedirFoto(t);
+    ok("traz a foto cheia, e não a miniatura",
+       corpo.ok && /cheia/.test(corpo.foto_url || ""),
+       `veio: ${JSON.stringify(corpo)}`);
+    ok("e grava no contato, para valer da próxima vez também",
+       /cheia/.test((t.sb.dados.contatos[0] || {}).foto_url || ""),
+       `ficou: ${JSON.stringify((t.sb.dados.contatos[0] || {}).foto_url)}`);
+    await t.parar();
+  }
+
+  // ---- 10b. a rota que serve é lembrada ----
+  //
+  // Sem lembrar, cada pedido recomeça pelas 404 — e o preço não é só tempo: é
+  // uma sequência de erros no log do servidor da Uazapi a cada foto.
+  {
+    const t = await subirTudo({}, {
+      tabelas: { contatos: [{ ...CONTATO }], conversas: [{ ...CONVERSA }] },
+      uazapi: { rotaDeFoto: "/contact/picture" },   // a ÚLTIMA da lista
+    });
+    await pedirFoto(t);
+    const antes = t.uaz.recebidas.filter((c) => /chat|contact/.test(c.caminho)).length;
+    await pedirFoto(t);
+    const depois = t.uaz.recebidas.filter((c) => /chat|contact/.test(c.caminho)).length;
+    ok("o segundo pedido vai direto na rota que serviu",
+       depois - antes === 1,
+       `o primeiro tentou ${antes}, o segundo tentou ${depois - antes}`);
+    await t.parar();
+  }
+
+  // ---- 10c. nenhuma rota serve ----
+  //
+  // O caso que mais importa: o servidor pode não ter NENHUMA dessas rotas.
+  // Falhar calada deixaria o botão girando para sempre; o log tem de dizer o
+  // que foi tentado, para uma linha na lista resolver quando se souber a certa.
+  {
+    const t = await subirTudo({}, {
+      tabelas: { contatos: [{ ...CONTATO }], conversas: [{ ...CONVERSA }] },
+      uazapi: { rotaDeFoto: null },
+    });
+    const { status, corpo } = await pedirFoto(t);
+    ok("sem rota que sirva, responde em português", status >= 400 && /não consegui/i.test(corpo.erro || ""),
+       `veio: ${status} ${JSON.stringify(corpo)}`);
+    ok("e a foto que já existia NÃO é apagada",
+       (t.sb.dados.contatos[0] || {}).foto_url === "https://falsa/mini.jpg",
+       "meia foto é melhor do que nenhuma");
+    await espera(300);
+    ok("e o log diz o que foi tentado",
+       /nenhuma rota serviu/.test(t.registro.join("")),
+       "sem isso, descobrir a rota certa exige adivinhação");
+    await t.parar();
+  }
+
+  // ---- 10d. grupo não tem foto de perfil ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: {
+        contatos: [{ id: "ct-g", numero: "grupo:12036@g.us", nome: "GRUPO", foto_url: null }],
+        conversas: [{ id: "cv-g", advogado_id: "adv-1", contato_id: "ct-g", nao_lidas: 0 }],
+      },
+    });
+    const { status } = await pedirFoto(t, { conversa_id: "cv-g" });
+    ok("grupo recusa antes de sair perguntando", status === 400);
+    await t.parar();
+  }
+
+  // ---- 10e. sem login ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: { contatos: [{ ...CONTATO }], conversas: [{ ...CONVERSA }] },
+    });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/contato/foto`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversa_id: "cv-1" }),
+    });
+    ok("sem login, não passa", r.status === 401, `veio ${r.status}`);
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

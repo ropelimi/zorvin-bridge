@@ -294,6 +294,12 @@ export function subirFalsaUazapi({
   // É o único jeito de exercitar a tradução do motivo do erro sem depender de
   // uma Uazapi de verdade recusando uma mensagem.
   falharEnvio = null,
+  // A foto de perfil, e por qual rota ela é servida. Como no download de
+  // mídia, a rota varia com a versão do servidor — as outras devolvem 404, e é
+  // isso que faz a ponte ter de procurar (e faz o teste medir se ela procura).
+  // `null` em `rotaDeFoto` é o servidor em que NENHUMA serve.
+  rotaDeFoto = "/chat/details",
+  foto = { imagePreview: "https://falsa/mini.jpg", imgUrl: "https://falsa/cheia.jpg" },
 } = {}) {
   const recebidas = [];
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
@@ -320,6 +326,12 @@ export function subirFalsaUazapi({
       const de = Number(pedido.offset || 0);
       const quantas = Number(pedido.limit || 100);
       return responder(200, { messages: historico.slice(de, de + quantas) });
+    }
+
+    const ROTAS_DE_FOTO = ["/chat/details", "/chat/GetNameAndImageURL", "/contact/picture"];
+    if (ROTAS_DE_FOTO.includes(url.pathname)) {
+      if (url.pathname !== rotaDeFoto) return responder(404, { erro: "não existe nesta versão" });
+      return responder(200, foto);
     }
 
     if (ROTAS_DE_DOWNLOAD.includes(url.pathname)) {
