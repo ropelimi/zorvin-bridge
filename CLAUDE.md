@@ -33,6 +33,39 @@ package.json    — deps: express, @supabase/supabase-js
 Variáveis de ambiente (no Render):
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_KEY` — chave **service_role** (ignora RLS, é o que permite a ponte escrever)
+- `SUPABASE_JWT_SECRET` — o **JWT Secret** do projeto (Supabase → Settings → API → JWT Secret).
+  **Opcional.** Sem ela a entrada funciona como sempre funcionou; com ela, a ponte
+  consegue assinar a sessão sozinha quando o Auth do Supabase está fora do ar, e
+  confere as sessões sem sair da máquina. Ver "A entrada" abaixo.
+
+## A entrada (login) — e por que ela tem dois caminhos
+
+Em **19/08/2026** o serviço de autenticação do Supabase (`/auth/v1/*`) ficou fora do
+ar por horas, enquanto o banco do mesmo projeto respondia em 168ms. O escritório
+inteiro ficou sem entrar numa manhã de expediente.
+
+A entrada é: o Vantoro confere a senha → a ponte acha/cria a conta → a ponte abre a
+sessão. Só o último passo dependia do Auth, e bastava ele para ninguém entrar.
+
+Hoje há dois caminhos, e a resposta traz os dois quando ambos estão disponíveis:
+
+1. **`token_hash`** — o bilhete de uso único do Auth (`generateLink`); o painel troca
+   por uma sessão com `verifyOtp`. É o preferido: a sessão que sai dele se renova
+   sozinha e a pessoa fica entrada o quanto quiser.
+2. **`sessao`** — a ponte assina o bilhete com `SUPABASE_JWT_SECRET`. Vale **12 horas**
+   e **não se renova** (não há credencial de renovação, de propósito). O painel guarda
+   direto no armazenamento do `supabase-js` e recarrega — `setSession` não serve, ela
+   também chama o Auth por baixo.
+
+`exigirLogin` também confere o bilhete **localmente** com o mesmo segredo, em vez de
+chamar `auth.getUser` a cada pedido. Vale para os bilhetes que a ponte assina e para
+os que o Auth emite, porque o segredo é o mesmo.
+
+**Sem a variável, tudo isso fica desligado** e a entrada é exatamente a de antes.
+
+Fica de fora: quem **nunca entrou** precisa que a conta nasça no Auth (`createUser`),
+e isso não tem como ser contornado. Numa queda, só a primeira entrada da vida de
+alguém falha.
 
 Rotas:
 - `GET /` → health check ("Zorvin bridge online"), usada pelo cronjob

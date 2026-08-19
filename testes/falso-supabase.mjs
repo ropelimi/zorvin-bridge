@@ -64,7 +64,7 @@ function lerSelect(sel, esquema) {
 // corta em mil.
 const TETO_POSTGREST = 1000;
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0 } = {}) {
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0, authNoChao = false } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -98,6 +98,16 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     };
 
     // ---------------- Auth ----------------
+    // O AUTH INTEIRO NO CHÃO, que foi o que aconteceu em 19/08: o banco
+    // respondendo em 168ms e o `/auth/v1/*` devolvendo uma página do
+    // Cloudflare com "Error 521 — o servidor de origem não está respondendo".
+    // Sem poder imitar isso aqui, o caminho que existe justamente para esse
+    // dia seria código que ninguém nunca viu funcionar. Repare que é só o
+    // Auth: as rotas de banco continuam respondendo, como continuaram lá.
+    if (authNoChao && caminho.startsWith("/auth/v1/")) {
+      res.writeHead(521, { "Content-Type": "text/html" });
+      return res.end("<html><title>xnhc… | 521: Web server is down</title></html>");
+    }
     if (caminho === "/auth/v1/user") {
       const jwt = String(req.headers.authorization || "").replace(/^Bearer /i, "");
       const u = contas.find((x) => x.jwt === jwt);

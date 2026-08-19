@@ -1900,6 +1900,141 @@ function liberarCors(res, req) {
   }
 }
 
+// ============================================================
+//  O BILHETE DE ENTRADA ASSINADO AQUI
+//
+//  Na manhã de 19/08 o escritório inteiro ficou de fora. O banco respondia em
+//  168ms; quem não respondia era o `/auth/v1/*` do Supabase — o serviço que
+//  cuida de conta e senha, que fica atrás do MESMO endereço do banco e cai
+//  sozinho. O que voltava era uma página do Cloudflare com "Error 521".
+//
+//  A entrada dependia dele em dois pontos, e bastava um para ninguém entrar:
+//  a ponte pedia um `generateLink` para abrir a sessão, e o painel trocava
+//  esse bilhete por uma sessão com `verifyOtp`.
+//
+//  O QUE ESTE PEDAÇO FAZ. A sessão do Supabase é um bilhete assinado com um
+//  segredo do projeto — o "JWT Secret". Quem tem o segredo pode assinar um. A
+//  ponte já guarda a chave de serviço, que é mais poderosa do que isso (ela
+//  própria é um bilhete assinado com o mesmo segredo, com poder de
+//  administrador do banco). Então guardar o segredo aqui não abre porta
+//  nenhuma que já não estivesse aberta — e fecha a que derrubou a manhã.
+//
+//  QUEM CONFERE O BILHETE DEPOIS. O banco, sozinho, com o mesmo segredo. É
+//  por isso que isto funciona com o Auth no chão: quem estava logado naquela
+//  manhã continuou conversando normalmente, porque mensagem, etiqueta e busca
+//  vão direto ao banco. O que quebrava era só a PORTA DE ENTRADA.
+//
+//  O SEGREDO É OPCIONAL, DE PROPÓSITO. Sem `SUPABASE_JWT_SECRET`, tudo aqui
+//  fica desligado e a entrada é exatamente a de antes. Assim esta mudança não
+//  pode quebrar nada por si só: ela só entra em cena onde foi configurada.
+// ============================================================
+const crypto = require('crypto');
+
+const JWT_SEGREDO = String(process.env.SUPABASE_JWT_SECRET || '').replace(/[\r\n\t]/g, '').trim();
+
+// DOZE HORAS, e não os 60 minutos do Supabase.
+//
+// O bilhete do Supabase dura uma hora porque ele tem como se renovar sozinho:
+// o navegador pede um novo com o "refresh token", e isso passa pelo Auth. O
+// nosso não tem — é justamente o Auth que pode estar fora. Então ele precisa
+// durar mais do que um expediente, senão quem entrou às 8h seria posto para
+// fora às 9h no meio de um atendimento, sem ter como voltar.
+//
+// Doze horas cobrem o dia inteiro com folga e ainda são curtas o bastante para
+// que uma conta desligada no Vantoro perca o acesso no mesmo dia.
+const VALIDADE_S = 12 * 60 * 60;
+
+function base64url(dado) {
+  return Buffer.from(dado).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function assinar(conteudo) {
+  return crypto.createHmac('sha256', JWT_SEGREDO).update(conteudo).digest('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Existe segredo configurado? É o interruptor de tudo neste arquivo. */
+function souCapazDeAssinar() {
+  return JWT_SEGREDO.length >= 20;
+}
+
+/** O bilhete de sessão, no mesmo formato que o Supabase emite.
+ *
+ *  As informações são as que o banco lê: `sub` é quem a pessoa é (é dele que
+ *  sai `auth.uid()`, e é `auth.uid()` que decide quais conversas ela abre),
+ *  `role` é o papel no banco, `exp` é até quando vale. O resto está aqui
+ *  porque o Supabase põe — um bilhete que não se pareça com os outros é um
+ *  bilhete que vai surpreender alguém um dia. */
+function assinarSessao({ id, email, nome, login, foto }) {
+  const agora = Math.floor(Date.now() / 1000);
+  const exp = agora + VALIDADE_S;
+  const cabecalho = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const corpo = base64url(JSON.stringify({
+    iss: `${String(process.env.SUPABASE_URL || '').replace(/\/+$/, '')}/auth/v1`,
+    sub: id,
+    aud: 'authenticated',
+    role: 'authenticated',
+    email: email || '',
+    phone: '',
+    app_metadata: { provider: 'email', providers: ['email'] },
+    user_metadata: { nome: nome || '', login: login || '', email: email || '',
+                     foto_url: foto || null,
+                     email_verified: true, phone_verified: false },
+    // A "sessão" a que este bilhete pertence. O Supabase põe um id aqui e
+    // algumas regras de banco olham para ele; um valor sorteado agora é o que
+    // mais se parece com o que ele faria.
+    session_id: crypto.randomUUID(),
+    aal: 'aal1',
+    amr: [{ method: 'password', timestamp: agora }],
+    is_anonymous: false,
+    iat: agora,
+    exp,
+  }));
+  const assinatura = assinar(`${cabecalho}.${corpo}`);
+  return { token: `${cabecalho}.${corpo}.${assinatura}`, expira_em: exp };
+}
+
+/** Confere um bilhete SEM sair da máquina, e devolve quem é a pessoa.
+ *
+ *  Devolve `null` quando não dá para dizer que o bilhete é bom — assinatura
+ *  que não bate, prazo vencido, ou um bilhete assinado de outro jeito (um
+ *  projeto que use chave assimétrica não é conferível assim). `null` aqui não
+ *  quer dizer "recuse": quer dizer "não sei", e quem chamou volta a perguntar
+ *  ao Supabase, que é o que se fazia antes. */
+function conferirSessao(bilhete) {
+  if (!souCapazDeAssinar()) return null;
+  const partes = String(bilhete || '').split('.');
+  if (partes.length !== 3) return null;
+  const [cabecalho, corpo, assinatura] = partes;
+
+  let cab = null;
+  try { cab = JSON.parse(Buffer.from(cabecalho, 'base64url').toString('utf8')); } catch (_e) { return null; }
+  // SÓ O QUE ESTE SEGREDO ASSINA. Um projeto migrado para chave assimétrica
+  // emite `RS256`/`ES256`, e tentar conferir com o segredo simétrico daria
+  // "assinatura ruim" para um bilhete perfeitamente bom.
+  if (!cab || cab.alg !== 'HS256') return null;
+
+  const esperada = assinar(`${cabecalho}.${corpo}`);
+  // COMPARAÇÃO DE TEMPO CONSTANTE. Comparar com `===` vaza, pelo tempo que a
+  // comparação leva, quantas letras do começo bateram — e com isso dá para
+  // descobrir a assinatura certa uma letra por vez.
+  const a = Buffer.from(assinatura), b = Buffer.from(esperada);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+  let dados = null;
+  try { dados = JSON.parse(Buffer.from(corpo, 'base64url').toString('utf8')); } catch (_e) { return null; }
+  if (!dados || !dados.sub) return null;
+  if (dados.aud !== 'authenticated' || dados.role !== 'authenticated') return null;
+  if (!dados.exp || dados.exp * 1000 <= Date.now()) return null;
+
+  // No formato que o resto da ponte já espera de `auth.getUser`.
+  return { id: dados.sub, email: dados.email || '',
+           user_metadata: dados.user_metadata || {},
+           app_metadata: dados.app_metadata || {} };
+}
+
+
 // QUEM JÁ FOI CONFERIDO HÁ POUCO NÃO É CONFERIDO DE NOVO.
 //
 // `auth.getUser` é uma ida à API do Supabase — rede, ida e volta — e ela
@@ -1931,6 +2066,28 @@ async function exigirLogin(req, res) {
   }
   const lembrada = sessoesLembradas.get(jwt);
   if (lembrada && lembrada.ate > Date.now()) return lembrada.usuario;
+
+  // PRIMEIRO AQUI DENTRO, SEM SAIR DA MÁQUINA.
+  //
+  // Este era o segundo lugar em que a entrada dependia do Auth do Supabase, e
+  // o menos óbvio: `auth.getUser` é uma ida à rede, e é ela que dizia se a
+  // sessão vale. Com o Auth fora do ar, quem já estava logado ia perdendo o
+  // acesso à Ficha e ao Histórico à medida que a lembrança de 60 segundos
+  // vencia — sem entender por quê, porque as mensagens continuavam chegando.
+  //
+  // O bilhete é assinado com o segredo do projeto, e conferir uma assinatura
+  // não precisa de ninguém: é uma conta. Vale para os bilhetes que a ponte
+  // assina E para os que o Supabase emite, porque o segredo é o mesmo.
+  //
+  // Quando não dá para conferir aqui — sem segredo configurado, ou um projeto
+  // que assine com chave assimétrica — a pergunta volta a ser feita ao
+  // Supabase, exatamente como antes.
+  const local = conferirSessao(jwt);
+  if (local) {
+    limparLembradas();
+    sessoesLembradas.set(jwt, { usuario: local, ate: Date.now() + LEMBRAR_MS });
+    return local;
+  }
 
   const { data, error } = await supabase.auth.getUser(jwt);
   if (error || !data || !data.user) {
@@ -3269,40 +3426,78 @@ app.post('/auth/login', async (req, res) => {
     mandarDepartamentosAoVantoro().catch(() => {});
     aplicarPermissoes(id, u).catch(() => {});
 
-    // O bilhete de entrada. É de uso único e curta duração — o painel troca
-    // por uma sessão na hora. A senha não vai junto, e não existe do lado de cá.
-    // O BILHETE, COM UMA SEGUNDA CHANCE.
+    // ------------------------------------------------------------
+    //  ABRIR A SESSÃO — POR DOIS CAMINHOS, E O SEGUNDO NÃO DEPENDE DE NINGUÉM
     //
-    // Este é o único passo que não dá para contornar: é ele que abre a sessão.
-    // E fala com a API de administração do Auth, que é justamente a que está
-    // instável — 20 segundos sem responder numa tentativa, pronta na seguinte.
+    //  O caminho de sempre é pedir um bilhete de uso único ao Auth do
+    //  Supabase (`generateLink`); o painel troca por uma sessão na hora. É o
+    //  caminho normal e continua sendo o primeiro, porque a sessão que sai
+    //  dele se renova sozinha e dura o quanto a pessoa quiser ficar.
     //
-    // Uma repetição, e só uma. Duas seriam a pessoa esperando quase um minuto
-    // para ouvir a mesma coisa; nenhuma é desistir de um serviço que responde
-    // na segunda vez. O bilhete é de uso único e curta duração, então gerar
-    // dois não deixa rastro: o primeiro morre sem ser usado.
-    let bilhete = await passoDaEntrada('gerar o bilhete', 20000, () =>
+    //  Só que era ele o ponto único de falha: em 19/08 o Auth ficou fora e
+    //  ninguém entrou a manhã inteira. Então agora existe o segundo caminho —
+    //  a própria ponte assina o bilhete, com o segredo do projeto — e a
+    //  resposta leva os DOIS quando ambos estão disponíveis. O painel usa o
+    //  primeiro que funcionar; se o Auth responder ao `generateLink` mas
+    //  falhar no `verifyOtp`, ele ainda tem o outro no bolso.
+    //
+    //  O prazo caiu de 20 segundos (com uma segunda tentativa, 60 no total)
+    //  para 8, e a segunda tentativa saiu. Ela existia porque desistir era
+    //  não entrar; hoje desistir é entrar pelo outro caminho, e oito segundos
+    //  esperando por um serviço doente já é tempo demais na cara de quem
+    //  digitou a senha.
+    // ------------------------------------------------------------
+    const posso = souCapazDeAssinar();
+    let hashDoBilhete = null;
+    const bilhete = await passoDaEntrada('gerar o bilhete', posso ? 8000 : 20000, () =>
       supabase.auth.admin.generateLink({ type: 'magiclink', email })).catch(() => null);
-    if (!bilhete || !bilhete.data || !bilhete.data.properties) {
-      console.log('entrada: o bilhete não veio de primeira; tentando mais uma vez.');
-      bilhete = await passoDaEntrada('gerar o bilhete (2ª tentativa)', 20000, () =>
-        supabase.auth.admin.generateLink({ type: 'magiclink', email }));
-    }
-    const { data: link, error: erroLink } = bilhete;
-    if (erroLink || !link || !link.properties || !link.properties.hashed_token) {
-      console.error('login: generateLink falhou —', erroLink && erroLink.message);
+    if (bilhete && bilhete.data && bilhete.data.properties && bilhete.data.properties.hashed_token) {
+      hashDoBilhete = bilhete.data.properties.hashed_token;
+    } else if (!posso) {
+      // Sem segredo configurado não há segundo caminho: é aqui que a entrada
+      // acaba, como acabava antes.
+      console.error('login: generateLink falhou e não há SUPABASE_JWT_SECRET para assinar por conta própria.');
       return res.status(502).json({ ok: false, erro: 'Não consegui abrir a sessão. Tente de novo.' });
+    } else {
+      console.log('entrada: o Auth não deu o bilhete; assinando a sessão aqui mesmo.');
     }
+
+    // A FOTO VAI JUNTO. O painel desenha o rostinho da pessoa no canto a
+    // partir do que está na sessão; sem isto, quem entrasse pelo caminho
+    // assinado veria as iniciais no lugar da foto e concluiria que o sistema
+    // "perdeu" alguma coisa. É uma leitura de banco, que é a metade que fica
+    // de pé — e se falhar, segue sem foto em vez de segurar a entrada.
+    let fotoDaPessoa = null;
+    if (posso) {
+      try {
+        const { data: eu } = await supabase.from('usuarios')
+          .select('foto_url').eq('id', id).maybeSingle();
+        fotoDaPessoa = (eu && eu.foto_url) || null;
+      } catch (_e) { /* sem foto, e a entrada segue */ }
+    }
+
+    const sessao = posso
+      ? assinarSessao({ id, email, nome: u.nome, login: u.login, foto: fotoDaPessoa })
+      : null;
 
     freioLimpa(chaveFreio);
     // O FIM FELIZ TAMBÉM VAI PARA O LOG. Sem ele, "nenhuma linha de entrada no
     // log" tanto pode ser "ninguém tentou" quanto "todo mundo entrou" — e a
     // primeira vez que isso importou foi justamente numa manhã em que ninguém
     // conseguia entrar.
-    console.log(`entrada: "${u.login}" entrou.`);
+    console.log(`entrada: "${u.login}" entrou${hashDoBilhete ? '' : ' (pela sessão assinada aqui)'}.`);
     return res.json({
       ok: true,
-      token_hash: link.properties.hashed_token,
+      token_hash: hashDoBilhete,
+      // A SESSÃO PRONTA. Vem SEM nada que sirva para renovar: o bilhete vale
+      // doze horas e acabou. É de propósito — uma credencial de renovação
+      // seria mais uma chave de longa vida circulando no navegador, e o que
+      // ela compraria (não ter de entrar de novo no dia seguinte) não paga.
+      sessao: sessao && {
+        access_token: sessao.token,
+        expira_em: sessao.expira_em,
+        usuario_id: id,
+      },
       email,
       usuario: { login: u.login, nome: u.nome, admin: Boolean(u.admin) },
     });
@@ -3320,8 +3515,12 @@ app.post('/auth/login', async (req, res) => {
     // Sem isto, a tela mandava "tente de novo" para uma coisa que não vai dar
     // certo tentando de novo: o escritório inteiro repetindo a senha, achando
     // que errou. "Não é a sua senha" é a informação que falta.
-    const PASSOS_DO_AUTH = ['conta no Supabase', 'alinhar o nome', 'gerar o bilhete',
-                            'gerar o bilhete (2ª tentativa)'];
+    // SÓ SOBROU UM PASSO QUE O AUTH PODE DERRUBAR, e ele só acontece com
+    // quem NUNCA entrou: é a criação da conta. "Alinhar o nome" e "gerar o
+    // bilhete" também falam com o Auth, mas hoje os dois são contornados —
+    // o primeiro sai do caminho sem `await`, o segundo tem a sessão assinada
+    // aqui como saída. Nenhum dos dois chega até este ponto.
+    const PASSOS_DO_AUTH = ['conta no Supabase'];
     if (e && e.passo && PASSOS_DO_AUTH.includes(e.passo)) {
       console.error('entrada: a AUTENTICAÇÃO do Supabase não está respondendo (o banco está). '
                   + 'Reinicie o projeto em Settings → General → Restart project, '
@@ -3329,7 +3528,8 @@ app.post('/auth/login', async (req, res) => {
       return res.status(503).json({
         ok: false,
         erro: 'O serviço de autenticação está fora do ar — não é a sua senha. '
-            + 'Já avisamos quem administra; tente de novo daqui a alguns minutos.',
+            + 'Isto só atrapalha quem está entrando no Zorvin pela primeira vez; '
+            + 'quem já entrou alguma vez consegue. Avise quem administra.',
       });
     }
     // O PASSO VAI NA RESPOSTA. Quem está na porta não precisa do detalhe
