@@ -2839,10 +2839,22 @@ app.get('/historico/contato/:id', rotaVantoro(async (req) => {
 //  serviu, e quando nenhuma serve diz isso em português em vez de falhar
 //  calada. Se um dia o servidor mudar de rota, uma linha nesta lista resolve.
 // ------------------------------------------------------------
+//
+//  `preview: false` NÃO É DETALHE — é o parâmetro inteiro. A documentação da
+//  Uazapi diz, sobre `/chat/details`:
+//
+//    preview | true: imagem em tamanho preview (menor, otimizada para
+//                    listagens)
+//            | false (padrão): tamanho full (resolução original, maior
+//                    qualidade)
+//
+//  Ou seja: é este endereço que resolve o "abre grande, porém embaçada".
+//  Vai escrito mesmo sendo o padrão — um padrão que muda de versão em versão
+//  vira defeito silencioso, e este em particular já custou uma rodada.
 const ROTAS_DE_FOTO = [
-  { rota: '/chat/details',          corpo: (n) => ({ number: n }) },
+  { rota: '/chat/details',            corpo: (n) => ({ number: n, preview: false }) },
   { rota: '/chat/GetNameAndImageURL', corpo: (n) => ({ number: n, preview: false }) },
-  { rota: '/contact/picture',       corpo: (n) => ({ number: n }) },
+  { rota: '/contact/picture',         corpo: (n) => ({ number: n, preview: false }) },
 ];
 const rotaDeFotoQueServe = new Map();
 
