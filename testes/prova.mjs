@@ -2,6 +2,7 @@
 // de mentira que falam o mesmo protocolo.
 import { spawn } from "node:child_process";
 import http from "node:http";
+import crypto from "node:crypto";
 import { subirFalsoSupabase, subirFalsaUazapi, subirFalsoVantoro } from "./falso-supabase.mjs";
 
 let falhas = 0, feitas = 0;
@@ -15,7 +16,7 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0 } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
@@ -31,6 +32,7 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
     // As contas do Auth. Separadas da tabela `usuarios` de propósito: são duas
     // coisas diferentes no Supabase de verdade, e a entrada mexe nas duas.
     usuarios: contas || [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
+    authNoChao,
   });
   const porta = 3000 + Math.floor(Math.random() * 900);
   // O caminho sai DESTE arquivo, e não do diretório de onde se chamou. Com
@@ -1028,35 +1030,176 @@ console.log("\n13. Quem já entrou não passa mais pelo Auth");
 }
 
 // ============================================================
-//  14. O BILHETE QUE FALHA NA PRIMEIRA E VEM NA SEGUNDA
+//  14. QUANDO O AUTH NÃO DÁ O BILHETE, A PONTE ASSINA
 //
-//  Medido em produção: "gerar o bilhete: FALHOU depois de 20002ms" numa
-//  tentativa, e a mesma chamada respondendo na seguinte. É o único passo da
-//  entrada que não dá para contornar — é ele que abre a sessão.
+//  Medido em produção em 19/08: "gerar o bilhete: FALHOU depois de 20002ms",
+//  três vezes seguidas, e o log com uma página do Cloudflare dizendo
+//  "Error 521". O banco respondia em 168ms na MESMA chamada. Metade do
+//  projeto de pé, metade no chão — e a metade no chão era a porta de entrada.
+//
+//  Havia uma segunda tentativa aqui, e ela saiu: ela existia porque desistir
+//  era não entrar. Hoje desistir é entrar pelo outro caminho.
 // ============================================================
-console.log("\n14. O bilhete tem uma segunda chance");
+console.log("\n14. Sem o Auth, a ponte assina a sessão");
 {
-  const t = await subirTudo({}, {
+  const SEGREDO = "um-segredo-de-teste-com-tamanho-suficiente";
+  const PESSOA = { id: "11111111-1111-1111-1111-111111111111", login: "rodrigo.sousa",
+                   nome: "Rodrigo Sousa", email: "rodrigo.sousa@x", admin: true };
+  const base = {
     vantoro: { usuarios: [{ login: "rodrigo.sousa", nome: "Rodrigo Sousa",
                             email: "rodrigo.sousa@x", admin: true }] },
-    tabelas: { usuarios: [{ id: "11111111-1111-1111-1111-111111111111", login: "rodrigo.sousa",
-                            nome: "Rodrigo Sousa", email: "rodrigo.sousa@x", admin: true }] },
-    contas: [{ id: "11111111-1111-1111-1111-111111111111", email: "rodrigo.sousa@x",
-               jwt: "jwt-bom", user_metadata: { nome: "Rodrigo Sousa" } }],
-    bilhetesQueFalham: 1,
-  });
-  const r = await fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+    tabelas: { usuarios: [PESSOA] },
+    contas: [{ id: PESSOA.id, email: "rodrigo.sousa@x", jwt: "jwt-bom",
+               user_metadata: { nome: "Rodrigo Sousa" } }],
+  };
+  const entrar = (t) => fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ login: "rodrigo.sousa", senha: "x" }),
   });
-  const corpo = await r.json().catch(() => ({}));
-  ok("falhando uma vez, a entrada ainda acontece", r.status === 200 && corpo.ok,
-     `veio ${r.status} ${JSON.stringify(corpo.erro)}`);
-  ok("e com bilhete de verdade", !!corpo.token_hash);
-  await espera(300);
-  ok("o log conta que precisou de uma segunda",
-     /não veio de primeira/.test(t.registro.join("")));
-  await t.parar();
+
+  /** Lê o miolo de um bilhete sem conferir nada — é o teste olhando. */
+  const miolo = (jwt) => JSON.parse(
+    Buffer.from(String(jwt).split(".")[1], "base64url").toString("utf8"));
+
+  // ---- 14a. com o Auth de pé: os DOIS caminhos vêm na resposta ----
+  //
+  // O de sempre continua primeiro, porque a sessão que sai dele se renova
+  // sozinha. O assinado vem junto, no bolso, para o caso de o `verifyOtp` do
+  // painel falhar depois de o `generateLink` daqui ter dado certo — são duas
+  // chamadas ao mesmo serviço doente, e elas falham separadas.
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, base);
+    const corpo = await (await entrar(t)).json().catch(() => ({}));
+    ok("entra", corpo.ok === true, JSON.stringify(corpo.erro));
+    ok("com o bilhete do Auth", !!corpo.token_hash);
+    ok("e com a sessão assinada aqui, junto", !!(corpo.sessao && corpo.sessao.access_token));
+    await t.parar();
+  }
+
+  // ---- 14b. com o Auth no chão: entra do mesmo jeito ----
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, { ...base, authNoChao: true });
+    const r = await entrar(t);
+    const corpo = await r.json().catch(() => ({}));
+    ok("com o Auth fora do ar, a pessoa AINDA ENTRA", r.status === 200 && corpo.ok === true,
+       `veio ${r.status} ${JSON.stringify(corpo.erro)} — era esta a manhã de 19/08`);
+    ok("sem bilhete do Auth, porque ele não respondeu", !corpo.token_hash);
+    ok("e com a sessão assinada pela ponte", !!(corpo.sessao && corpo.sessao.access_token));
+
+    const c = corpo.sessao ? miolo(corpo.sessao.access_token) : {};
+    // `sub` é de onde sai `auth.uid()`, e é `auth.uid()` que decide quais
+    // conversas a pessoa abre. Errar isto seria dar a sessão de outra pessoa.
+    ok("o bilhete diz QUEM é a pessoa", c.sub === PESSOA.id, `dizia sub=${c.sub}`);
+    ok("com o papel que o banco espera", c.role === "authenticated" && c.aud === "authenticated");
+    ok("e o e-mail dela", c.email === "rodrigo.sousa@x", `dizia ${c.email}`);
+    // Doze horas: mais do que um expediente, porque não há como renovar.
+    const horas = (c.exp - c.iat) / 3600;
+    ok("valendo por um expediente inteiro", horas >= 8 && horas <= 24, `valia ${horas}h`);
+
+    ok("e o log conta que foi por aí",
+       /assinando a sessão aqui mesmo/.test(t.registro.join("")));
+    await t.parar();
+  }
+
+  // ---- 14c. o bilhete assinado ABRE AS PORTAS, sem perguntar ao Auth ----
+  //
+  // Era o segundo lugar em que a entrada dependia do Auth, e o menos óbvio:
+  // `exigirLogin` chamava `auth.getUser` a cada pedido do painel. Com o Auth
+  // fora, quem já estava logado ia perdendo a Ficha e o Histórico à medida
+  // que a lembrança de 60 segundos vencia — e as mensagens continuavam
+  // chegando, o que fazia a coisa parecer defeito da tela.
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, { ...base, authNoChao: true });
+    const corpo = await (await entrar(t)).json().catch(() => ({}));
+    const bilhete = corpo.sessao && corpo.sessao.access_token;
+    ok("tem bilhete para usar", !!bilhete);
+
+    const antes = t.sb.chamadas.filter((c) => c.caminho === "/auth/v1/user").length;
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=ab`, {
+      headers: { Authorization: `Bearer ${bilhete}` },
+    });
+    ok("o painel passa pela porta com ele", r.status !== 401,
+       `veio ${r.status} — 401 é a ponte dizendo "faça login"`);
+    const depois = t.sb.chamadas.filter((c) => c.caminho === "/auth/v1/user").length;
+    ok("e a ponte não foi perguntar ao Auth", depois === antes,
+       `foi ${depois - antes}× — com o Auth no chão, perguntar é não entrar`);
+    await t.parar();
+  }
+
+  // ---- 14d. bilhete mexido não passa ----
+  //
+  // O que separa "assinar a própria sessão" de "qualquer um assinar a sessão
+  // de qualquer um" é exatamente esta conferência.
+  {
+    const t = await subirTudo({ SUPABASE_JWT_SECRET: SEGREDO }, base);
+    const corpo = await (await entrar(t)).json().catch(() => ({}));
+    const bom = corpo.sessao.access_token;
+    const [cab, mio, ass] = bom.split(".");
+
+    // (1) trocar a pessoa mantendo a assinatura
+    const outroMiolo = Buffer.from(JSON.stringify({ ...miolo(bom), sub: "99999999-9999-9999-9999-999999999999" }))
+      .toString("base64url");
+    const trocado = `${cab}.${outroMiolo}.${ass}`;
+    // (2) mexer só na assinatura
+    const rabiscado = `${cab}.${mio}.${ass.slice(0, -3)}xyz`;
+    // (3) assinar com OUTRO segredo — é o caso de quem tem o formato mas não
+    //     tem a chave, que é o atacante realista
+    const outro = crypto.createHmac("sha256", "um-segredo-completamente-diferente-aqui")
+      .update(`${cab}.${mio}`).digest("base64url");
+    const forjado = `${cab}.${mio}.${outro}`;
+    // (4) vencido: assinado com o segredo CERTO, mas com o prazo no passado
+    const passado = Math.floor(Date.now() / 1000) - 60;
+    const velhoMiolo = Buffer.from(JSON.stringify({ ...miolo(bom), exp: passado }))
+      .toString("base64url");
+    const velhoAss = crypto.createHmac("sha256", SEGREDO)
+      .update(`${cab}.${velhoMiolo}`).digest("base64url");
+    const vencido = `${cab}.${velhoMiolo}.${velhoAss}`;
+
+    for (const [nome, jwt] of [["com outra pessoa dentro", trocado],
+                               ["com a assinatura rabiscada", rabiscado],
+                               ["assinado com outro segredo", forjado],
+                               ["com o prazo vencido", vencido]]) {
+      const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=ab`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      ok(`bilhete ${nome}: recusado`, r.status === 401, `veio ${r.status}`);
+    }
+    await t.parar();
+  }
+
+  // ---- 14e. sem o segredo configurado, nada muda ----
+  //
+  // É o que torna esta mudança segura de soltar: onde a variável não estiver
+  // posta, a entrada é exatamente a de antes. Ela não pode quebrar nada por
+  // si só — só entra em cena onde foi ligada.
+  {
+    const t = await subirTudo({}, base);
+    const corpo = await (await entrar(t)).json().catch(() => ({}));
+    ok("sem segredo, entra pelo caminho de sempre", corpo.ok === true);
+    ok("com o bilhete do Auth", !!corpo.token_hash);
+    ok("e sem sessão assinada nenhuma", !corpo.sessao);
+
+    // E a conferência de sessão volta a ser a ida ao Supabase.
+    const antes = t.sb.chamadas.filter((c) => c.caminho === "/auth/v1/user").length;
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=ab`, {
+      headers: { Authorization: "Bearer jwt-bom" },
+    });
+    const depois = t.sb.chamadas.filter((c) => c.caminho === "/auth/v1/user").length;
+    ok("e a sessão continua sendo conferida com o Supabase", depois > antes);
+    await t.parar();
+  }
+
+  // ---- 14f. sem segredo E com o Auth no chão: a mensagem é honesta ----
+  {
+    const t = await subirTudo({}, { ...base, authNoChao: true });
+    const r = await entrar(t);
+    const corpo = await r.json().catch(() => ({}));
+    ok("não entra, que é a verdade", r.status >= 400 && !corpo.ok, `veio ${r.status}`);
+    ok("e o log diz o que falta configurar",
+       /SUPABASE_JWT_SECRET/.test(t.registro.join("")),
+       "quem administra precisa saber que existe conserto");
+    await t.parar();
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
