@@ -3232,11 +3232,21 @@ app.post('/auth/login', async (req, res) => {
     // Agora cada entrada realinha. É de propósito que a fonte seja o Vantoro:
     // é lá que o cadastro de pessoa mora e é lá que quem administra mexe. O
     // Zorvin não é dono do nome de ninguém.
-    // ALINHAR O NOME NÃO PODE SEGURAR NINGUÉM NA PORTA. O comentário acima já
-    // dizia que falhar aqui não impede a entrada — mas TRAVAR aqui impedia,
-    // porque não havia prazo. Agora tem, e o erro é engolido de propósito: a
-    // pessoa entra com o nome de antes e a próxima entrada tenta de novo.
-    await passoDaEntrada('alinhar o nome', 10000, () => alinharNomeDaConta(id, u.nome))
+    // ALINHAR O NOME SAI DO CAMINHO — sem `await` nenhum.
+    //
+    // Primeiro ele não tinha prazo e travava a entrada para sempre. Depois
+    // ganhou prazo de 10 segundos, e aí passou a custar 10 segundos de espera
+    // a CADA pessoa, todo dia, num serviço que estava lento — para escrever um
+    // nome que ninguém está esperando.
+    //
+    // Ele fala com a mesma API de administração do Auth que hoje está doente.
+    // E é a única coisa nesta rota que não precisa acontecer agora: a pessoa
+    // entra com o nome de antes e a próxima entrada realinha.
+    //
+    // Mesmo tratamento que as permissões já recebiam duas linhas abaixo, e
+    // pelo mesmo motivo: quem está digitando a senha não pode esperar por
+    // sincronização.
+    passoDaEntrada('alinhar o nome', 10000, () => alinharNomeDaConta(id, u.nome))
       .catch(() => {});
 
     // Espelha quem é a pessoa, para a tela de permissões mostrar nome em vez
@@ -3261,8 +3271,24 @@ app.post('/auth/login', async (req, res) => {
 
     // O bilhete de entrada. É de uso único e curta duração — o painel troca
     // por uma sessão na hora. A senha não vai junto, e não existe do lado de cá.
-    const { data: link, error: erroLink } = await passoDaEntrada('gerar o bilhete', 20000, () =>
-      supabase.auth.admin.generateLink({ type: 'magiclink', email }));
+    // O BILHETE, COM UMA SEGUNDA CHANCE.
+    //
+    // Este é o único passo que não dá para contornar: é ele que abre a sessão.
+    // E fala com a API de administração do Auth, que é justamente a que está
+    // instável — 20 segundos sem responder numa tentativa, pronta na seguinte.
+    //
+    // Uma repetição, e só uma. Duas seriam a pessoa esperando quase um minuto
+    // para ouvir a mesma coisa; nenhuma é desistir de um serviço que responde
+    // na segunda vez. O bilhete é de uso único e curta duração, então gerar
+    // dois não deixa rastro: o primeiro morre sem ser usado.
+    let bilhete = await passoDaEntrada('gerar o bilhete', 20000, () =>
+      supabase.auth.admin.generateLink({ type: 'magiclink', email })).catch(() => null);
+    if (!bilhete || !bilhete.data || !bilhete.data.properties) {
+      console.log('entrada: o bilhete não veio de primeira; tentando mais uma vez.');
+      bilhete = await passoDaEntrada('gerar o bilhete (2ª tentativa)', 20000, () =>
+        supabase.auth.admin.generateLink({ type: 'magiclink', email }));
+    }
+    const { data: link, error: erroLink } = bilhete;
     if (erroLink || !link || !link.properties || !link.properties.hashed_token) {
       console.error('login: generateLink falhou —', erroLink && erroLink.message);
       return res.status(502).json({ ok: false, erro: 'Não consegui abrir a sessão. Tente de novo.' });
