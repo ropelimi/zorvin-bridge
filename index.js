@@ -556,9 +556,59 @@ function webhookAutorizado(req) {
   return diferenca === 0;
 }
 
+// ------------------------------------------------------------
+//  UM WEBHOOK RECUSADO PRECISA DIZER DE QUEM ERA
+//
+//  A linha era só "Webhook recusado: segredo ausente ou errado." — e com ela
+//  não dá para separar dois casos que pedem coisas opostas:
+//
+//    • um telefone da Uazapi cadastrado com o endereço SEM o `?token=`. Aí
+//      são MENSAGENS DE CLIENTE sendo jogadas fora, e ninguém percebe: a
+//      conversa simplesmente não aparece no painel.
+//    • alguém varrendo a internet e batendo na porta. Aí é ruído, e recusar é
+//      exatamente o certo.
+//
+//  Em 19/08 apareceram vinte recusas em vinte minutos, sempre em volta dos
+//  envios. Vinte mensagens perdidas e vinte batidas de porta se escrevem
+//  igual no log — e é essa igualdade que precisa acabar.
+//
+//  O QUE VAI E O QUE NÃO VAI. Vai o telefone dono do evento, o tipo do
+//  evento, de que endereço veio, e SE veio um segredo (ausente é
+//  configuração; errado é outra coisa). Não vai o segredo, nem um pedaço
+//  dele: um log de escritório de advocacia é lugar onde muita gente entra e
+//  nada se apaga.
+// ------------------------------------------------------------
+const recusasContadas = new Map();   // quem → quantas, desde quando
+
+function contarRecusa(req) {
+  const b = (req && req.body) || {};
+  const dono = String(b.owner || b.instance || b.instanceName
+    || (b.event && (b.event.owner || b.event.Chat)) || '').slice(0, 40) || 'sem dono no corpo';
+  const tipo = String(b.EventType || b.event_type || b.event || '').slice(0, 30) || 'sem tipo';
+  const veioAlgo = !!String(req.query.token || req.headers['x-webhook-token']
+    || req.headers['x-api-key'] || '').trim();
+  const de = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+
+  // AGRUPADO, senão a informação some no próprio volume. Vinte linhas iguais
+  // por minuto empurram para fora do log tudo o que interessa — inclusive o
+  // que a gente foi ali procurar.
+  const chave = `${dono}|${tipo}|${veioAlgo}|${de}`;
+  const antes = recusasContadas.get(chave);
+  const agora = Date.now();
+  if (antes && agora - antes.desde < 60000) { antes.quantas += 1; return; }
+  const quantas = antes ? antes.quantas : 0;
+  recusasContadas.set(chave, { quantas: 1, desde: agora });
+
+  console.warn(`Webhook recusado (${veioAlgo ? 'segredo ERRADO' : 'sem segredo nenhum'}): `
+    + `evento "${tipo}" do telefone "${dono}", vindo de ${de || 'origem desconhecida'}.`
+    + (quantas > 1 ? ` [${quantas} iguais no último minuto]` : '')
+    + (veioAlgo ? '' : ' Se este telefone é do escritório, o endereço do webhook '
+      + 'dele na Uazapi está sem o "?token=…" — e as mensagens dele estão sendo PERDIDAS.'));
+}
+
 app.post('/webhook', async (req, res) => {
   if (!webhookAutorizado(req)) {
-    console.warn('Webhook recusado: segredo ausente ou errado.');
+    contarRecusa(req);
     return res.status(403).send('nao autorizado');
   }
   res.status(200).send('OK'); // responde rápido para a Uazapi não reenviar
@@ -814,7 +864,11 @@ app.post('/webhook', async (req, res) => {
       const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
       const urlReal = await baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime);
       if (urlReal) midiaUrl = urlReal;
-      else console.log(`Anexo (${tipo}) sem arquivo: o download falhou. Mensagem ${m.messageid} fica sem mídia.`);
+      // O ID VAI JUNTO E INTEIRO — é por ele que se cruza com o `FileURL` que
+      // chega depois, num `messages_update`. Sem os dois lados escritos do
+      // mesmo jeito, não há como saber se um conserto é possível.
+      else console.log(`Anexo (${tipo}) sem arquivo: o download falhou. `
+        + `Mensagem ${m.messageid} fica sem mídia. Quem abrir a conversa vê um anexo vazio.`);
     }
 
     // BOLHA EM BRANCO, NUNCA.
@@ -903,6 +957,25 @@ async function tratarStatusMensagem(body, evento) {
 
     // Se não achamos id ou status, registramos para referência e saímos.
     if (!id || bruto === undefined || bruto === null) {
+      // O ENDEREÇO DO ARQUIVO, QUANDO VEM, MERECE LINHA PRÓPRIA.
+      //
+      // Em 19/08 um documento ficou gravado sem arquivo ("o download falhou"),
+      // e um segundo depois chegou um `messages_update` com um `FileURL`
+      // dentro — o endereço do arquivo, servido de bandeja. A ponte joga esses
+      // eventos fora sem olhar.
+      //
+      // Se o id do arquivo que chega aqui for o mesmo da mensagem que ficou
+      // vazia, existe conserto: buscar por este endereço e preencher. Se for
+      // sempre outro, não existe, e é melhor saber disso antes de escrever
+      // código. O log de antes cortava em 300 letras — bem no meio dos ids,
+      // que é justamente o que responde a pergunta.
+      const arquivo = body.FileURL || (body.event && body.event.FileURL);
+      if (arquivo) {
+        const ids = (body.event && body.event.MessageIDs) || body.MessageIDs || [];
+        console.log(`Endereço de arquivo veio num "${evento}" e foi ignorado: `
+          + `mensagens ${JSON.stringify(ids)} · ${String(arquivo).split('?')[0]}`);
+        return;
+      }
       console.log('Evento não tratado (p/ referência):', evento, JSON.stringify(body).slice(0, 300));
       return;
     }

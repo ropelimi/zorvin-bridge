@@ -1245,5 +1245,92 @@ console.log("\n15. O log conta se a ponte sabe assinar");
   }
 }
 
+// ============================================================
+//  16. O LOG DIZ DE QUEM ERA O WEBHOOK RECUSADO
+//
+//  Em 19/08 apareceram vinte "Webhook recusado: segredo ausente ou errado."
+//  em vinte minutos, e a linha não dizia de quem. Dois casos opostos se
+//  escreviam igual: um telefone do escritório cadastrado sem o `?token=` na
+//  Uazapi — e aí são mensagens de cliente sendo jogadas fora, sem ninguém
+//  perceber — ou alguém varrendo a internet, e aí recusar é o certo.
+// ============================================================
+console.log("\n16. Um webhook recusado diz de quem era");
+{
+  const t = await subirTudo({ WEBHOOK_TOKEN: "segredo-certo" }, {});
+  const bater = (busca, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook${busca}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+
+  // (1) sem segredo nenhum: o caso do telefone mal cadastrado
+  const r1 = await bater("", { EventType: "messages", owner: "5511976378160" });
+  ok("recusa quem não traz segredo", r1.status === 403);
+  await espera(200);
+  let log = t.registro.join("");
+  ok("dizendo qual telefone era", /5511976378160/.test(log), log.slice(-300));
+  ok("e que veio sem segredo nenhum", /sem segredo nenhum/.test(log), log.slice(-300));
+  ok("e apontando o conserto, com o risco escrito",
+     /\?token=/.test(log) && /PERDIDAS/.test(log), log.slice(-400));
+
+  // (2) segredo errado: outra coisa, e a linha tem de separar
+  const r2 = await bater("?token=chute", { EventType: "messages", owner: "5511900000000" });
+  ok("recusa quem traz o segredo errado", r2.status === 403);
+  await espera(200);
+  log = t.registro.join("");
+  ok("chamando isso de segredo ERRADO, e não de ausente", /segredo ERRADO/.test(log),
+     log.slice(-300));
+
+  // (3) O SEGREDO NUNCA VAI PARA O LOG. Nem o certo, nem o que tentaram.
+  ok("e o segredo não aparece em lugar nenhum do log",
+     !/segredo-certo/.test(log) && !/token=chute/.test(log),
+     "log de escritório de advocacia é lugar onde muita gente entra e nada se apaga");
+
+  // (4) VINTE IGUAIS NÃO VIRAM VINTE LINHAS. Senão o próprio volume empurra
+  //     para fora do log o que a gente foi ali procurar.
+  const antes = t.registro.join("").split("Webhook recusado").length - 1;
+  for (let i = 0; i < 12; i += 1) await bater("", { EventType: "messages", owner: "5511976378160" });
+  await espera(300);
+  const depois = t.registro.join("").split("Webhook recusado").length - 1;
+  ok("doze recusas iguais não viram doze linhas", depois - antes <= 1,
+     `viraram ${depois - antes}`);
+
+  await t.parar();
+}
+
+// ============================================================
+//  17. O ENDEREÇO DE ARQUIVO QUE CHEGA E É JOGADO FORA
+//
+//  Em 19/08: "Anexo (documento) sem arquivo: o download falhou" e, um segundo
+//  depois, um `messages_update` com um `FileURL` dentro — o endereço do
+//  arquivo, servido de bandeja, indo direto para o balde de "evento não
+//  tratado". O log de antes cortava em 300 letras, bem no meio dos ids, que é
+//  o que responde se dá para consertar.
+// ============================================================
+console.log("\n17. Um endereço de arquivo ignorado aparece no log");
+{
+  const t = await subirTudo({}, {});
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      EventType: "messages_update",
+      event: {
+        Chat: "558199043770@s.whatsapp.net",
+        FileURL: "https://novaera.uazapi.com/files/abc123.pdf?assinatura=xyz",
+        MessageIDs: ["A55DC78559D9CE9881F208"],
+        Type: "Delivered",
+      },
+    }),
+  });
+  await espera(400);
+  const log = t.registro.join("");
+  ok("o log conta que veio um endereço de arquivo",
+     /Endereço de arquivo veio num/.test(log), log.slice(-400));
+  ok("com o id da mensagem inteiro, para cruzar com o download que falhou",
+     /A55DC78559D9CE9881F208/.test(log), log.slice(-400));
+  ok("e sem a parte assinada do endereço, que não serve para nada e vaza",
+     /abc123\.pdf/.test(log) && !/assinatura=xyz/.test(log), log.slice(-400));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
