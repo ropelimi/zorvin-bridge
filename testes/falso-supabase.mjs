@@ -122,9 +122,23 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       return responder(200, u);
     }
     if (caminho === "/auth/v1/admin/generate_link") {
+      // A FORMA É PLANA, como o GoTrue de verdade responde: `hashed_token` e
+      // companhia no primeiro nível, junto com os campos do usuário. Quem
+      // agrupa isso em `properties` é o cliente do Supabase, depois de receber.
+      //
+      // Aqui estava agrupado já — e por isso o cliente devolvia `properties`
+      // vazio, a entrada falhava em "não consegui abrir a sessão", e NENHUM
+      // teste pegava, porque nenhum chegava a entrar de verdade. Um falso que
+      // responde numa forma que o de verdade não usa não está provando nada.
       const u = contas.find((x) => eq(x.email, json.email));
-      return responder(200, { properties: { hashed_token: "hash-" + (u ? u.id : "x") },
-                              action_link: "http://x/verify?token=hash", user: u || null });
+      return responder(200, {
+        ...(u || {}),
+        action_link: "http://x/verify?token=hash",
+        email_otp: "000000",
+        hashed_token: "hash-" + (u ? u.id : "x"),
+        verification_type: json.type || "magiclink",
+        redirect_to: "http://x/",
+      });
     }
     if (caminho === "/auth/v1/verify" || caminho === "/auth/v1/token") {
       return responder(200, { access_token: "jwt-de-mentira", refresh_token: "r", user: contas[0] || null });
@@ -264,6 +278,19 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {})
     if (demora) await new Promise((r) => setTimeout(r, demora));
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
+
+    // A CONFERÊNCIA DA SENHA. É o Vantoro quem responde se a pessoa é quem diz
+    // ser — a ponte não guarda senha nenhuma. Sem esta rota aqui, a entrada
+    // nunca chegava aos passos seguintes na bancada, e eles ficavam sem prova.
+    if (url.pathname === "/auth/login") {
+      const quem = lista.find((u) => String(u.login) === String(json && json.login));
+      if (!quem) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ ok: false, erro: "Login ou senha incorretos." }));
+      }
+      return res.end(JSON.stringify({ ok: true, usuario: quem }));
+    }
+
     res.end(JSON.stringify({ ok: true }));
   });
   return new Promise((resolve) => {
