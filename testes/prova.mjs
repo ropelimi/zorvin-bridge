@@ -15,12 +15,12 @@ const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0 } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar,
+    quebrar, bilhetesQueFalham,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
@@ -1025,6 +1025,38 @@ console.log("\n13. Quem já entrou não passa mais pelo Auth");
        JSON.stringify(t.sb.dados.usuarios));
     await t.parar();
   }
+}
+
+// ============================================================
+//  14. O BILHETE QUE FALHA NA PRIMEIRA E VEM NA SEGUNDA
+//
+//  Medido em produção: "gerar o bilhete: FALHOU depois de 20002ms" numa
+//  tentativa, e a mesma chamada respondendo na seguinte. É o único passo da
+//  entrada que não dá para contornar — é ele que abre a sessão.
+// ============================================================
+console.log("\n14. O bilhete tem uma segunda chance");
+{
+  const t = await subirTudo({}, {
+    vantoro: { usuarios: [{ login: "rodrigo.sousa", nome: "Rodrigo Sousa",
+                            email: "rodrigo.sousa@x", admin: true }] },
+    tabelas: { usuarios: [{ id: "11111111-1111-1111-1111-111111111111", login: "rodrigo.sousa",
+                            nome: "Rodrigo Sousa", email: "rodrigo.sousa@x", admin: true }] },
+    contas: [{ id: "11111111-1111-1111-1111-111111111111", email: "rodrigo.sousa@x",
+               jwt: "jwt-bom", user_metadata: { nome: "Rodrigo Sousa" } }],
+    bilhetesQueFalham: 1,
+  });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/auth/login`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: "rodrigo.sousa", senha: "x" }),
+  });
+  const corpo = await r.json().catch(() => ({}));
+  ok("falhando uma vez, a entrada ainda acontece", r.status === 200 && corpo.ok,
+     `veio ${r.status} ${JSON.stringify(corpo.erro)}`);
+  ok("e com bilhete de verdade", !!corpo.token_hash);
+  await espera(300);
+  ok("o log conta que precisou de uma segunda",
+     /não veio de primeira/.test(t.registro.join("")));
+  await t.parar();
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

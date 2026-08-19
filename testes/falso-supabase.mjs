@@ -64,7 +64,7 @@ function lerSelect(sel, esquema) {
 // corta em mil.
 const TETO_POSTGREST = 1000;
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar } = {}) {
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0 } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -122,6 +122,11 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       return responder(200, u);
     }
     if (caminho === "/auth/v1/admin/generate_link") {
+      // O AUTH QUE FALHA NA PRIMEIRA E RESPONDE NA SEGUNDA. É o que aconteceu
+      // em produção: 20 segundos sem responder numa tentativa, pronto na
+      // seguinte. Sem poder imitar isso, a segunda chance seria código que
+      // ninguém nunca viu funcionar.
+      if (bilhetesQueFalham > 0) { bilhetesQueFalham -= 1; return responder(500, { message: "auth indisponível" }); }
       // A FORMA É PLANA, como o GoTrue de verdade responde: `hashed_token` e
       // companhia no primeiro nível, junto com os campos do usuário. Quem
       // agrupa isso em `properties` é o cliente do Supabase, depois de receber.
