@@ -35,13 +35,21 @@ set search_path = public;
 --  gravado nas mensagens, quantas mensagens são, e desde quando. É a lista do
 --  que vale a pena arrumar — se uma assinatura tem duas mensagens de 2024,
 --  provavelmente não vale.
+--
+--  NEM TODA LINHA AQUI É PROBLEMA. "WhatsApp" vai aparecer, e com muitas
+--  mensagens: é o rótulo que a ponte põe em toda mensagem enviada pelo
+--  aplicativo do WhatsApp em vez de pelo Zorvin. Ela não é de ninguém em
+--  particular — o WhatsApp não diz qual atendente escreveu — e não há nada a
+--  fazer com ela. O painel já a mostra como "Pelo celular".
 -- ------------------------------------------------------------
 select coalesce(m.enviado_por, '(sem nome)') as assinatura,
        count(*)                              as mensagens,
        min(m.criado_em)::date                as da_primeira,
        max(m.criado_em)::date                as da_ultima,
        -- Por que ficou órfã: ajuda a decidir o que fazer com ela.
-       case when m.enviado_por_id is not null then 'a conta foi apagada'
+       case when zorvin_sem_acento(m.enviado_por) = 'whatsapp'
+              then 'não é gente: saiu pelo aplicativo do WhatsApp — nada a fazer'
+            when m.enviado_por_id is not null then 'a conta foi apagada'
             else 'sem id (histórico antigo) e o nome não bate com ninguém'
        end                                   as motivo
   from mensagens m
