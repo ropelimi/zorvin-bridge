@@ -1333,6 +1333,116 @@ async function aplicarReacao(reacao, de) {
 //  painel quer enviar, e manda cada uma pela Uazapi.
 // ------------------------------------------------------------
 let filaRodando = false; // impede que dois ciclos processem a fila ao mesmo tempo
+// ============================================================
+//  POR QUE A MENSAGEM NÃO SAIU — dito em português
+//
+//  A bolha vermelha na tela dizia só "não enviado". Quem atende ficava sem
+//  saber se o número está errado, se o cliente não tem WhatsApp, se a linha do
+//  escritório caiu ou se foi coisa de um minuto que basta tentar de novo — e
+//  cada um desses casos pede uma ação diferente. Sem o motivo, a única ação
+//  possível era clicar em "reenviar" e torcer.
+//
+//  O motivo já era gravado em `erro_detalhe`, mas em linguagem de máquina
+//  ("Uazapi respondeu 400: {"error":"number not exists"}"). Isso não se mostra
+//  a ninguém. Aqui ele é traduzido para uma frase, e o texto técnico continua
+//  guardado à parte, para quem precisar investigar.
+//
+//  O QUE EU SEI E O QUE EU NÃO SEI. As regras por código HTTP e as que vêm dos
+//  erros do próprio Zorvin são seguras. As que dependem do vocabulário exato da
+//  Uazapi são as prováveis, montadas a partir do que ela costuma responder —
+//  não tenho como conferir todas daqui.
+//
+//  Por isso a regra de ouro: erro que NÃO for reconhecido não vira frase
+//  genérica. Ele vai para a tela como está, e para o log com um aviso, para o
+//  vocabulário ser aprendido dos casos de verdade em vez de adivinhado.
+// ============================================================
+function motivoDoErro(bruto) {
+  const cru = String(bruto || '');
+  const t = cru.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const status = Number((cru.match(/respondeu (\d{3})/) || [])[1]) || 0;
+
+  // ---- 1. erros do próprio Zorvin: destes eu tenho certeza ----
+  if (/enviada ao whatsapp, mas nao gravada/.test(t)) {
+    return 'A mensagem CHEGOU ao cliente, mas não foi gravada no histórico daqui. '
+         + 'Não reenvie — ele receberia duas vezes. Avise quem administra.';
+  }
+  if (/conversa\/advogado\/contato nao encontrado/.test(t)) {
+    return 'O Zorvin não encontrou o telefone ou o contato desta conversa. '
+         + 'Avise quem administra: é cadastro, não é a mensagem.';
+  }
+  if (/falhou apos \d+ tentativas/.test(t)) {
+    return 'Tentamos várias vezes seguidas e não deu. Se o número estiver certo, '
+         + 'espere alguns minutos e toque em reenviar.';
+  }
+
+  // ---- 2. conexão: também vem do nosso lado, e é certo ----
+  if (/demorou demais|aborterror|timeout|etimedout|econnaborted/.test(t)) {
+    return 'O servidor do WhatsApp não respondeu a tempo. Toque em reenviar daqui a pouco.';
+  }
+  if (/fetch failed|enotfound|econnrefused|econnreset|network|socket hang up/.test(t)) {
+    return 'Não conseguimos falar com o servidor do WhatsApp (Uazapi). '
+         + 'Costuma ser passageiro — toque em reenviar daqui a pouco.';
+  }
+
+  // ---- 3. o que a Uazapi costuma dizer ----
+  // Estas são as prováveis. Se alguma nunca casar, o erro cai no fim e aparece
+  // como está — nada fica escondido por causa de um palpite errado.
+  if (/(numero|number|phone).{0,25}(nao existe|not exist|not found|nao encontrado|invalid|inval)/.test(t)
+      || /(not|nao).{0,15}(on|no|tem).{0,10}whatsapp/.test(t)
+      || /exists.{0,10}false/.test(t)) {
+    return 'Este número não tem conta no WhatsApp, ou está escrito errado. '
+         + 'Confira o número na ficha do cliente.';
+  }
+  if (/(disconnected|not connected|desconect|instance.{0,20}(closed|down)|qrcode|qr code|需要)/.test(t)) {
+    return 'A linha do escritório está desconectada do WhatsApp. '
+         + 'Avise quem administra: é preciso reconectar o aparelho.';
+  }
+  if (/blocked|bloquead|forbidden by (the )?(user|contact)/.test(t)) {
+    return 'O cliente bloqueou este número do escritório. Tente por outro telefone nosso.';
+  }
+  if (/(too large|file size|payload too large|arquivo.{0,15}grande)/.test(t) || status === 413) {
+    return 'O arquivo é grande demais para o WhatsApp. Reduza o tamanho e mande de novo.';
+  }
+
+  // ---- 4. pelo código HTTP: seguro, e é a última rede antes do desconhecido ----
+  if (status === 401 || status === 403) {
+    return 'A Uazapi recusou o acesso desta linha. Avise quem administra: '
+         + 'costuma ser a chave da instância vencida ou trocada.';
+  }
+  if (status === 429) {
+    return 'Muitas mensagens de uma vez. Espere um minuto e toque em reenviar.';
+  }
+  if (status >= 500) {
+    return 'O servidor do WhatsApp (Uazapi) está com problema neste momento. '
+         + 'Toque em reenviar daqui a pouco.';
+  }
+
+  // ---- 5. não reconhecido ----
+  //
+  // O log grita de propósito: é assim que a lista acima cresce a partir de
+  // casos reais, em vez de adivinhação. E a tela mostra o texto cru: ver algo
+  // que não se entende é ruim, mas é melhor do que uma frase bonita e falsa.
+  console.log(`MOTIVO DE ERRO NÃO RECONHECIDO (vale acrescentar em motivoDoErro): ${cru.slice(0, 300)}`);
+  return null;
+}
+
+/** Marca o item como erro, com o motivo em português e o texto técnico à parte. */
+async function marcarErroNaFila(itemId, bruto, avisoVantoroId) {
+  const motivo = motivoDoErro(bruto);
+  const campos = { status: 'erro', erro_detalhe: String(bruto || '').slice(0, 1000) };
+  campos.erro_motivo = motivo;
+  let { error } = await supabase.from('fila_envio').update(campos).eq('id', itemId);
+  // Instalação sem a coluna nova: grava sem ela. O item PRECISA virar erro —
+  // se esta gravação falhar por inteiro, a bolha nem fica vermelha e a
+  // mensagem some da tela como se nada tivesse acontecido.
+  if (error && /erro_motivo/i.test(error.message || '')) {
+    delete campos.erro_motivo;
+    ({ error } = await supabase.from('fila_envio').update(campos).eq('id', itemId));
+  }
+  if (error) console.error(`Não consegui marcar o item ${itemId} como erro:`, error.message);
+  if (avisoVantoroId) await avisoDeuErro(avisoVantoroId, String(bruto || ''));
+}
+
 async function processarFilaDeEnvio() {
   if (filaRodando) return; // o ciclo anterior ainda não terminou
   filaRodando = true;
@@ -1387,9 +1497,7 @@ async function processarFilaDeEnvio() {
       // devolvido para 'pendente' várias vezes), para de reenviar e marca erro.
       // Evita um laço infinito que reentregaria a mesma mensagem sem parar.
       if ((item.tentativas || 0) >= MAX_TENTATIVAS) {
-        await supabase.from('fila_envio')
-          .update({ status: 'erro', erro_detalhe: `Falhou após ${MAX_TENTATIVAS} tentativas` })
-          .eq('id', item.id);
+        await marcarErroNaFila(item.id, `Falhou após ${MAX_TENTATIVAS} tentativas`, item.aviso_vantoro_id);
         console.error(`Fila: item ${item.id} excedeu ${MAX_TENTATIVAS} tentativas; marcado como erro.`);
         continue;
       }
@@ -1412,9 +1520,7 @@ async function processarFilaDeEnvio() {
         .single();
 
       if (!conv || !conv.advogado || !conv.contato) {
-        await supabase.from('fila_envio')
-          .update({ status: 'erro', erro_detalhe: 'Conversa/advogado/contato não encontrado' })
-          .eq('id', item.id);
+        await marcarErroNaFila(item.id, 'Conversa/advogado/contato não encontrado', item.aviso_vantoro_id);
         continue;
       }
 
@@ -1684,12 +1790,9 @@ async function processarFilaDeEnvio() {
 
         console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
-        await supabase.from('fila_envio')
-          .update({ status: 'erro', erro_detalhe: envioErro.message })
-          .eq('id', item.id);
         // O aviso de audiência volta a aparecer como "Falhou" no Vantoro, com o
         // motivo — em vez de sumir e só dar as caras quando o cliente faltar.
-        if (item.aviso_vantoro_id) await avisoDeuErro(item.aviso_vantoro_id, envioErro.message);
+        await marcarErroNaFila(item.id, envioErro.message, item.aviso_vantoro_id);
         console.error(`Falha ao enviar (${item.id}):`, envioErro.message);
       }
     }

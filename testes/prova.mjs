@@ -30,7 +30,12 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
     usuarios: [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
   });
   const porta = 3000 + Math.floor(Math.random() * 900);
-  const filho = spawn("node", ["../index.js"], {
+  // O caminho sai DESTE arquivo, e não do diretório de onde se chamou. Com
+  // "../index.js" solto, `npm test` a partir da raiz procurava a ponte um nível
+  // acima do projeto e nada subia — o teste só funcionava quando rodado de
+  // dentro de `testes/`, o que ninguém adivinha.
+  const PONTE = new URL("../index.js", import.meta.url).pathname;
+  const filho = spawn("node", [PONTE], {
     env: { ...process.env, PORT: String(porta),
            SUPABASE_URL: sb.url, SUPABASE_SERVICE_KEY: "chave-de-mentira",
            VANTORO_API_URL: van ? van.url : "", VANTORO_API_TOKEN: van ? "tok-vantoro" : "",
@@ -645,6 +650,85 @@ const mensagemDaUazapi = (texto, id) => ({
      m && String(m.midia_url || "").startsWith("data:image/jpeg"),
      m && String(m.midia_url || "").slice(0, 40));
   await t.parar();
+}
+
+// ==================================================================
+//  9. POR QUE A MENSAGEM NÃO SAIU
+// ==================================================================
+//
+// A bolha vermelha na tela dizia só "não enviado". Quem atende ficava sem saber
+// se o número está errado, se o cliente não tem WhatsApp, se a linha do
+// escritório caiu ou se foi coisa de um minuto — e cada um desses casos pede
+// uma ação diferente. Sem o motivo, a única ação possível era clicar em
+// reenviar e torcer.
+{
+  console.log("\n9. Por que a mensagem não saiu");
+
+  /** Põe uma mensagem na fila, deixa a Uazapi recusar, e devolve a linha. */
+  async function tentarEnviar(falharEnvio) {
+    const t = await subirTudo({}, { uazapi: { falharEnvio } });
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas: 0, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    const linha = t.sb.dados.fila_envio.find((f) => f.id === 1);
+    const registro = t.registro.join("");
+    await t.parar();
+    return { linha, registro };
+  }
+
+  // ---- 9a. número que não tem WhatsApp ----
+  {
+    const { linha } = await tentarEnviar({ status: 400, corpo: { error: "number not exists" } });
+    ok("a falha vira erro na fila", linha?.status === "erro", `ficou ${linha?.status}`);
+    ok("o motivo é dito em português, e diz o que fazer",
+       /WhatsApp|escrito errado|Confira o número/i.test(linha?.erro_motivo || ""),
+       `veio: ${JSON.stringify(linha?.erro_motivo)}`);
+    ok("e o texto técnico continua guardado à parte",
+       /number not exists/.test(linha?.erro_detalhe || ""),
+       `veio: ${JSON.stringify(linha?.erro_detalhe)}`);
+  }
+
+  // ---- 9b. a linha do escritório desconectada ----
+  {
+    const { linha } = await tentarEnviar({ status: 400, corpo: { error: "instance is disconnected" } });
+    ok("linha desconectada diz que é preciso reconectar",
+       /desconectada|reconectar/i.test(linha?.erro_motivo || ""),
+       `veio: ${JSON.stringify(linha?.erro_motivo)}`);
+  }
+
+  // ---- 9c. a Uazapi fora do ar ----
+  {
+    const { linha } = await tentarEnviar({ status: 502, corpo: { error: "bad gateway" } });
+    ok("servidor fora do ar manda tentar de novo daqui a pouco",
+       /daqui a pouco|reenviar/i.test(linha?.erro_motivo || ""),
+       `veio: ${JSON.stringify(linha?.erro_motivo)}`);
+  }
+
+  // ---- 9d. um erro que a ponte NÃO conhece ----
+  //
+  // É o caso que mais importa. Frase genérica no lugar de um motivo
+  // desconhecido seria pior do que nada: pareceria resposta, e quem lesse
+  // pararia de procurar. Então `erro_motivo` fica vazio de propósito, a tela
+  // mostra o texto cru, e o log grita — é assim que a lista de motivos cresce a
+  // partir de casos reais em vez de adivinhação.
+  {
+    const { linha, registro } = await tentarEnviar({
+      status: 418, corpo: { error: "sou um bule de cha" } });
+    ok("erro desconhecido NÃO vira frase genérica",
+       !linha?.erro_motivo,
+       `inventou: ${JSON.stringify(linha?.erro_motivo)}`);
+    ok("o texto cru é preservado para a tela mostrar",
+       /bule de cha/.test(linha?.erro_detalhe || ""),
+       `veio: ${JSON.stringify(linha?.erro_detalhe)}`);
+    ok("e o log avisa que apareceu um motivo novo",
+       /MOTIVO DE ERRO NÃO RECONHECIDO/.test(registro),
+       "sem esse aviso, a lista de motivos nunca aprende com o uso");
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

@@ -290,6 +290,10 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {})
 export function subirFalsaUazapi({
   porta = 0, historico = [], sufixo = "@s.whatsapp.net",
   rotaDeDownload = "/message/downloadmedia", arquivo = null,
+  // Como o envio falha, quando se quer que ele falhe: `{ status, corpo }`.
+  // É o único jeito de exercitar a tradução do motivo do erro sem depender de
+  // uma Uazapi de verdade recusando uma mensagem.
+  falharEnvio = null,
 } = {}) {
   const recebidas = [];
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
@@ -303,6 +307,12 @@ export function subirFalsaUazapi({
       res.writeHead(codigo, { "Content-Type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+
+    if (falharEnvio && /^\/send\//.test(url.pathname)) {
+      res.writeHead(falharEnvio.status || 400, { "Content-Type": "application/json" });
+      return res.end(typeof falharEnvio.corpo === "string"
+        ? falharEnvio.corpo : JSON.stringify(falharEnvio.corpo || {}));
+    }
 
     if (url.pathname === "/message/find") {
       const pedido = json || {};
