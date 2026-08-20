@@ -354,6 +354,17 @@ export function subirFalsaUazapi({
   // O que o endereço direto (`/files/…`) devolve. `null` é o endereço que já
   // não serve mais — que é o caso realista de um resgate tardio demais.
   arquivoPorEndereco = Buffer.from("%PDF-1.4 um documento de mentira"),
+  // QUANTO O DOWNLOAD DEMORA A RESPONDER, em milissegundos.
+  //
+  // Na Uazapi de verdade isto não é zero nunca: ela vai buscar o arquivo nos
+  // servidores do WhatsApp, e uma foto de celular são alguns megabytes. Com a
+  // bancada respondendo instantaneamente, uma lentidão que existe em produção
+  // não aparece em prova nenhuma — foi exatamente o que aconteceu, e o relato
+  // veio de quem usa ("demora para aparecer o arquivo na conversa"), não daqui.
+  //
+  // Com o botão, dá para MEDIR: quanto tempo passa entre o webhook chegar e a
+  // mensagem existir no banco, que é o instante em que a bolha nasce na tela.
+  demoraDoDownload = 0,
 } = {}) {
   const recebidas = [];
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
@@ -399,6 +410,9 @@ export function subirFalsaUazapi({
 
     if (ROTAS_DE_DOWNLOAD.includes(url.pathname)) {
       if (url.pathname !== rotaDeDownload) return responder(404, { erro: "não existe nesta versão" });
+      if (demoraDoDownload > 0) {
+        await new Promise((r) => setTimeout(r, demoraDoDownload));
+      }
       return responder(200, {
         mimetype: "image/jpeg",
         file: (arquivo || Buffer.from("uma-foto-de-mentira".repeat(20))).toString("base64"),

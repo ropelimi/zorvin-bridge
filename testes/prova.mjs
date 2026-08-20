@@ -1581,5 +1581,113 @@ console.log("\n18. O anexo não fica vazio");
   }
 }
 
+
+// ==================================================================
+//  19. A BOLHA NÃO ESPERA O ARQUIVO
+//
+//  Relato de quem usa: "ao enviar ou receber algum arquivo, está demorando
+//  para aparecer o arquivo na conversa".
+//
+//  O caminho de recebimento fazia tudo em fila indiana, e só no fim gravava:
+//
+//     webhook chega
+//       → /message/downloadmedia na Uazapi   (até 20s, e até 3 rotas)
+//       → baixa o arquivo                     (uma foto de celular são MBs)
+//       → sobe para o Storage do Supabase
+//       → SÓ ENTÃO insere a mensagem no banco
+//       → só então o tempo real acende a bolha na tela
+//
+//  Enquanto isso a conversa fica VAZIA. Não é o arquivo que demora a aparecer:
+//  é a mensagem inteira que não existe ainda. Quem está do outro lado vê o
+//  cliente dizer "te mandei a foto" e não vê foto nenhuma.
+//
+//  E o mais irônico: a miniatura que vem embutida no próprio webhook — que o
+//  código já lia, e cujo comentário dizia "prévia imediata" — era calculada e
+//  depois jogada fora, porque a gravação esperava o arquivo grande de todo
+//  jeito. A prévia imediata nunca foi imediata.
+//
+//  ESTA PROVA MEDE. Ela põe a Uazapi para demorar 1,2s no download (o que é
+//  otimista para uma foto de verdade) e cronometra quanto tempo passa entre o
+//  webhook chegar e a mensagem existir no banco.
+// ==================================================================
+{
+  console.log("\n19. A bolha não espera o arquivo");
+
+  const DEMORA = 1200;
+
+  const fotoDaUazapi = (id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511977776666@s.whatsapp.net",
+      sender: "5511977776666@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageType: "image", type: "media", mediaType: "image",
+      caption: "segue o documento", messageTimestamp: Date.now(), senderName: "Cliente Lento",
+      content: { mimetype: "image/jpeg", JPEGThumbnail: "bWluaWF0dXJhLWRlLW1lbnRpcmE=" },
+    },
+  });
+
+  const t = await subirTudo({}, { uazapi: { demoraDoDownload: DEMORA } });
+
+  /** Espera a mensagem existir no banco e devolve quanto tempo levou. */
+  async function quandoNasceABolha(id, limite = 15000) {
+    const comeco = Date.now();
+    for (;;) {
+      const linha = t.sb.dados.mensagens.find((m) => m.id_uazapi === id);
+      if (linha) return { ms: Date.now() - comeco, linha };
+      if (Date.now() - comeco > limite) return { ms: Infinity, linha: null };
+      await espera(25);
+    }
+  }
+
+  // Dispara o webhook SEM esperar: a medição começa agora.
+  fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fotoDaUazapi("lento-1")),
+  }).catch(() => {});
+
+  const nascimento = await quandoNasceABolha("lento-1");
+  console.log(`     download demorando ${DEMORA}ms → bolha nasceu em ${nascimento.ms}ms`);
+
+  ok("a mensagem chega a existir", !!nascimento.linha);
+
+  // O CORAÇÃO DA PROVA. A bolha tem de nascer ANTES do download terminar, e
+  // não depois. A margem é generosa de propósito: subir a ponte e falar com o
+  // falso Supabase custa alguma coisa, e não é isso que está sendo medido.
+  ok("a bolha nasce sem esperar o download",
+     nascimento.ms < DEMORA,
+     `levou ${nascimento.ms}ms com o download demorando ${DEMORA}ms — `
+     + "a conversa fica vazia esse tempo todo, e é isso que quem usa relata");
+
+  // E ela não nasce vazia: a miniatura do próprio webhook é o que a pessoa vê
+  // enquanto o arquivo grande não chega.
+  ok("e já nasce com a miniatura, para não ser uma bolha em branco",
+     String(nascimento.linha && nascimento.linha.midia_url || "").startsWith("data:image/"),
+     `midia_url nasceu como "${String(nascimento.linha && nascimento.linha.midia_url || "").slice(0, 40)}"`);
+
+  ok("com a legenda que o cliente escreveu",
+     nascimento.linha && nascimento.linha.texto === "segue o documento",
+     `texto: ${JSON.stringify(nascimento.linha && nascimento.linha.texto)}`);
+
+  // E DEPOIS o arquivo de verdade substitui a miniatura, sem bolha nova.
+  let trocou = null;
+  for (let i = 0; i < 80; i++) {
+    const linha = t.sb.dados.mensagens.find((m) => m.id_uazapi === "lento-1");
+    if (linha && String(linha.midia_url || "").includes("/storage/")) { trocou = linha; break; }
+    await espera(100);
+  }
+  ok("e o arquivo de verdade entra no lugar da miniatura", !!trocou,
+     `midia_url ficou "${String((t.sb.dados.mensagens.find((m) => m.id_uazapi === "lento-1") || {}).midia_url || "").slice(0, 50)}"`);
+
+  ok("sem criar uma segunda bolha",
+     t.sb.dados.mensagens.filter((m) => m.id_uazapi === "lento-1").length === 1,
+     `ficaram ${t.sb.dados.mensagens.filter((m) => m.id_uazapi === "lento-1").length} mensagens com o mesmo id`);
+
+  ok("e o arquivo foi mesmo parar no Storage", t.sb.arquivos.size >= 1,
+     `foram ${t.sb.arquivos.size} arquivo(s)`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
