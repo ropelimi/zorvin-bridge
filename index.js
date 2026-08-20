@@ -2827,6 +2827,11 @@ async function mandarTelefonesAoVantoro() {
 // idênticas a cada três minutos, para sempre. Quem chama por uma pessoa só
 // (a entrada no sistema, a tela de permissões) não passa nada e a rotina lê
 // como sempre leu.
+//
+// DEVOLVE `{ tirei, pus }` quando escreveu alguma coisa, e nada quando não
+// escreveu — que é o caso de quase toda rodada. Quem chama por uma pessoa só
+// ignora a resposta; quem percorre o escritório usa para não anunciar trabalho
+// que não houve.
 async function aplicarPermissoes(usuarioId, u, emMaos = null) {
   // `zorvin_definido` distingue "não pode ver nada" de "ninguém definiu ainda".
   // Sem essa distinção, o primeiro login depois desta mudança apagaria a
@@ -2968,20 +2973,28 @@ async function aplicarPermissoes(usuarioId, u, emMaos = null) {
   const faltando = [];
   for (const [chave, linha] of querido) if (!jaTem.has(chave)) faltando.push(linha);
 
-  // Nada mudou: não se escreve nada. É o caso de quase toda rodada.
-  if (!sobrando.length && !faltando.length) return;
+  // Nada mudou: não se escreve nada. É o caso de quase toda rodada — e é por
+  // isso que a resposta é vazia aqui, para o log lá em cima não anunciar uma
+  // reaplicação que não aconteceu.
+  if (!sobrando.length && !faltando.length) return null;
 
   if (sobrando.length) {
     const { error } = await supabase.from('permissoes').delete().in('id', sobrando);
     if (error) {
       console.log(`Permissões: não consegui tirar as que não valem mais (${error.message}).`);
-      return;
+      return null;
     }
   }
+  // `pus` conta o que ENTROU, e não o que se pretendia pôr: com a gravação
+  // falhando, dizer que pôs seria o log inventando um trabalho que não houve —
+  // que é justamente o defeito que esta mudança veio corrigir.
+  let pus = 0;
   if (faltando.length) {
     const { error } = await supabase.from('permissoes').insert(faltando);
     if (error) console.log(`Permissões: não consegui gravar (${error.message}).`);
+    else pus = faltando.length;
   }
+  return { tirei: sobrando.length, pus };
 }
 
 // ------------------------------------------------------------
@@ -3039,19 +3052,55 @@ async function sincronizarPermissoes() {
   const lidosDeps = await supabase.from('departamentos').select('id, slug');
   if (!lidosDeps.error) emMaos.deps = lidosDeps.data;
 
-  let aplicadas = 0;
+  // ------------------------------------------------------------
+  //  ESTA RODADA ACONTECE DE TRÊS EM TRÊS MINUTOS, E QUASE SEMPRE NÃO FAZ NADA
+  //
+  //  O log dizia `Permissões: reaplicadas para 14 usuário(s).` a cada rodada.
+  //  Duas coisas erradas na mesma linha:
+  //
+  //  A frase era falsa. `aplicadas` contava quem a rotina VISITOU, não quem
+  //  teve permissão mexida — e a rotina foi consertada justamente para não
+  //  escrever quando nada mudou. Ela anunciava uma reaplicação que não
+  //  acontecia.
+  //
+  //  E, sendo a cada três minutos, ela enchia o log de linhas iguais: quase
+  //  quinhentas por dia, todas sem notícia. Quem for procurar o que houve às
+  //  quinze para as três — uma linha caída, um webhook recusado — precisa
+  //  passar por elas. Um log que repete o que não mudou esconde o que mudou.
+  //
+  //  Agora só sai linha quando alguma permissão de fato mexeu, e ela diz DE
+  //  QUEM. É a pergunta que quem administra faz depois: "a fulana parou de ver
+  //  o departamento, quando isso mudou?".
+  // ------------------------------------------------------------
+  const mexidos = [];
+  let conferidos = 0;
   for (const u of corpo.usuarios) {
     const id = porLogin.get(String(u.login || '').toLowerCase())
             || porEmail.get(String(u.email || '').toLowerCase());
     if (!id) continue;   // ainda não entrou no Zorvin nenhuma vez
     try {
-      await aplicarPermissoes(id, u, emMaos);
-      aplicadas += 1;
+      const mexeu = await aplicarPermissoes(id, u, emMaos);
+      conferidos += 1;
+      if (mexeu && (mexeu.tirei || mexeu.pus)) {
+        const conta = [mexeu.pus ? `+${mexeu.pus}` : null,
+                       mexeu.tirei ? `-${mexeu.tirei}` : null].filter(Boolean).join(' ');
+        mexidos.push(`${u.login} (${conta})`);
+      }
     } catch (e) {
       console.log(`Permissões de ${u.login}: ${(e && e.message) || e}`);
     }
   }
-  if (aplicadas) console.log(`Permissões: reaplicadas para ${aplicadas} usuário(s).`);
+  if (mexidos.length) {
+    // O TETO DE NOMES. Na primeira rodada depois de uma implantação — ou
+    // depois de alguém mexer no perfil de meio escritório — todo mundo muda de
+    // uma vez, e a linha inteira viraria um parágrafo. Oito nomes contam a
+    // história; o resto vira número, que é o que interessa nesse caso.
+    const TETO = 8;
+    const lista = mexidos.length > TETO
+      ? `${mexidos.slice(0, TETO).join(', ')} e mais ${mexidos.length - TETO}`
+      : mexidos.join(', ');
+    console.log(`Permissões: mudei ${lista} — de ${conferidos} conferido(s).`);
+  }
 }
 
 // ------------------------------------------------------------

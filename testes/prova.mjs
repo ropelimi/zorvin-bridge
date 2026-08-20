@@ -407,6 +407,78 @@ const mensagemDaUazapi = (texto, id) => ({
        releituras <= 10,
        `foram ${releituras} para 43 pessoas — deveria ser um punhado, não uma por pessoa`);
 
+    // ---- O QUE O LOG CONTA DA RODADA ----
+    //
+    // Ele dizia `Permissões: reaplicadas para 44 usuário(s).` — e o número
+    // contava quem a rotina VISITOU, não quem teve permissão mexida. Como ela
+    // foi consertada justamente para não escrever quando nada mudou, a frase
+    // anunciava um trabalho que na maioria das rodadas não acontecia.
+    const registro = t.registro.join("");
+    ok("o log não fala mais em 'reaplicadas'",
+       !/reaplicad/i.test(registro),
+       (registro.match(/.*reaplicad.*/) || [""])[0]);
+
+    const linha = (registro.match(/Permissões: mudei.*/) || [""])[0];
+    ok("mas conta que mudou alguma coisa, porque aqui mudou mesmo", !!linha,
+       "não saiu linha nenhuma");
+    // NOMEAR É O PONTO. "mudei 42" não responde à pergunta que quem administra
+    // faz depois: "a fulana parou de ver o departamento, quando foi isso?".
+    ok("dizendo de QUEM", /\bbruno\b/.test(linha), `dizia: "${linha}"`);
+    ok("e quanto entrou e quanto saiu", /bruno \(\+1\)/.test(linha), `dizia: "${linha}"`);
+    // A Ana já estava certa. Nomeá-la seria dizer que houve escrita onde não
+    // houve — o mesmo defeito da frase velha, só que com nome próprio.
+    // O `!!linha` não é redundância: sem ele, esta conferência passa de graça
+    // quando não sai linha nenhuma — uma frase vazia de fato não nomeia a Ana.
+    // Foi o que aconteceu ao rodar contra o código velho: a única das novas que
+    // ficou verde, e pelo motivo errado.
+    ok("e sem nomear quem não mudou", !!linha && !/\bana\b/.test(linha),
+       `dizia: "${linha}"`);
+    // Quarenta e duas pessoas mudaram de uma vez, que é o que acontece na
+    // primeira rodada depois de uma implantação. A linha não pode virar um
+    // parágrafo.
+    ok("com teto de nomes, para a linha não virar parágrafo",
+       /e mais \d+/.test(linha) && linha.length < 300,
+       `tinha ${linha.length} caracteres: "${linha}"`);
+    ok("e ainda dizendo quantas foram conferidas", /de \d+ conferido/.test(linha),
+       `dizia: "${linha}"`);
+
+    await t.parar();
+  }
+
+  // ---- 6c. a rodada em que nada mudou ----
+  //
+  // ESTE É O CASO DE QUASE TODA RODADA, e o motivo de a mudança existir. Ela
+  // sai de três em três minutos: quase quinhentas vezes por dia. Uma linha
+  // dizendo "reaplicadas" em cada uma delas enterra o que de fato aconteceu —
+  // uma linha caída, um webhook recusado — debaixo de centenas de linhas
+  // iguais que não noticiam nada.
+  {
+    const t = await subirTudo({}, {
+      vantoro: { usuarios: [
+        { login: "ana", email: "ana@x", nome: "Ana", admin: false,
+          zorvin_definido: true, zorvin: ["comercial"] },
+      ] },
+      tabelas: {
+        usuarios: [{ id: "ana", login: "ana", email: "ana@x", ativo: true }],
+        // Já está exatamente como o Vantoro manda. Não há o que escrever.
+        permissoes: [{ id: 1, usuario_id: "ana", departamento_id: 1 }],
+      },
+    });
+    ok("a rodada aconteceu", await esperarARodada(t));
+
+    // A conferência de que ela REALMENTE rodou e não escreveu. Sem isto, o
+    // silêncio de baixo passaria de graça numa rodada que nem chegou a começar
+    // — um teste verde provando nada, que é pior do que teste nenhum.
+    const escritas = t.sb.chamadas.filter(
+      (c) => c.caminho === "/rest/v1/permissoes" && c.metodo !== "GET");
+    ok("e não escreveu nada, porque não havia o que escrever",
+       escritas.length === 0, `houve ${escritas.length} escrita(s)`);
+
+    const registro = t.registro.join("");
+    ok("então o log fica calado sobre permissões",
+       !/Permissões: (mudei|reaplicad)/i.test(registro),
+       (registro.match(/.*Permissões: (mudei|reaplicad).*/) || [""])[0]);
+
     await t.parar();
   }
 
