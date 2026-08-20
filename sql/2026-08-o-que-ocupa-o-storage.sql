@@ -1,10 +1,15 @@
 -- ============================================================
 --  O QUE ESTÁ OCUPANDO O STORAGE
 --
---  O plano gratuito do Supabase dá 1 GB de arquivos, e o Zorvin está perto do
---  teto. Antes de decidir para onde mudar, é preciso saber o que há lá dentro —
---  mudar 1 GB de lugar é trabalho, e pode ser que boa parte dele nem precise
---  existir.
+--  O plano gratuito do Supabase dava 1 GB de arquivos, e o Zorvin tinha passado
+--  dele (1125 MB, 109,9% do teto). O projeto foi então transferido para a
+--  organização Pro — a mesma do Vantoro —, e o teto passou a ser 100 GB. Nada
+--  se moveu: transferir preserva a URL, as chaves, o banco e o balde inteiro.
+--
+--  O TETO ESTÁ NUMA LINHA SÓ, logo abaixo, porque ele já mudou uma vez e vai
+--  mudar de novo. Espalhado por seis lugares, a próxima mudança deixa metade
+--  das respostas medindo contra um limite que não existe mais — e uma medição
+--  errada assusta ou tranquiliza na hora errada, que é o pior dos dois mundos.
 --
 --  ESTE SCRIPT NÃO APAGA NADA. Ele só lê e conta.
 --
@@ -31,7 +36,12 @@
 
 set search_path = public;
 
-with arquivos as (
+with teto as (
+  -- 100 GB, que é o que o plano Pro dá. Era 1 (o gratuito) até 20/08/2026.
+  select 100::bigint as gigabytes
+),
+
+arquivos as (
   select o.name,
          (o.metadata->>'size')::bigint as tamanho,
          o.metadata->>'mimetype'       as tipo,
@@ -55,13 +65,19 @@ with arquivos as (
 -- 1. O TOTAL, E QUANTO DO TETO
 total as (
   select 1 as ordem, 'TOTAL' as o_que,
-         count(*) as quantos,
-         coalesce(sum(tamanho), 0) as bytes,
+         -- `count(a.name)`, e não `count(*)`: a junção abaixo é pela ESQUERDA,
+         -- de propósito, para o TOTAL existir mesmo com o balde vazio. Com
+         -- `count(*)` esse caso responderia "1 arquivo", que é o próprio teto
+         -- sendo contado como se fosse um anexo.
+         count(a.name) as quantos,
+         coalesce(sum(a.tamanho), 0) as bytes,
          -- O `::numeric` não é enfeite: `1024^3` devolve ponto flutuante, e
          -- não existe `round(ponto flutuante, casas)` no Postgres.
-         round((100.0 * coalesce(sum(tamanho), 0) / 1073741824)::numeric, 1)::text
-           || '% do teto de 1 GB' as detalhe
-    from arquivos
+         round((100.0 * coalesce(sum(a.tamanho), 0)
+                / (t.gigabytes * 1073741824))::numeric, 2)::text
+           || '% do teto de ' || t.gigabytes || ' GB' as detalhe
+    from teto t left join arquivos a on true
+   group by t.gigabytes
 ),
 
 -- 2. QUEM OCUPA O QUÊ. É esta resposta que diz onde vale mexer.
