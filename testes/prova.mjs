@@ -1689,5 +1689,59 @@ console.log("\n18. O anexo não fica vazio");
   await t.parar();
 }
 
+// ==================================================================
+//  20. AO SUBIR, A PONTE DIZ QUAL VERSÃO ELA É
+//
+//  Em 20/08 uma correção ficou pronta, mesclada, e NÃO estava rodando. A
+//  Render não publicou, e o repositório dizia uma coisa enquanto o serviço
+//  fazia outra — sem nenhuma diferença visível.
+//
+//  Só descobrimos por ACIDENTE: uma frase de log tinha mudado, e a antiga
+//  continuava aparecendo em produção. Sem essa coincidência, a correção da
+//  lentidão do anexo teria ficado parada com todo mundo achando que estava no
+//  ar. Esta seção existe para que a próxima vez não dependa de sorte.
+// ==================================================================
+{
+  console.log("\n20. A versão no ar aparece no log");
+
+  {
+    const t = await subirTudo({ RENDER_GIT_COMMIT: "abc1234def5678", RENDER_GIT_BRANCH: "main" });
+    await espera(600);
+    const log = t.registro.join("");
+    const linha = (log.split("\n").find((l) => l.includes("versão no ar")) || "").trim();
+
+    ok("a ponte anuncia a versão ao subir", !!linha, `o log não tem a linha`);
+    // O COMMIT ENCURTADO, e não inteiro: oito letras bastam para comparar com
+    // o que está no GitHub, e a linha continua legível de relance no meio de
+    // um log corrido.
+    ok("dizendo o commit", /abc1234d/.test(linha), `dizia: "${linha}"`);
+    ok("e o ramo", /main/.test(linha), `dizia: "${linha}"`);
+    // A DATA DO ARQUIVO VAI JUNTO. É ela que denuncia um deploy velho mesmo
+    // onde o commit não vier — e é o caso de qualquer lugar que não seja a
+    // Render.
+    ok("e a data em que o arquivo foi escrito",
+       /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(linha), `dizia: "${linha}"`);
+    await t.parar();
+  }
+
+  {
+    // SEM AS VARIÁVEIS DA RENDER a linha não pode sumir: ela ainda responde
+    // "de quando é este arquivo?", que já separa um deploy de hoje de um de
+    // três meses atrás. Uma linha que só aparece na Render deixaria de
+    // funcionar exatamente onde se costuma investigar — na máquina de quem
+    // está procurando o defeito.
+    const t = await subirTudo({ RENDER_GIT_COMMIT: "", RENDER_GIT_BRANCH: "" });
+    await espera(600);
+    const linha = (t.registro.join("").split("\n")
+      .find((l) => l.includes("versão no ar")) || "").trim();
+    ok("sem as variáveis da Render, a linha continua saindo", !!linha);
+    ok("e ainda diz de quando é o arquivo",
+       /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(linha), `dizia: "${linha}"`);
+    ok("sem inventar um commit que não sabe", !/commit /.test(linha),
+       `dizia: "${linha}"`);
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

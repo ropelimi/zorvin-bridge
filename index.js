@@ -4311,7 +4311,44 @@ async function contarComoEstaAEntrada() {
   }
 }
 
+// ============================================================
+//  QUAL VERSÃO ESTÁ NO AR
+//
+//  Em 20/08 uma correção ficou pronta, mesclada, e NÃO estava rodando. A
+//  Render não publicou, e ninguém tinha como saber: o repositório dizia uma
+//  coisa e o serviço fazia outra, sem nenhuma diferença visível.
+//
+//  Só descobrimos por acidente. Uma frase de log tinha mudado de "Permissões:
+//  reaplicadas para N usuário(s)" para outra, e a antiga continuava aparecendo
+//  no log de produção. Foi essa coincidência — uma frase que por acaso mudou —
+//  que revelou o descompasso. Sem ela, a correção da lentidão do anexo teria
+//  ficado meses parada, com todo mundo achando que estava no ar.
+//
+//  Não dá para depender de coincidência. Agora a ponte diz, ao subir, qual
+//  versão ela é. Um deploy sempre reinicia o serviço, então esta linha aparece
+//  toda vez que algo é publicado — e o commit ao lado dela responde, em um
+//  segundo, à pergunta "o que está rodando agora?".
+//
+//  `RENDER_GIT_COMMIT` é dado pela própria Render. Fora dela a variável não
+//  existe, e aí vale a data de escrita do arquivo — que não identifica o
+//  commit, mas denuncia um deploy velho, que é o que se quer pegar.
+// ============================================================
+function comoMeChamo() {
+  const commit = String(process.env.RENDER_GIT_COMMIT || '').trim();
+  const ramo = String(process.env.RENDER_GIT_BRANCH || '').trim();
+  const partes = [];
+  if (commit) partes.push(`commit ${commit.slice(0, 8)}`);
+  if (ramo) partes.push(`ramo ${ramo}`);
+  try {
+    const { mtime } = require('fs').statSync(__filename);
+    partes.push(`arquivo de ${mtime.toISOString().slice(0, 16).replace('T', ' ')}`);
+  } catch (_) { /* sem data: o resto já serve */ }
+  return partes.length ? partes.join(' · ')
+    : 'não sei dizer (sem RENDER_GIT_COMMIT e sem data de arquivo)';
+}
+
 app.listen(port, () => {
   console.log('Ponte do Zorvin rodando na porta', port);
+  console.log(`versão no ar: ${comoMeChamo()}`);
   contarComoEstaAEntrada().catch(() => {});
 });
