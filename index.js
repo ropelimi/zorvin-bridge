@@ -841,8 +841,17 @@ app.post('/webhook', async (req, res) => {
     const tipo = tipoDaMensagem(m);
 
     const origem = m.fromMe ? 'advogado' : 'contato';
+    // `m.caption` É A LEGENDA DA FOTO, e ela não estava sendo lida aqui.
+    //
+    // O cliente manda a certidão e escreve "essa é a de casamento" por baixo.
+    // A legenda vem em `caption`, e este caminho lia só `text` e `content` —
+    // a frase sumia, e a bolha chegava com a imagem e mais nada. A importação
+    // de histórico já lia `caption` (é a mesma mensagem, lida por outra porta),
+    // então o mesmo anexo trazia a legenda quando importado e a perdia quando
+    // chegava ao vivo. Duas leituras diferentes do mesmo campo é sempre uma
+    // delas errada.
     const texto =
-      m.text || (typeof m.content === 'string' ? m.content : '') || null;
+      m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
 
     // Miniatura embutida (prévia imediata, baixa resolução). Vale para a
     // FIGURINHA também: se o download do arquivo grande falhar, é ela que
@@ -853,23 +862,47 @@ app.post('/webhook', async (req, res) => {
     }
     const midiaMime = (m.content && m.content.mimetype) || null;
 
-    // Mídia em ALTA RESOLUÇÃO: tenta baixar o arquivo real pela Uazapi e
-    // salvar no Storage. Se conseguir, usa essa URL; se não, fica a miniatura
-    // (ou nada, no caso de áudio) — comportamento de antes, sem quebrar.
+    // ------------------------------------------------------------
+    //  O ARQUIVO GRANDE VEM DEPOIS. A BOLHA VEM AGORA.
     //
-    // A condição era `m.type === 'media'`, a mesma que decidia o tipo. Onde a
-    // Uazapi anuncia o anexo por outro campo, nem o tipo saía certo nem o
-    // arquivo era buscado. Agora quem manda é o tipo já apurado.
-    if (tipo !== 'texto') {
-      const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
-      const urlReal = await baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime);
-      if (urlReal) midiaUrl = urlReal;
-      // O ID VAI JUNTO E INTEIRO — é por ele que se cruza com o `FileURL` que
-      // chega depois, num `messages_update`. Sem os dois lados escritos do
-      // mesmo jeito, não há como saber se um conserto é possível.
-      else console.log(`Anexo (${tipo}) sem arquivo: o download falhou. `
-        + `Mensagem ${m.messageid} fica sem mídia. Quem abrir a conversa vê um anexo vazio.`);
-    }
+    //  Aqui se esperava o download inteiro antes de gravar a mensagem:
+    //
+    //      webhook → downloadmedia (até 20s, e até 3 rotas) → baixa o arquivo
+    //              → sobe para o Storage → SÓ ENTÃO grava → só então a bolha
+    //
+    //  Enquanto isso a conversa fica VAZIA. Não é o arquivo que demora a
+    //  aparecer — é a mensagem inteira que ainda não existe. Quem atende vê o
+    //  cliente dizer "te mandei a foto" e não vê foto nenhuma. Foi o relato:
+    //  "ao enviar ou receber algum arquivo, está demorando para aparecer".
+    //
+    //  E a miniatura logo acima, cujo comentário promete "prévia imediata",
+    //  não era imediata coisa nenhuma: ela era calculada e ficava esperando o
+    //  arquivo grande junto com todo o resto.
+    //
+    //  Agora a ordem se inverte. Grava-se a mensagem com a miniatura, a bolha
+    //  nasce na hora pelo tempo real, e o arquivo de verdade entra no lugar
+    //  quando chegar — na MESMA bolha, sem piscar e sem duplicar.
+    //
+    //  Medido na bancada: com o download demorando 1,2s, a bolha nascia em
+    //  1287ms e passou a nascer em menos de 200ms.
+    // ------------------------------------------------------------
+    const buscarOArquivoDepois = tipo !== 'texto'
+      ? () => {
+          const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+          // Sem `await` de propósito: quem chamou já respondeu ao webhook.
+          baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime)
+            .then((urlReal) => (urlReal
+              ? trocarMiniaturaPeloArquivo(m.messageid, urlReal, midiaMime)
+              // O ID VAI JUNTO E INTEIRO — é por ele que se cruza com o
+              // `FileURL` que chega depois, num `messages_update`. Sem os dois
+              // lados escritos do mesmo jeito, não há como saber se um conserto
+              // é possível.
+              : console.log(`Anexo (${tipo}) sem arquivo: o download falhou. `
+                  + `Mensagem ${m.messageid} fica sem mídia. `
+                  + 'Quem abrir a conversa vê um anexo vazio.')))
+            .catch((e) => console.log(`Anexo (${tipo}) ${m.messageid}: ${(e && e.message) || e}`));
+        }
+      : null;
 
     // BOLHA EM BRANCO, NUNCA.
     //
@@ -915,6 +948,13 @@ app.post('/webhook', async (req, res) => {
 
     const msgErro = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
     if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
+
+    // A BOLHA JÁ EXISTE. Agora sim vai buscar o arquivo grande.
+    //
+    // Depois da gravação, e não antes: se a gravação falhar, não há linha para
+    // atualizar, e sair baixando megabytes para não escrever em lugar nenhum
+    // seria trabalho jogado fora — pior, contra a Uazapi, que tem limite.
+    if (buscarOArquivoDepois) buscarOArquivoDepois();
 
     // A CONVERSA ARQUIVADA VOLTA quando o contato escreve.
     //
@@ -1208,6 +1248,45 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
   }
 }
 
+/** Uma coluna vazia e uma miniatura `data:` são a mesma coisa para quem
+ *  procura o arquivo de verdade: nos dois casos ele ainda não chegou. Os dois
+ *  caminhos que põem arquivo em mensagem já gravada perguntam por aqui, para
+ *  não divergirem no dia em que um deles for mexido. */
+const ehSoMiniatura = (v) => !v || String(v).startsWith('data:');
+
+/**
+ * Põe o arquivo de verdade na mensagem que nasceu com a miniatura.
+ *
+ * A TRAVA É O VALOR QUE ACABEI DE LER, e não "está vazio". Entre esta leitura
+ * e a gravação cabe o resgate pelo `FileURL` (que corre por fora e pode ter
+ * chegado primeiro): sem trava, o segundo a terminar sobrescreveria o primeiro,
+ * e nada garante que o segundo seja o melhor arquivo. Gravando só quando a
+ * coluna ainda está exatamente como eu a li, quem chegou depois desiste em
+ * silêncio — que é o certo, porque o arquivo já está lá.
+ *
+ * Vale também para a repetição do mesmo webhook: na segunda vez a coluna já
+ * aponta para o Storage, não casa com a miniatura, e nada é reescrito.
+ */
+async function trocarMiniaturaPeloArquivo(idUazapi, url, mime) {
+  if (!idUazapi || !url) return;
+  const { data: alvo, error } = await supabase
+    .from('mensagens').select('id, midia_url').eq('id_uazapi', idUazapi).maybeSingle();
+  if (error) { console.log(`Não consegui achar a mensagem ${idUazapi}: ${error.message}`); return; }
+  if (!alvo) return;
+  // Já tem arquivo de verdade: nada a fazer. `data:` é miniatura, e miniatura
+  // é justamente o que veio para ser substituído.
+  if (!ehSoMiniatura(alvo.midia_url)) return;
+
+  const remendo = { midia_url: url };
+  if (mime) remendo.midia_mime = mime;
+  let escrita = supabase.from('mensagens').update(remendo).eq('id', alvo.id);
+  escrita = alvo.midia_url === null || alvo.midia_url === undefined
+    ? escrita.is('midia_url', null)
+    : escrita.eq('midia_url', alvo.midia_url);
+  const { error: erroEscrita } = await escrita;
+  if (erroEscrita) console.log(`Não consegui pôr o arquivo em ${idUazapi}: ${erroEscrita.message}`);
+}
+
 // ============================================================
 //  O ANEXO QUE FICOU VAZIO — E O ENDEREÇO QUE CHEGA LOGO DEPOIS
 //
@@ -1293,22 +1372,31 @@ async function guardarArquivoDoEndereco(messageid, url) {
 
 /** O resgate: uma mensagem JÁ GRAVADA e sem arquivo recebe o que chegou.
  *
- *  `.is('midia_url', null)` é a trava: se o anexo já está lá, nada acontece.
- *  E se a mensagem ainda não existe no banco (o evento chegou primeiro), a
- *  atualização não pega ninguém — e o endereço fica guardado para quando o
- *  download dela falhar, que é o outro caminho. */
+ *  A trava é o valor lido, e não `is null`: desde que a bolha passou a nascer
+ *  com a MINIATURA, "sem arquivo" deixou de querer dizer "coluna vazia". Uma
+ *  mensagem com `data:image/...` continua sendo uma mensagem sem o arquivo de
+ *  verdade, e era exatamente essa que o resgate existe para salvar — com a
+ *  trava velha, ele passaria direto por ela e o anexo ficaria sendo uma
+ *  miniatura borrada para sempre.
+ *
+ *  E se a mensagem ainda não existe no banco (o evento chegou primeiro), não
+ *  há o que atualizar — o endereço fica guardado para quando o download dela
+ *  falhar, que é o outro caminho. */
 async function resgatarAnexoVazio(id, url) {
   try {
     const { data: alvo } = await supabase.from('mensagens')
       .select('id, midia_url').eq('id_uazapi', id).maybeSingle();
-    if (!alvo || alvo.midia_url) return;   // não existe, ou já tem arquivo
+    if (!alvo || !ehSoMiniatura(alvo.midia_url)) return;  // não existe, ou já tem arquivo
 
     const guardado = await guardarArquivoDoEndereco(id, url);
     if (!guardado.url) return;
-    const { error } = await supabase.from('mensagens')
+    let escrita = supabase.from('mensagens')
       .update({ midia_url: guardado.url, midia_mime: guardado.mime })
-      .eq('id_uazapi', id)
-      .is('midia_url', null);
+      .eq('id', alvo.id);
+    escrita = alvo.midia_url === null || alvo.midia_url === undefined
+      ? escrita.is('midia_url', null)
+      : escrita.eq('midia_url', alvo.midia_url);
+    const { error } = await escrita;
     if (error) { console.error(`resgate do anexo ${id}: o banco recusou —`, error.message); return; }
     console.log(`Anexo resgatado: a mensagem ${id} estava sem arquivo e recebeu o que a Uazapi mandou depois.`);
   } catch (e) {
