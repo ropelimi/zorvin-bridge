@@ -957,32 +957,34 @@ app.post('/webhook', async (req, res) => {
 // ------------------------------------------------------------
 async function tratarStatusMensagem(body, evento) {
   try {
+    // O ENDEREÇO DO ARQUIVO VEM ANTES DE TUDO.
+    //
+    // Estava lá embaixo, no ramo de "não reconheci este evento" — e por isso
+    // dependia de o evento NÃO trazer um status reconhecível. Alguns trazem
+    // ("Delivered") e o endereço passava direto. Aqui em cima ele é aproveitado
+    // sempre, e o resto do tratamento de status segue igual.
+    const arquivo = body.FileURL || (body.event && body.event.FileURL);
+    if (arquivo) {
+      const ids = ((body.event && body.event.MessageIDs) || body.MessageIDs || [])
+        .map(String).filter(Boolean);
+      guardarEnderecoDeArquivo(ids, arquivo);
+      console.log(`Endereço de arquivo recebido para ${JSON.stringify(ids)}: `
+        + `${String(arquivo).split('?')[0]}`);
+      // E, se alguma dessas mensagens já está gravada SEM arquivo, é agora que
+      // ela ganha o dela. Sem `await` na sequência: um resgate lento não pode
+      // segurar o tratamento do evento.
+      for (const id of ids) resgatarAnexoVazio(id, arquivo).catch(() => {});
+    }
+
     const alvo = body.message || body.update || body.data || body;
     const id =
       alvo.messageid || alvo.id || (alvo.key && alvo.key.id) || body.messageid || null;
     const bruto = alvo.status ?? alvo.ack ?? body.status ?? body.ack;
 
-    // Se não achamos id ou status, registramos para referência e saímos.
+    // Se não achamos id ou status, registramos para referência e saímos. O
+    // endereço de arquivo, quando vinha, já foi aproveitado lá em cima.
     if (!id || bruto === undefined || bruto === null) {
-      // O ENDEREÇO DO ARQUIVO, QUANDO VEM, MERECE LINHA PRÓPRIA.
-      //
-      // Em 19/08 um documento ficou gravado sem arquivo ("o download falhou"),
-      // e um segundo depois chegou um `messages_update` com um `FileURL`
-      // dentro — o endereço do arquivo, servido de bandeja. A ponte joga esses
-      // eventos fora sem olhar.
-      //
-      // Se o id do arquivo que chega aqui for o mesmo da mensagem que ficou
-      // vazia, existe conserto: buscar por este endereço e preencher. Se for
-      // sempre outro, não existe, e é melhor saber disso antes de escrever
-      // código. O log de antes cortava em 300 letras — bem no meio dos ids,
-      // que é justamente o que responde a pergunta.
-      const arquivo = body.FileURL || (body.event && body.event.FileURL);
-      if (arquivo) {
-        const ids = (body.event && body.event.MessageIDs) || body.MessageIDs || [];
-        console.log(`Endereço de arquivo veio num "${evento}" e foi ignorado: `
-          + `mensagens ${JSON.stringify(ids)} · ${String(arquivo).split('?')[0]}`);
-        return;
-      }
+      if (arquivo) return;
       console.log('Evento não tratado (p/ referência):', evento, JSON.stringify(body).slice(0, 300));
       return;
     }
@@ -1151,6 +1153,24 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
       }
     }
     if (!dados) {
+      // A SEGUNDA CHANCE, antes de desistir: o endereço que a Uazapi mandou
+      // por um `messages_update`, guardado pelo id EXATO desta mensagem.
+      //
+      // Foi o caso de 19/08 ao contrário: lá o endereço chegou DEPOIS do
+      // download falhar (e o resgate cuida disso); aqui é quando ele chegou
+      // ANTES, o que acontece sempre que o evento de arquivo vem na frente.
+      const guardado = enderecoGuardado(m.messageid);
+      if (guardado) {
+        try {
+          const salvo = await guardarArquivoDoEndereco(m.messageid, guardado);
+          if (salvo.url) {
+            console.log(`Anexo salvo pelo endereço que a Uazapi mandou à parte (${m.messageid}).`);
+            return salvo.url;
+          }
+        } catch (e) {
+          console.log(`O endereço guardado também não serviu (${m.messageid}): ${(e && e.message) || e}`);
+        }
+      }
       // O conteúdo da mensagem só vai para o log QUANDO DÁ ERRADO, que é
       // quando ele serve para alguma coisa. Antes ia sempre — legenda, nome de
       // arquivo, miniatura, de toda mídia recebida. Num escritório de
@@ -1185,6 +1205,114 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
   } catch (e) {
     console.error('Erro em baixarMidiaRecebida:', e.message);
     return null;
+  }
+}
+
+// ============================================================
+//  O ANEXO QUE FICOU VAZIO — E O ENDEREÇO QUE CHEGA LOGO DEPOIS
+//
+//  Do log de 19/08, com um segundo de diferença:
+//
+//    Anexo (documento) sem arquivo: o download falhou.
+//    Mensagem A5F59D4D… fica sem mídia.
+//    Evento não tratado: messages_update {…"FileURL":"https://…jpg"…
+//
+//  Alguém abriu essa conversa e viu um anexo em branco — um documento que o
+//  cliente mandou e o escritório não tem. E o endereço do arquivo chegou um
+//  segundo depois, de bandeja, indo direto para o balde dos eventos ignorados.
+//
+//  O QUE TORNA ISTO SEGURO, e é a única coisa que importa aqui: o casamento é
+//  pelo id EXATO da mensagem. Nunca por "a última mídia", nunca por "a mesma
+//  conversa". Num escritório de advocacia, gravar o arquivo de um cliente na
+//  mensagem de outro é pior do que não gravar nenhum — e um resgate esperto
+//  demais erraria exatamente assim.
+//
+//  E a gravação só acontece onde NÃO HÁ arquivo (`midia_url is null`). Um
+//  anexo que já chegou nunca é sobrescrito por este caminho.
+//
+//  Dez minutos de validade: se o download falhou e o endereço não veio nesse
+//  tempo, ele não vem mais. Um mapa que só cresce é um vazamento de memória
+//  disfarçado de cache, e a ponte é um processo só que fica meses de pé.
+// ============================================================
+const enderecosDeArquivo = new Map();   // id da mensagem -> { url, ate }
+const VALIDADE_DO_ENDERECO_MS = 10 * 60 * 1000;
+const TETO_DE_ENDERECOS = 500;
+
+function guardarEnderecoDeArquivo(ids, url) {
+  const agora = Date.now();
+  for (const [k, v] of enderecosDeArquivo) if (v.ate < agora) enderecosDeArquivo.delete(k);
+  // Teto duro, para o caso de uma enxurrada dentro da mesma janela de dez
+  // minutos: sai o mais velho.
+  while (enderecosDeArquivo.size >= TETO_DE_ENDERECOS) {
+    enderecosDeArquivo.delete(enderecosDeArquivo.keys().next().value);
+  }
+  for (const id of ids) {
+    if (id) enderecosDeArquivo.set(String(id), { url, ate: agora + VALIDADE_DO_ENDERECO_MS });
+  }
+}
+
+function enderecoGuardado(id) {
+  const g = enderecosDeArquivo.get(String(id || ''));
+  if (!g) return null;
+  if (g.ate < Date.now()) { enderecosDeArquivo.delete(String(id)); return null; }
+  return g.url;
+}
+
+/** O tipo do arquivo pela ponta do endereço. A Uazapi não manda o mime junto
+ *  do `FileURL`, e um arquivo salvo como "application/octet-stream" o
+ *  navegador oferece para baixar em vez de mostrar. */
+function mimePelaPonta(url) {
+  const ponta = String(url || '').split('?')[0].split('.').pop().toLowerCase();
+  const tabela = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+    gif: 'image/gif', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+    mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg',
+    m4a: 'audio/mp4', wav: 'audio/wav', pdf: 'application/pdf',
+    doc: 'application/msword', xls: 'application/vnd.ms-excel', txt: 'text/plain',
+    zip: 'application/zip',
+  };
+  return tabela[ponta] || 'application/octet-stream';
+}
+
+/** Baixa de um endereço e guarda no Storage. Devolve o endereço público, ou
+ *  `null` — e o `null` nunca é silencioso, porque quem chama registra. */
+async function guardarArquivoDoEndereco(messageid, url) {
+  const mime = mimePelaPonta(url);
+  const arq = await fetchComTimeout(url, {}, 20000);
+  if (!arq.ok) throw new Error(`o endereço respondeu ${arq.status}`);
+  const bytes = Buffer.from(await arq.arrayBuffer());
+  if (!bytes.length) throw new Error('o endereço respondeu vazio');
+  const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
+  const caminho = `recebidos/${messageid}.${ext}`;
+  const { error } = await supabase.storage.from('anexos')
+    .upload(caminho, bytes, { contentType: mime, upsert: true });
+  if (error) throw new Error(`Storage recusou: ${error.message}`);
+  const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
+  return { url: pub && pub.publicUrl, mime };
+}
+
+/** O resgate: uma mensagem JÁ GRAVADA e sem arquivo recebe o que chegou.
+ *
+ *  `.is('midia_url', null)` é a trava: se o anexo já está lá, nada acontece.
+ *  E se a mensagem ainda não existe no banco (o evento chegou primeiro), a
+ *  atualização não pega ninguém — e o endereço fica guardado para quando o
+ *  download dela falhar, que é o outro caminho. */
+async function resgatarAnexoVazio(id, url) {
+  try {
+    const { data: alvo } = await supabase.from('mensagens')
+      .select('id, midia_url').eq('id_uazapi', id).maybeSingle();
+    if (!alvo || alvo.midia_url) return;   // não existe, ou já tem arquivo
+
+    const guardado = await guardarArquivoDoEndereco(id, url);
+    if (!guardado.url) return;
+    const { error } = await supabase.from('mensagens')
+      .update({ midia_url: guardado.url, midia_mime: guardado.mime })
+      .eq('id_uazapi', id)
+      .is('midia_url', null);
+    if (error) { console.error(`resgate do anexo ${id}: o banco recusou —`, error.message); return; }
+    console.log(`Anexo resgatado: a mensagem ${id} estava sem arquivo e recebeu o que a Uazapi mandou depois.`);
+  } catch (e) {
+    console.log(`Não consegui resgatar o anexo de ${id}: ${(e && e.message) || e}`);
   }
 }
 
