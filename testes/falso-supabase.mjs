@@ -351,6 +351,9 @@ export function subirFalsaUazapi({
   // `null` em `rotaDeFoto` é o servidor em que NENHUMA serve.
   rotaDeFoto = "/chat/details",
   foto = { imagePreview: "https://falsa/mini.jpg", imgUrl: "https://falsa/cheia.jpg" },
+  // O que o endereço direto (`/files/…`) devolve. `null` é o endereço que já
+  // não serve mais — que é o caso realista de um resgate tardio demais.
+  arquivoPorEndereco = Buffer.from("%PDF-1.4 um documento de mentira"),
 } = {}) {
   const recebidas = [];
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
@@ -383,6 +386,15 @@ export function subirFalsaUazapi({
     if (ROTAS_DE_FOTO.includes(url.pathname)) {
       if (url.pathname !== rotaDeFoto) return responder(404, { erro: "não existe nesta versão" });
       return responder(200, foto);
+    }
+
+    // O ARQUIVO SERVIDO POR ENDEREÇO DIRETO. É o que a Uazapi manda no
+    // `FileURL` de um `messages_update`, e é por onde o resgate do anexo vazio
+    // passa. Sem isto, a prova do resgate provaria só a intenção.
+    if (url.pathname.startsWith("/files/")) {
+      if (arquivoPorEndereco === null) { res.writeHead(404); return res.end("sumiu"); }
+      res.writeHead(200, { "Content-Type": "application/pdf" });
+      return res.end(arquivoPorEndereco);
     }
 
     if (ROTAS_DE_DOWNLOAD.includes(url.pathname)) {

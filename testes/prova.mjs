@@ -1329,15 +1329,15 @@ console.log("\n16. Um webhook recusado diz de quem era");
 }
 
 // ============================================================
-//  17. O ENDEREÇO DE ARQUIVO QUE CHEGA E É JOGADO FORA
+//  17. O ENDEREÇO DE ARQUIVO APARECE NO LOG — E SEM A PARTE ASSINADA
 //
-//  Em 19/08: "Anexo (documento) sem arquivo: o download falhou" e, um segundo
-//  depois, um `messages_update` com um `FileURL` dentro — o endereço do
-//  arquivo, servido de bandeja, indo direto para o balde de "evento não
-//  tratado". O log de antes cortava em 300 letras, bem no meio dos ids, que é
-//  o que responde se dá para consertar.
+//  Esta seção nasceu quando o endereço era JOGADO FORA e a pergunta era se
+//  daria para aproveitá-lo. Deu (ver a seção 18), e o que sobra aqui continua
+//  valendo: quem lê o log precisa ver o id da mensagem inteiro, para cruzar
+//  com um download que falhou — e não precisa ver a assinatura do endereço,
+//  que dá acesso ao arquivo e não ajuda em nada.
 // ============================================================
-console.log("\n17. Um endereço de arquivo ignorado aparece no log");
+console.log("\n17. O endereço de arquivo aparece no log, sem a parte assinada");
 {
   const t = await subirTudo({}, {});
   await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
@@ -1352,15 +1352,161 @@ console.log("\n17. Um endereço de arquivo ignorado aparece no log");
       },
     }),
   });
-  await espera(400);
+  await espera(500);
   const log = t.registro.join("");
   ok("o log conta que veio um endereço de arquivo",
-     /Endereço de arquivo veio num/.test(log), log.slice(-400));
+     /Endereço de arquivo recebido/.test(log), log.slice(-400));
   ok("com o id da mensagem inteiro, para cruzar com o download que falhou",
      /A55DC78559D9CE9881F208/.test(log), log.slice(-400));
-  ok("e sem a parte assinada do endereço, que não serve para nada e vaza",
+  ok("e sem a parte assinada do endereço, que dá acesso e não ajuda",
      /abc123\.pdf/.test(log) && !/assinatura=xyz/.test(log), log.slice(-400));
   await t.parar();
+}
+
+// ============================================================
+//  18. O ANEXO QUE FICARIA VAZIO
+//
+//  Do log de 19/08, com um segundo de diferença:
+//
+//    Anexo (documento) sem arquivo: o download falhou.
+//    Mensagem A5F59D4D… fica sem mídia.
+//    Evento não tratado: messages_update {…"FileURL":"https://…jpg"…
+//
+//  Alguém abriu essa conversa e viu um anexo em branco — um documento que o
+//  cliente mandou e o escritório não tem. E o endereço do arquivo chegou um
+//  segundo depois, indo direto para o balde dos eventos ignorados.
+//
+//  O casamento é pelo id EXATO da mensagem, e a prova mais importante desta
+//  seção é a que confere que ele NÃO acontece quando o id não bate.
+// ============================================================
+console.log("\n18. O anexo não fica vazio");
+{
+  const CHAT = "5511999998888@s.whatsapp.net";
+  const midiaDaUazapi = (id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: CHAT, sender: CHAT, fromMe: false, isGroup: false,
+      messageType: "documentMessage", mimetype: "application/pdf",
+      content: { mimetype: "application/pdf", fileName: "peticao.pdf" },
+      messageTimestamp: Date.now(), wasSentByApi: false, senderName: "Cliente",
+    },
+  });
+  const enderecoDoArquivo = (t, ids) => ({
+    BaseUrl: t.uaz.url,
+    EventType: "messages_update",
+    event: { Chat: CHAT, FileURL: `${t.uaz.url}/files/abc.pdf?assinatura=xyz`,
+             MessageIDs: ids, Type: "Delivered" },
+  });
+  const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const mensagemDe = (t, id) => (t.sb.dados.mensagens || []).find((m) => m.id_uazapi === id);
+
+  // ---- 18a. o endereço chega DEPOIS — o caso exato do log ----
+  {
+    // `rotaDeDownload: null` é o servidor em que NENHUMA rota de download
+    // serve: é assim que se reproduz o "o download falhou" sem depender de
+    // uma Uazapi de verdade tendo um dia ruim.
+    const t = await subirTudo({}, { uazapi: { rotaDeDownload: null } });
+    await mandar(t, midiaDaUazapi("MSG-VAZIA"));
+    await espera(900);
+
+    const antes = mensagemDe(t, "MSG-VAZIA");
+    ok("a mensagem entra mesmo sem o arquivo", !!antes,
+       "perder a bolha inteira seria pior: ninguém saberia que veio algo");
+    ok("e entra vazia, como entrou em 19/08", antes && !antes.midia_url,
+       `veio ${antes && antes.midia_url}`);
+
+    await mandar(t, enderecoDoArquivo(t, ["MSG-VAZIA"]));
+    await espera(1200);
+
+    const depois = mensagemDe(t, "MSG-VAZIA");
+    ok("o endereço que chega depois preenche o anexo", !!(depois && depois.midia_url),
+       "era o documento do cliente que ficava faltando");
+    ok("e o log conta o resgate",
+       /Anexo resgatado/.test(t.registro.join("")), t.registro.join("").slice(-300));
+    await t.parar();
+  }
+
+  // ---- 18b. o endereço chega ANTES ----
+  //
+  // Acontece sempre que o evento do arquivo vem na frente da mensagem — foi o
+  // que o log mostrou nas duas vezes seguintes. Aí não há o que resgatar: o
+  // endereço guardado é usado na hora em que o download falha.
+  {
+    const t = await subirTudo({}, { uazapi: { rotaDeDownload: null } });
+    await mandar(t, enderecoDoArquivo(t, ["MSG-ANTES"]));
+    await espera(400);
+    await mandar(t, midiaDaUazapi("MSG-ANTES"));
+    await espera(1200);
+
+    const m = mensagemDe(t, "MSG-ANTES");
+    ok("a mensagem já nasce com o arquivo", !!(m && m.midia_url), `veio ${m && m.midia_url}`);
+    ok("e o log diz por onde veio",
+       /endereço que a Uazapi mandou à parte/.test(t.registro.join("")),
+       t.registro.join("").slice(-300));
+    await t.parar();
+  }
+
+  // ---- 18c. UM ANEXO QUE JÁ CHEGOU NUNCA É SOBRESCRITO ----
+  //
+  // Esta é a que separa um resgate de um estrago. Se o endereço que chega
+  // pudesse passar por cima do arquivo que já está lá, um evento repetido
+  // trocaria o documento de um cliente pelo de outro.
+  {
+    const t = await subirTudo({}, {});   // aqui o download FUNCIONA
+    await mandar(t, midiaDaUazapi("MSG-CHEIA"));
+    await espera(900);
+    const original = mensagemDe(t, "MSG-CHEIA");
+    ok("a mensagem chegou com arquivo", !!(original && original.midia_url));
+
+    await mandar(t, enderecoDoArquivo(t, ["MSG-CHEIA"]));
+    await espera(1000);
+    const agora = mensagemDe(t, "MSG-CHEIA");
+    ok("o endereço que chega depois NÃO troca o arquivo que já existe",
+       agora && agora.midia_url === original.midia_url,
+       `era ${original && original.midia_url}, virou ${agora && agora.midia_url}`);
+    await t.parar();
+  }
+
+  // ---- 18d. id que não existe não escreve em ninguém ----
+  {
+    const t = await subirTudo({}, {});
+    await mandar(t, midiaDaUazapi("MSG-OUTRA"));
+    await espera(900);
+    const antes = mensagemDe(t, "MSG-OUTRA");
+
+    await mandar(t, enderecoDoArquivo(t, ["ID-QUE-NAO-EXISTE"]));
+    await espera(900);
+    const depois = mensagemDe(t, "MSG-OUTRA");
+    ok("um endereço de id desconhecido não encosta em mensagem nenhuma",
+       depois && depois.midia_url === antes.midia_url,
+       "casar por id exato é o que separa um resgate de um estrago");
+    ok("e nada estoura por causa disso",
+       !/uncaughtException|unhandledRejection/.test(t.registro.join("")));
+    await t.parar();
+  }
+
+  // ---- 18e. o endereço que já não serve mais ----
+  {
+    // Um resgate tardio: a Uazapi apagou o arquivo. Tem de falhar quieto, sem
+    // derrubar nada e sem gravar um endereço quebrado na mensagem.
+    const t = await subirTudo({}, { uazapi: { rotaDeDownload: null, arquivoPorEndereco: null } });
+    await mandar(t, midiaDaUazapi("MSG-TARDE"));
+    await espera(900);
+    await mandar(t, enderecoDoArquivo(t, ["MSG-TARDE"]));
+    await espera(1200);
+
+    const m = mensagemDe(t, "MSG-TARDE");
+    ok("a mensagem continua sem arquivo, e não com um endereço quebrado",
+       m && !m.midia_url, `veio ${m && m.midia_url}`);
+    ok("e o log diz que não deu",
+       /não consegui resgatar|também não serviu/i.test(t.registro.join("")),
+       t.registro.join("").slice(-300));
+    await t.parar();
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
