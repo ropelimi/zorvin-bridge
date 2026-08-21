@@ -2191,5 +2191,75 @@ console.log("\n18. O anexo não fica vazio");
   await t.parar();
 }
 
+// ==================================================================
+//  QUAL TELEFONE ESTÁ MUDO
+// ==================================================================
+//
+//  A causa que sobrou depois de as outras duas serem descartadas com dado na
+//  mão: a URL do webhook é configurada POR TELEFONE, dentro da Uazapi. Se a de
+//  um deles estiver vazia ou errada, NADA chega à ponte — nenhum log, nenhum
+//  descarte, nenhuma recusa. E o envio continua funcionando.
+//
+//  Nenhuma lista de erro responde isso, porque não há erro: há AUSÊNCIA. A
+//  única forma de enxergar ausência é comparar com quem está presente.
+{
+  console.log("\nQual telefone está mudo");
+
+  const DOIS = [
+    { id: "adv-1", nome: "Comercial 1932", numero: "5567900001932", token: "t1",
+      servidor: null, ativo: true, departamento_id: 1 },
+    { id: "adv-2", nome: "Comercial 3857", numero: "5567900003857", token: "t2",
+      servidor: null, ativo: true, departamento_id: 1 },
+  ];
+  const t = await subirTudo({}, { tabelas: { advogados: DOIS } });
+
+  // Só o 1932 manda evento. O 3857 fica calado — é o cenário relatado.
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...mensagemDaUazapi("oi", "mudo-1"), owner: "5567900001932" }),
+  });
+  await espera(700);
+
+  const d = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/telefones`)).json();
+  const por = Object.fromEntries((d.telefones || []).map((l) => [l.numero, l]));
+
+  ok("lista TODOS os telefones cadastrados, não só os com problema",
+     (d.telefones || []).length === 2, JSON.stringify(d.telefones));
+  ok("quem mandou evento aparece como falante", por["5567900001932"]?.mudo === false,
+     JSON.stringify(por["5567900001932"]));
+  ok("e quem não mandou aparece como MUDO", por["5567900003857"]?.mudo === true,
+     JSON.stringify(por["5567900003857"]));
+  ok("o mudo vem primeiro na lista", d.telefones[0].numero === "5567900003857",
+     JSON.stringify(d.telefones.map((l) => l.numero)));
+
+  // A HONESTIDADE DA TABELA. A contagem vive na memória e zera a cada
+  // publicação. Uma ponte que subiu agora mostra todo mundo mudo, e isso não
+  // quer dizer nada — sem esta ressalva, a tabela seria lida como diagnóstico
+  // quando ainda é um cronômetro começando, e alguém iria mexer no webhook de
+  // um telefone que estava certo.
+  ok("diz há quanto tempo a ponte está no ar", typeof d.ponte_no_ar_ha_minutos === "number");
+  ok("e AVISA que é cedo demais para concluir", /cedo|Espere/i.test(d.recado || ""),
+     d.recado);
+
+  // O outro lado da mesma pergunta: quem manda evento e não está cadastrado.
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...mensagemDaUazapi("oi", "mudo-2"), owner: "5567911112222" }),
+  });
+  await espera(700);
+  const d2 = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/telefones`)).json();
+  ok("e mostra quem mandou evento sem estar cadastrado",
+     (d2.mandaram_evento_e_nao_estao_cadastrados || []).includes("5567911112222"),
+     JSON.stringify(d2.mandaram_evento_e_nao_estao_cadastrados));
+
+  // O EVENTO É ANOTADO MESMO QUANDO A MENSAGEM É DESCARTADA. É o que separa
+  // "não chega" de "chega e cai" — as duas parecem iguais de fora e pedem
+  // coisas completamente diferentes de quem for arrumar.
+  ok("anota o evento mesmo do telefone não cadastrado (chegou, mas caiu)",
+     (d2.mandaram_evento_e_nao_estao_cadastrados || []).length >= 1);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
