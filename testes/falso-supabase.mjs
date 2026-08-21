@@ -290,7 +290,12 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
 // Quem pode ver o quê é decidido no Vantoro; a ponte só copia a decisão para
 // dentro do Zorvin. Para conferir essa cópia sem um Vantoro de verdade, basta
 // alguém que responda `/usuarios` com a mesma forma que ele responde.
-export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {}) {
+// `naoJson` faz este Vantoro responder o que uma HOSPEDAGEM responde quando o
+// serviço não está lá: uma página, e não os dados. É o caso real de 21/08 — o
+// workspace suspenso por consumo devolvendo HTML —, que a ponte resumia a
+// "Resposta inválida do Vantoro" e emendava com "confira o token".
+//   naoJson: { status: 503, corpo: "<html>…</html>" }
+export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJson = null } = {}) {
   const recebidas = [];
   const lista = usuarios.slice();
   const servidor = http.createServer(async (req, res) => {
@@ -300,6 +305,11 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0 } = {})
     const json = corpo ? (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })() : null;
     recebidas.push({ metodo: req.method, caminho: url.pathname, corpo: json });
     if (demora) await new Promise((r) => setTimeout(r, demora));
+    if (naoJson) {
+      res.writeHead(naoJson.status || 503, { "Content-Type": naoJson.tipo || "text/html" });
+      return res.end(naoJson.corpo === undefined
+        ? "<html><body>Service Suspended</body></html>" : naoJson.corpo);
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
 

@@ -606,6 +606,85 @@ function contarRecusa(req) {
       + 'dele na Uazapi está sem o "?token=…" — e as mensagens dele estão sendo PERDIDAS.'));
 }
 
+// ------------------------------------------------------------
+//  TELEFONE QUE MANDA MENSAGEM E NÃO ESTÁ CADASTRADO
+//
+//  O webhook chega, o segredo confere, e o telefone dono do evento não está na
+//  tabela `advogados`. A mensagem é descartada — não há em qual conversa
+//  colocá-la. Até aqui, correto.
+//
+//  O QUE ESTAVA ERRADO ERA O SILÊNCIO. A linha era um `console.log` de duas
+//  palavras no meio de milhares, e não dizia a única coisa que importa: que
+//  são MENSAGENS DE CLIENTE sendo jogadas fora.
+//
+//  O sintoma para quem usa é cruel, porque o envio continua funcionando: as
+//  mensagens saem, chegam no cliente, o cliente responde — e a resposta some.
+//  Do lado de cá parece que "o cliente não retorna". Foi exatamente assim que
+//  isto chegou, em 21/08: um telefone do escritório onde "os clientes não
+//  respondem", e o mesmo cliente respondendo normalmente por outro telefone.
+//
+//  Agora grita, agrupado, dizendo o número e o que fazer. E fica guardado para
+//  o `/webhook/desconhecidos` responder sem ninguém precisar caçar no log — que
+//  é o que transforma "achamos que tem interferência" numa resposta.
+// ------------------------------------------------------------
+const telefonesDesconhecidos = new Map();   // número → { quantas, desde, ultima }
+
+function telefoneDesconhecido(numero, body) {
+  const chave = numero || 'sem número no corpo';
+  const antes = telefonesDesconhecidos.get(chave);
+  const agora = Date.now();
+  if (antes) {
+    antes.quantas += 1;
+    antes.ultima = agora;
+    // Uma linha por minuto por telefone. Sem o freio, um telefone movimentado
+    // empurra para fora do log tudo o que interessa — inclusive isto.
+    if (agora - antes.avisadoEm < 60000) return;
+    antes.avisadoEm = agora;
+  } else {
+    telefonesDesconhecidos.set(chave, {
+      quantas: 1, desde: agora, ultima: agora, avisadoEm: agora,
+    });
+  }
+  const reg = telefonesDesconhecidos.get(chave);
+  console.warn(
+    `MENSAGEM DE CLIENTE PERDIDA: o telefone "${chave}" mandou um evento e não `
+    + `está na tabela "advogados", então a mensagem foi descartada — ela não `
+    + `aparece em conversa nenhuma no Zorvin. `
+    + `[${reg.quantas} desde ${new Date(reg.desde).toISOString().slice(11, 16)}] `
+    + `O envio POR este telefone continua funcionando, e é isso que faz parecer `
+    + `que "o cliente não responde". Cadastre o número em "advogados" para as `
+    + `respostas voltarem a entrar.`);
+}
+
+// Quem está mandando mensagem sem estar cadastrado. Aberto de propósito: não
+// devolve conteúdo de mensagem nenhuma, só números de telefone do escritório e
+// contagem — e serve justamente para quem não tem acesso ao log da Render
+// conseguir responder "por que este telefone não recebe resposta?".
+app.get('/webhook/desconhecidos', (req, res) => {
+  liberarCors(res);
+  const lista = [...telefonesDesconhecidos.entries()]
+    .map(([numero, r]) => ({
+      numero,
+      eventos_descartados: r.quantas,
+      desde: new Date(r.desde).toISOString(),
+      ultimo: new Date(r.ultima).toISOString(),
+    }))
+    .sort((a, b) => b.eventos_descartados - a.eventos_descartados);
+  res.json({
+    ok: true,
+    // Contado desde que a ponte subiu: é memória, não banco. Vazio pode
+    // significar "nenhum problema" OU "a ponte reiniciou agora" — dizer isso
+    // aqui evita que a lista vazia seja lida como atestado de saúde.
+    desde_o_ultimo_reinicio: true,
+    telefones: lista,
+    recado: lista.length
+      ? 'Estes telefones mandaram mensagem e NÃO estão na tabela "advogados". '
+        + 'As mensagens deles foram descartadas e não aparecem em conversa '
+        + 'nenhuma. Cadastre o número para as respostas voltarem a entrar.'
+      : 'Nenhum telefone desconhecido desde que a ponte subiu.',
+  });
+});
+
 app.post('/webhook', async (req, res) => {
   if (!webhookAutorizado(req)) {
     contarRecusa(req);
@@ -651,7 +730,7 @@ app.post('/webhook', async (req, res) => {
       .eq('numero', advogadoNumero)
       .maybeSingle();
     if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
-    if (!adv) { console.log('Número não cadastrado em advogados:', advogadoNumero); return; }
+    if (!adv) { telefoneDesconhecido(advogadoNumero, body); return; }
 
     // Quem é o CONTATO — SEMPRE o telefone real, ignorando o identificador de
     // privacidade "@lid" que a WhatsApp passou a enviar (ele criava um segundo
@@ -2493,9 +2572,63 @@ async function chamarVantoro(caminho, opcoes = {}) {
       ...(opcoes.headers || {}),
     },
   }, 20000);
+  // O CORPO SÓ PODE SER LIDO UMA VEZ. Chamar `r.json()` e, ao falhar, tentar
+  // `r.text()` para saber o que tinha lá devolve VAZIO — o fluxo já foi
+  // consumido pela primeira leitura. Era assim que a página de suspensão, que é
+  // justamente a evidência que interessa, virava "uma resposta vazia".
+  const texto = await r.text().catch(() => '');
   let corpo = null;
-  try { corpo = await r.json(); } catch (_e) { corpo = { ok: false, erro: 'Resposta inválida do Vantoro.' }; }
+  try {
+    corpo = JSON.parse(texto);
+  } catch (_e) {
+    // NÃO VEIO JSON. Antes, tudo aqui virava a mesma frase — "Resposta inválida
+    // do Vantoro." — e o painel emendava "verifique VANTORO_API_URL e
+    // VANTORO_API_TOKEN".
+    //
+    // Essa dica está errada JUSTAMENTE NESTE PONTO: se as duas variáveis
+    // faltassem, a função teria parado lá em cima, com outra mensagem. Chegar
+    // aqui prova que as duas existem. Mandava-se a pessoa conferir exatamente o
+    // que não era o problema — e foi o que aconteceu em 21/08, com o
+    // atendimento parado e a configuração intacta.
+    //
+    // O corpo e o código já estão na mão; jogá-los fora é que tornava isto
+    // indiagnosticável. Uma página HTML com 503, por exemplo, é o serviço fora
+    // do ar ou suspenso, e não tem nada a ver com token.
+    corpo = { ok: false, erro: explicarRespostaNaoJson(r.status, texto) };
+  }
   return { status: r.status, corpo };
+}
+
+// Transforma uma resposta que não é JSON numa frase que diz o que houve.
+function explicarRespostaNaoJson(status, cru) {
+  const texto = String(cru || '').trim();
+  const ehHtml = /^\s*<(!doctype|html|head|body)/i.test(texto);
+
+  // O caso mais comum e o mais confundido: a hospedagem devolve uma página no
+  // lugar do serviço. Serviço dormindo, fora do ar, suspenso por consumo, ou um
+  // endereço que caiu numa rota que não existe.
+  if (ehHtml || !texto) {
+    const onde = ehHtml ? 'uma página HTML' : 'uma resposta vazia';
+    if (status >= 500 || status === 402 || status === 403) {
+      return `O Vantoro respondeu com erro ${status} e ${onde}, em vez dos dados. `
+           + 'Isso é o serviço do Vantoro fora do ar, dormindo ou suspenso — '
+           + 'não é a configuração da ponte. Confira o painel da hospedagem do Vantoro.';
+    }
+    if (status === 404) {
+      return 'O endereço do Vantoro respondeu 404 (página não encontrada). '
+           + 'O serviço está no ar, mas VANTORO_API_URL aponta para um caminho que não existe.';
+    }
+    if (status === 401 || status === 407) {
+      return `O Vantoro recusou a chamada (${status}) sem explicar em JSON. `
+           + 'Normalmente é VANTORO_API_TOKEN errado ou vencido.';
+    }
+    return `O Vantoro respondeu ${status} com ${onde}, em vez dos dados.`;
+  }
+
+  // Texto curto que não é JSON nem HTML: quase sempre é a mensagem de erro do
+  // próprio servidor, e mostrá-la resolve mais do que qualquer frase minha.
+  return `O Vantoro respondeu ${status} com algo que não é JSON: `
+       + `"${texto.slice(0, 160)}${texto.length > 160 ? '…' : ''}"`;
 }
 
 // Envolve cada rota: CORS + login + tratamento de erro, sem repetir código.
