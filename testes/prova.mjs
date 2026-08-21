@@ -1894,5 +1894,78 @@ console.log("\n18. O anexo não fica vazio");
   }
 }
 
+// ==================================================================
+//  O ARQUIVO SOBE COM CACHE LONGO
+// ==================================================================
+//
+//  A biblioteca do Supabase manda `max-age=3600` quando ninguém diz nada — uma
+//  hora. De hora em hora, cada atendente que abre uma conversa BAIXA DE NOVO
+//  todas as fotos, áudios e vídeos dela.
+//
+//  Com oito pessoas rolando conversas o dia inteiro e mais de 1 GB de mídia
+//  guardada, é assim que a franquia de banda vira zero. Em 21/08 o workspace
+//  foi suspenso por consumo e o atendimento parou — a ficha do cliente deixou
+//  de responder, porque serviço suspenso devolve página, não dados.
+//
+//  Este é o único ponto do código que decide isso, e ele não estava dizendo
+//  nada.
+{
+  console.log("\nO arquivo sobe com cache longo");
+
+  const fotoDaUazapi = (id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511977776666@s.whatsapp.net",
+      sender: "5511977776666@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageType: "image", type: "media", mediaType: "image",
+      caption: "uma foto", messageTimestamp: Date.now(), senderName: "Cliente",
+      content: { mimetype: "image/jpeg", JPEGThumbnail: "bWluaWF0dXJh" },
+    },
+  });
+
+  const t = await subirTudo();
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fotoDaUazapi("foto-cache-1")),
+  });
+
+  // Espera o arquivo chegar ao Storage (o download é assíncrono de propósito —
+  // a bolha nasce antes dele, e isso já tem conferência própria).
+  for (let i = 0; i < 80 && t.sb.cabecalhosDeUpload.size === 0; i++) await espera(50);
+
+  const enviados = [...t.sb.cabecalhosDeUpload.entries()];
+  ok("o arquivo chega ao Storage", enviados.length === 1,
+     JSON.stringify(enviados));
+
+  const cache = (enviados[0] || [])[1] || "";
+  ok("e sobe com cache-control", !!cache, `veio "${cache}"`);
+
+  // O CORAÇÃO DA PROVA. Uma hora é o padrão da biblioteca e é o que quebrou o
+  // escritório. Qualquer coisa acima de um mês já muda a natureza do problema.
+  const segundos = Number((cache.match(/max-age=(\d+)/) || [])[1] || 0);
+  ok("com prazo longo, e não a hora que a biblioteca usa por padrão",
+     segundos >= 2592000,
+     `veio max-age=${segundos} (${Math.round(segundos / 3600)}h) — `
+     + "com isso cada atendente rebaixa a conversa inteira nesse intervalo");
+
+  // `immutable` é o que faz o navegador nem PERGUNTAR se mudou. Sem ele ainda
+  // sai uma ida à rede por arquivo para receber "304, continua igual" — pouco
+  // tráfego, mas uma chamada por imagem por atendente, e é o que deixa a
+  // conversa lenta ao abrir.
+  ok("e marcado como imutável, para o navegador nem perguntar",
+     /immutable/.test(cache), `veio "${cache}"`);
+
+  // O CAMINHO É QUE AUTORIZA O CACHE LONGO. Guardar por um ano só é seguro
+  // porque aquele endereço nunca vai apontar para outro conteúdo. Se o caminho
+  // passasse a ser reaproveitado, o cache longo viraria defeito — e esta linha
+  // é o que avisa.
+  const caminho = (enviados[0] || [])[0] || "";
+  ok("e o caminho carrega o id da mensagem, que não se repete",
+     caminho.includes("foto-cache-1"), `caminho "${caminho}"`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
