@@ -1743,5 +1743,156 @@ console.log("\n18. O anexo não fica vazio");
   }
 }
 
+// ==================================================================
+//  O TELEFONE QUE MANDA E NÃO ESTÁ CADASTRADO
+// ==================================================================
+//
+//  Relatado em 21/08: "acreditamos que o telefone 3857 esteja com uma
+//  interferência, pois as mensagens que enviamos são recebidas pelos clientes,
+//  porém eles não nos retornam. Pelo 1932 eles respondem em seguida."
+//
+//  Não era interferência. O telefone não estava na tabela `advogados`, e a
+//  ponte descartava tudo o que chegava por ele — com um `console.log` de duas
+//  palavras no meio de milhares de linhas. O ENVIO continua funcionando (sai
+//  por outro caminho), e é isso que faz o sintoma parecer do cliente.
+//
+//  O descarte está certo: sem advogado não há conversa em que pôr a mensagem.
+//  O que estava errado era o silêncio.
+{
+  console.log("\nO telefone que manda e não está cadastrado");
+  const t = await subirTudo();
+
+  const deOutroTelefone = { ...mensagemDaUazapi("Oi, respondendo", "m-x"),
+                            owner: "5567900003857" };
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(deOutroTelefone),
+  });
+  await espera(700);
+
+  ok("a mensagem de telefone não cadastrado não é gravada",
+     t.sb.dados.mensagens.length === 0, `ficaram ${t.sb.dados.mensagens.length}`);
+
+  const log = t.registro.join("");
+  ok("mas o aviso DIZ que é mensagem de cliente sendo perdida",
+     /MENSAGEM DE CLIENTE PERDIDA/.test(log));
+  ok("e diz QUAL telefone", /5567900003857/.test(log));
+  ok("e diz o que fazer (cadastrar em advogados)",
+     /Cadastre o número em "advogados"/.test(log));
+  ok("e avisa que o envio continua funcionando — que é o que confunde",
+     /envio POR este telefone continua funcionando/i.test(log));
+
+  // SEM PRECISAR CAÇAR NO LOG. Quem atende não entra na Render.
+  const d = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/desconhecidos`)).json();
+  ok("o /webhook/desconhecidos lista o telefone",
+     d.telefones.some((x) => x.numero === "5567900003857"), JSON.stringify(d));
+  ok("com a contagem do que foi descartado",
+     d.telefones[0]?.eventos_descartados === 1, JSON.stringify(d.telefones));
+
+  // O TELEFONE CADASTRADO CONTINUA ENTRANDO — a correção não pode fechar a porta boa.
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mensagemDaUazapi("Do telefone certo", "m-ok")),
+  });
+  await espera(700);
+  ok("o telefone cadastrado continua entrando normalmente",
+     t.sb.dados.mensagens.length === 1, `ficaram ${t.sb.dados.mensagens.length}`);
+
+  // NÃO PODE VIRAR ENXURRADA: um telefone movimentado empurraria para fora do
+  // log tudo o que interessa, inclusive isto.
+  for (let i = 0; i < 5; i++) {
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...deOutroTelefone,
+        message: { ...deOutroTelefone.message, id: `m-y${i}`, messageid: `m-y${i}` } }),
+    });
+  }
+  await espera(800);
+  const quantosAvisos = (t.registro.join("").match(/MENSAGEM DE CLIENTE PERDIDA/g) || []).length;
+  ok("seis eventos do mesmo telefone não viram seis avisos", quantosAvisos === 1,
+     `saíram ${quantosAvisos}`);
+
+  const d2 = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/desconhecidos`)).json();
+  ok("mas a contagem soma todos os descartados",
+     d2.telefones.find((x) => x.numero === "5567900003857")?.eventos_descartados === 6,
+     JSON.stringify(d2.telefones));
+
+  await t.parar();
+}
+
+// ==================================================================
+//  QUANDO O VANTORO NÃO RESPONDE JSON
+// ==================================================================
+//
+//  Relatado em 21/08, com a tela mostrando "Resposta inválida do Vantoro" e,
+//  logo abaixo, "verifique se a ponte está configurada com VANTORO_API_URL e
+//  VANTORO_API_TOKEN".
+//
+//  A dica estava errada, e errada de um jeito específico: se aquelas duas
+//  variáveis faltassem, a ponte teria parado antes, com outra mensagem. Chegar
+//  ali PROVA que as duas existem. A causa real era o serviço do Vantoro fora do
+//  ar — workspace suspenso por consumo —, devolvendo a página de suspensão em
+//  HTML no lugar dos dados.
+{
+  console.log("\nQuando o Vantoro não responde JSON");
+
+  // Serviço suspenso/fora do ar: HTML com 503.
+  {
+    const t = await subirTudo({}, { vantoro: { naoJson: { status: 503 } } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const c = await r.json();
+    ok("diz o código que veio (503)", /503/.test(c.erro || ""), c.erro);
+    ok("diz que veio uma página em vez dos dados", /página HTML/i.test(c.erro || ""), c.erro);
+    ok("e diz na cara que NÃO é a configuração da ponte",
+       /não é a configuração da ponte/i.test(c.erro || ""), c.erro);
+    ok("não some com a evidência numa frase genérica",
+       !/^Resposta inválida do Vantoro\.$/.test(c.erro || ""), c.erro);
+    await t.parar();
+  }
+
+  // Endereço apontando para um caminho que não existe.
+  {
+    const t = await subirTudo({}, { vantoro: { naoJson: { status: 404 } } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const c = await r.json();
+    ok("404 aponta para o ENDEREÇO, não para o token",
+       /VANTORO_API_URL/.test(c.erro || "") && !/TOKEN/.test(c.erro || ""), c.erro);
+    await t.parar();
+  }
+
+  // Recusa sem JSON: aí sim é token.
+  {
+    const t = await subirTudo({}, { vantoro: { naoJson: { status: 401 } } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const c = await r.json();
+    ok("401 sem JSON aponta para o TOKEN", /VANTORO_API_TOKEN/.test(c.erro || ""), c.erro);
+    await t.parar();
+  }
+
+  // Texto solto do servidor: mostrar o texto resolve mais que qualquer frase minha.
+  {
+    const t = await subirTudo({}, { vantoro: {
+      naoJson: { status: 500, tipo: "text/plain", corpo: "upstream connect error" } } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const c = await r.json();
+    ok("mostra o texto que o servidor mandou",
+       /upstream connect error/.test(c.erro || ""), c.erro);
+    await t.parar();
+  }
+
+  // E o caminho bom continua bom.
+  {
+    const t = await subirTudo({}, { vantoro: {} });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    ok("com o Vantoro no ar, a ficha responde normalmente", r.status === 200, `veio ${r.status}`);
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
