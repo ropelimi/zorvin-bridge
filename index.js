@@ -1234,6 +1234,26 @@ async function tratarPresenca(body, evento) {
 const ROTAS_DE_DOWNLOAD = ['/message/downloadmedia', '/message/download', '/downloadmedia'];
 const rotaQueServe = new Map();
 
+// QUANTO TEMPO O NAVEGADOR PODE GUARDAR O ARQUIVO.
+//
+// A biblioteca do Supabase manda `max-age=3600` quando ninguém diz nada — UMA
+// HORA. Isso significa que, de hora em hora, cada atendente que abre uma
+// conversa BAIXA DE NOVO todas as fotos, áudios e vídeos dela. Com oito pessoas
+// rolando conversas o dia inteiro e mais de 1 GB de mídia guardada, é assim que
+// a franquia de banda vira zero e o workspace é suspenso — foi o que aconteceu
+// em 21/08 e derrubou o atendimento.
+//
+// Um ano, e `immutable` junto. Não é ousadia: o endereço do arquivo é
+// `recebidos/{messageid}`, e o messageid não se repete. Aquele endereço nunca
+// vai apontar para outro conteúdo, então não existe o risco que um cache longo
+// normalmente traz — o de servir uma versão velha de algo que mudou.
+//
+// `immutable` é o que faz o navegador nem PERGUNTAR se mudou. Sem ele, ainda
+// sai uma ida à rede por arquivo para receber "304, continua igual": pouco
+// tráfego, mas uma chamada por imagem por atendente, e é justamente o que deixa
+// a conversa lenta ao abrir.
+const CACHE_DA_MIDIA = { cacheControl: '31536000, immutable' };
+
 async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
   try {
     if (!token || !m.messageid) return null;
@@ -1317,7 +1337,8 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
 
     const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
     const caminho = `recebidos/${m.messageid}.${ext}`;
-    const { error: upErr } = await supabase.storage.from('anexos').upload(caminho, bytes, { contentType: mime, upsert: true });
+    const { error: upErr } = await supabase.storage.from('anexos')
+      .upload(caminho, bytes, { contentType: mime, upsert: true, ...CACHE_DA_MIDIA });
     if (upErr) { console.error('Erro ao salvar mídia recebida no Storage:', upErr.message); return null; }
     const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
     return pub?.publicUrl || null;
@@ -1443,7 +1464,7 @@ async function guardarArquivoDoEndereco(messageid, url) {
   const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
   const caminho = `recebidos/${messageid}.${ext}`;
   const { error } = await supabase.storage.from('anexos')
-    .upload(caminho, bytes, { contentType: mime, upsert: true });
+    .upload(caminho, bytes, { contentType: mime, upsert: true, ...CACHE_DA_MIDIA });
   if (error) throw new Error(`Storage recusou: ${error.message}`);
   const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
   return { url: pub && pub.publicUrl, mime };
