@@ -68,6 +68,9 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
+  // O CABEÇALHO importa tanto quanto os bytes: é ele que decide se cada
+  // navegador vai rebaixar o arquivo de novo daqui a uma hora ou daqui a um ano.
+  const cabecalhosDeUpload = new Map();         // caminho → cache-control enviado
   const chamadas = [];                         // tudo o que a ponte pediu
   // De qual tabela cada coluna de junção aponta. Só o que a ponte usa.
   const esquema = { contato_id: "contatos", advogado_id: "advogados", conversa_id: "conversas" };
@@ -171,7 +174,11 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     // ---------------- Storage ----------------
     if (caminho.startsWith("/storage/v1/object/")) {
       const chave = caminho.replace("/storage/v1/object/", "").replace(/^authenticated\//, "");
-      if (req.method === "POST" || req.method === "PUT") { arquivos.set(chave, corpo.length); return responder(200, { Key: chave }); }
+      if (req.method === "POST" || req.method === "PUT") {
+        arquivos.set(chave, corpo.length);
+        cabecalhosDeUpload.set(chave, String(req.headers["cache-control"] || ""));
+        return responder(200, { Key: chave });
+      }
       if (req.method === "GET") { res.writeHead(200); return res.end("bytes"); }
     }
 
@@ -278,7 +285,7 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     servidor.listen(porta, "127.0.0.1", () => {
       resolve({
         url: `http://127.0.0.1:${servidor.address().port}`,
-        dados, contas, arquivos, chamadas,
+        dados, contas, arquivos, cabecalhosDeUpload, chamadas,
         parar: () => new Promise((r) => servidor.close(r)),
       });
     });
