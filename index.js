@@ -627,6 +627,32 @@ function contarRecusa(req) {
 //  o `/webhook/desconhecidos` responder sem ninguém precisar caçar no log — que
 //  é o que transforma "achamos que tem interferência" numa resposta.
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+//  QUAL TELEFONE ESTÁ MANDANDO EVENTO, E QUAL ESTÁ MUDO
+//
+//  Sobrou uma causa que o código não tem como consertar e que ninguém tinha
+//  como ver: a URL do webhook é configurada POR TELEFONE, dentro da Uazapi. Se
+//  a de um deles estiver vazia ou errada, NADA chega aqui — nenhum log, nenhum
+//  descarte, nenhuma recusa. E o envio continua funcionando, porque sai por
+//  outro caminho.
+//
+//  Do lado de quem atende isso é indistinguível de "o cliente não responde". Foi
+//  o relato de 21/08, e as duas primeiras explicações (telefone não cadastrado,
+//  telefone cadastrado duas vezes) foram descartadas com os dados na mão.
+//
+//  Nenhuma lista de erro responde isso, porque não há erro: há AUSÊNCIA. A
+//  única forma de enxergar ausência é comparar com quem está presente — daí
+//  esta tabela, que põe lado a lado todos os telefones cadastrados e quando
+//  cada um mandou o último evento. "3857: nunca; 1932: há 2 minutos" responde a
+//  pergunta em um segundo.
+// ------------------------------------------------------------
+const PONTE_SUBIU_EM = Date.now();
+const ultimoEventoPorTelefone = new Map();   // número → quando
+
+function anotarEventoDe(numero) {
+  if (numero) ultimoEventoPorTelefone.set(String(numero), Date.now());
+}
+
 const telefonesDesconhecidos = new Map();   // número → { quantas, desde, ultima, motivo }
 const duplicadosAvisados = new Map();      // número → quando avisamos
 
@@ -714,12 +740,76 @@ app.get('/webhook/desconhecidos', (req, res) => {
   });
 });
 
+// A TABELA QUE RESPONDE "POR QUE ESTE TELEFONE NÃO RECEBE RESPOSTA?".
+//
+// Põe lado a lado TODOS os telefones cadastrados e quando cada um mandou o
+// último evento. Um telefone mudo enquanto os outros falam é webhook não
+// configurado na Uazapi — a única causa que não deixa rastro nenhum aqui.
+//
+// Não devolve conteúdo de mensagem nenhuma: número, nome e horário.
+app.get('/webhook/telefones', async (req, res) => {
+  liberarCors(res);
+  const desdeMin = Math.round((Date.now() - PONTE_SUBIU_EM) / 60000);
+  let cadastrados = [];
+  try {
+    const { data } = await supabase.from('advogados').select('numero, nome, ativo');
+    cadastrados = data || [];
+  } catch (_e) { /* sem banco, ainda dá para mostrar quem mandou evento */ }
+
+  const linhas = cadastrados.map((a) => {
+    const numero = String(a.numero || '').replace(/\D/g, '');
+    const quando = ultimoEventoPorTelefone.get(numero) || null;
+    return {
+      numero, nome: a.nome || '', ativo: a.ativo !== false,
+      ultimo_evento: quando ? new Date(quando).toISOString() : null,
+      ha_minutos: quando ? Math.round((Date.now() - quando) / 60000) : null,
+      mudo: !quando,
+    };
+  }).sort((x, y) => Number(y.mudo) - Number(x.mudo));
+
+  // Telefones que mandaram evento e NÃO estão na lista de cadastrados. É o
+  // outro lado da mesma pergunta, e some do radar se não for dito.
+  const conhecidos = new Set(linhas.map((l) => l.numero));
+  const forasteiros = [...ultimoEventoPorTelefone.keys()].filter((n) => !conhecidos.has(n));
+
+  const mudos = linhas.filter((l) => l.mudo && l.ativo);
+  res.json({
+    ok: true,
+    ponte_no_ar_ha_minutos: desdeMin,
+    // A contagem vive na MEMÓRIA e zera a cada publicação. Uma ponte que subiu
+    // agora mostra todo mundo mudo, e isso não quer dizer nada — dizer o tempo
+    // aqui é o que impede a tabela de ser lida como um diagnóstico quando ela
+    // ainda é só um cronômetro começando.
+    telefones: linhas,
+    mandaram_evento_e_nao_estao_cadastrados: forasteiros,
+    recado: desdeMin < 30
+      ? `A ponte subiu há ${desdeMin} min. Espere o movimento normal de algumas `
+        + 'horas antes de concluir qualquer coisa: telefone mudo agora pode ser '
+        + 'só falta de mensagem.'
+      : (mudos.length
+        ? `${mudos.length} telefone(s) ativo(s) não mandaram NENHUM evento em `
+          + `${desdeMin} min, enquanto os outros mandaram. O suspeito é a URL do `
+          + 'webhook DELES na Uazapi — cada telefone tem a sua, e sem ela as '
+          + 'mensagens dos clientes não chegam aqui. O envio continua '
+          + 'funcionando, e é isso que faz parecer que "o cliente não responde".'
+        : 'Todos os telefones ativos já mandaram evento. O webhook está chegando '
+          + 'de todos eles.'),
+  });
+});
+
 app.post('/webhook', async (req, res) => {
   if (!webhookAutorizado(req)) {
     contarRecusa(req);
     return res.status(403).send('nao autorizado');
   }
   res.status(200).send('OK'); // responde rápido para a Uazapi não reenviar
+
+  // Antes de qualquer leitura: quem MANDOU já é a informação, mesmo que o
+  // evento seja descartado adiante. É o que separa "não chega" de "chega e cai".
+  try {
+    const b = req.body || {};
+    anotarEventoDe(String(b.owner || (b.message && b.message.owner) || '').replace(/\D/g, ''));
+  } catch (_e) { /* nunca pode derrubar o webhook */ }
 
   try {
     const body = req.body;
