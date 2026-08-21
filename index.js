@@ -627,36 +627,63 @@ function contarRecusa(req) {
 //  o `/webhook/desconhecidos` responder sem ninguém precisar caçar no log — que
 //  é o que transforma "achamos que tem interferência" numa resposta.
 // ------------------------------------------------------------
-const telefonesDesconhecidos = new Map();   // número → { quantas, desde, ultima }
+const telefonesDesconhecidos = new Map();   // número → { quantas, desde, ultima, motivo }
+const duplicadosAvisados = new Map();      // número → quando avisamos
 
-function telefoneDesconhecido(numero, body) {
+const MOTIVOS = {
+  nao_cadastrado:
+    'não está na tabela "advogados". Cadastre o número para as respostas '
+    + 'voltarem a entrar.',
+  busca:
+    'ESTÁ cadastrado, mas a busca por ele FALHOU. A causa mais comum é o mesmo '
+    + 'número cadastrado DUAS VEZES em "advogados" — confira e apague a linha '
+    + 'repetida.',
+};
+
+function mensagemDescartada(numero, motivo, detalhe) {
   const chave = numero || 'sem número no corpo';
   const antes = telefonesDesconhecidos.get(chave);
   const agora = Date.now();
   if (antes) {
     antes.quantas += 1;
     antes.ultima = agora;
+    antes.motivo = motivo;
     // Uma linha por minuto por telefone. Sem o freio, um telefone movimentado
     // empurra para fora do log tudo o que interessa — inclusive isto.
     if (agora - antes.avisadoEm < 60000) return;
     antes.avisadoEm = agora;
   } else {
     telefonesDesconhecidos.set(chave, {
-      quantas: 1, desde: agora, ultima: agora, avisadoEm: agora,
+      quantas: 1, desde: agora, ultima: agora, avisadoEm: agora, motivo,
     });
   }
   const reg = telefonesDesconhecidos.get(chave);
   console.warn(
-    `MENSAGEM DE CLIENTE PERDIDA: o telefone "${chave}" mandou um evento e não `
-    + `está na tabela "advogados", então a mensagem foi descartada — ela não `
-    + `aparece em conversa nenhuma no Zorvin. `
-    + `[${reg.quantas} desde ${new Date(reg.desde).toISOString().slice(11, 16)}] `
+    `MENSAGEM DE CLIENTE PERDIDA: o telefone "${chave}" mandou um evento e a `
+    + `mensagem foi descartada — ela não aparece em conversa nenhuma no Zorvin. `
+    + `Motivo: ${MOTIVOS[motivo] || motivo}`
+    + (detalhe ? ` (${String(detalhe).slice(0, 160)})` : '')
+    + ` [${reg.quantas} desde ${new Date(reg.desde).toISOString().slice(11, 16)}] `
     + `O envio POR este telefone continua funcionando, e é isso que faz parecer `
-    + `que "o cliente não responde". Cadastre o número em "advogados" para as `
-    + `respostas voltarem a entrar.`);
+    + `que "o cliente não responde".`);
 }
 
-// Quem está mandando mensagem sem estar cadastrado. Aberto de propósito: não
+// Cadastro repetido não derruba mais nada, mas continua sendo defeito de
+// cadastro: duas linhas para o mesmo telefone significam duas configurações
+// possíveis (token, servidor, departamento) e nenhuma garantia de qual vale.
+function avisarDuplicado(numero) {
+  const agora = Date.now();
+  const antes = duplicadosAvisados.get(numero);
+  if (antes && agora - antes < 3600000) return;   // uma vez por hora, e basta
+  duplicadosAvisados.set(numero, agora);
+  console.warn(
+    `CADASTRO REPETIDO: o telefone "${numero}" aparece MAIS DE UMA VEZ na `
+    + 'tabela "advogados". Usei a primeira linha e as mensagens continuam '
+    + 'entrando, mas qual token e qual departamento valem passa a ser sorte. '
+    + 'Apague a linha repetida.');
+}
+
+// Quem está tendo mensagem descartada, e por quê. Aberto de propósito: não
 // devolve conteúdo de mensagem nenhuma, só números de telefone do escritório e
 // contagem — e serve justamente para quem não tem acesso ao log da Render
 // conseguir responder "por que este telefone não recebe resposta?".
@@ -666,6 +693,8 @@ app.get('/webhook/desconhecidos', (req, res) => {
     .map(([numero, r]) => ({
       numero,
       eventos_descartados: r.quantas,
+      motivo: r.motivo || 'nao_cadastrado',
+      o_que_fazer: MOTIVOS[r.motivo] || 'motivo desconhecido',
       desde: new Date(r.desde).toISOString(),
       ultimo: new Date(r.ultima).toISOString(),
     }))
@@ -676,12 +705,12 @@ app.get('/webhook/desconhecidos', (req, res) => {
     // significar "nenhum problema" OU "a ponte reiniciou agora" — dizer isso
     // aqui evita que a lista vazia seja lida como atestado de saúde.
     desde_o_ultimo_reinicio: true,
+    cadastros_repetidos: [...duplicadosAvisados.keys()],
     telefones: lista,
     recado: lista.length
-      ? 'Estes telefones mandaram mensagem e NÃO estão na tabela "advogados". '
-        + 'As mensagens deles foram descartadas e não aparecem em conversa '
-        + 'nenhuma. Cadastre o número para as respostas voltarem a entrar.'
-      : 'Nenhum telefone desconhecido desde que a ponte subiu.',
+      ? 'Estes telefones mandaram mensagem e ela foi DESCARTADA — não aparece '
+        + 'em conversa nenhuma. Veja "o_que_fazer" em cada um.'
+      : 'Nenhuma mensagem descartada desde que a ponte subiu.',
   });
 });
 
@@ -724,13 +753,30 @@ app.post('/webhook', async (req, res) => {
     // uso interno, como RH e cadastro) vem junto sem quebrar quem ainda não
     // rodou o SQL das frentes — pedir uma coluna inexistente daria erro e a
     // mensagem seria descartada.
-    const { data: adv, error: advErro } = await supabase
+    //
+    // `limit(2)` E NÃO `maybeSingle()`. O `maybeSingle` devolve ERRO quando acha
+    // mais de uma linha — e um telefone cadastrado DUAS VEZES em `advogados`
+    // (coisa que acontece: alguém cadastra de novo achando que faltava) fazia
+    // toda mensagem daquele número ser descartada, com um `console.error` que
+    // não dizia que eram mensagens de cliente.
+    //
+    // Era o segundo caminho silencioso, e o pior dos dois: o telefone ESTÁ
+    // cadastrado, então quem for conferir vai achar tudo certo. Foi assim que
+    // este defeito escapou uma vez — a explicação "não está cadastrado" bateu
+    // com o sintoma e estava errada.
+    //
+    // Duplicidade agora não derruba nada: usa a primeira e reclama. Cadastro
+    // repetido é problema de cadastro, e não pode custar as mensagens dos
+    // clientes enquanto ninguém arruma.
+    const { data: achados, error: advErro } = await supabase
       .from('advogados')
       .select('*')
       .eq('numero', advogadoNumero)
-      .maybeSingle();
-    if (advErro) { console.error('Erro ao buscar advogado:', advErro.message); return; }
-    if (!adv) { telefoneDesconhecido(advogadoNumero, body); return; }
+      .limit(2);
+    if (advErro) { mensagemDescartada(advogadoNumero, 'busca', advErro.message); return; }
+    const adv = (achados || [])[0] || null;
+    if (!adv) { mensagemDescartada(advogadoNumero, 'nao_cadastrado'); return; }
+    if (achados.length > 1) avisarDuplicado(advogadoNumero);
 
     // Quem é o CONTATO — SEMPRE o telefone real, ignorando o identificador de
     // privacidade "@lid" que a WhatsApp passou a enviar (ele criava um segundo
