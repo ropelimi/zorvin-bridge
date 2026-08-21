@@ -1778,7 +1778,7 @@ console.log("\n18. O anexo não fica vazio");
      /MENSAGEM DE CLIENTE PERDIDA/.test(log));
   ok("e diz QUAL telefone", /5567900003857/.test(log));
   ok("e diz o que fazer (cadastrar em advogados)",
-     /Cadastre o número em "advogados"/.test(log));
+     /não está na tabela "advogados"/.test(log) && /Cadastre o número/.test(log));
   ok("e avisa que o envio continua funcionando — que é o que confunde",
      /envio POR este telefone continua funcionando/i.test(log));
 
@@ -2102,6 +2102,91 @@ console.log("\n18. O anexo não fica vazio");
   const caminho = (enviados[0] || [])[0] || "";
   ok("e o caminho carrega o id da mensagem, que não se repete",
      caminho.includes("foto-cache-1"), `caminho "${caminho}"`);
+
+  await t.parar();
+}
+
+// ==================================================================
+//  O TELEFONE CADASTRADO DUAS VEZES
+// ==================================================================
+//
+//  O SEGUNDO caminho silencioso, e o pior dos dois.
+//
+//  A busca usava `maybeSingle()`, que devolve ERRO quando acha mais de uma
+//  linha. Um telefone cadastrado duas vezes em `advogados` — coisa que
+//  acontece, alguém cadastra de novo achando que faltava — fazia TODA mensagem
+//  daquele número ser descartada, com um `console.error` que não dizia que
+//  eram mensagens de cliente.
+//
+//  É pior do que o "não cadastrado" porque o telefone ESTÁ lá: quem for
+//  conferir vai achar tudo certo. Foi assim que este defeito escapou uma vez —
+//  a explicação "não está cadastrado" batia com o sintoma e estava errada.
+{
+  console.log("\nO telefone cadastrado duas vezes");
+
+  const DOIS = [
+    { id: "adv-1", nome: "Comercial", numero: "5567900000001", token: "tok-a",
+      servidor: null, ativo: true, departamento_id: 1 },
+    { id: "adv-2", nome: "Comercial (repetido)", numero: "5567900000001", token: "tok-b",
+      servidor: null, ativo: true, departamento_id: 1 },
+  ];
+  const t = await subirTudo({}, { tabelas: { advogados: DOIS } });
+
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mensagemDaUazapi("Oi, respondendo", "dup-1")),
+  });
+  await espera(900);
+
+  // O CORAÇÃO DA PROVA. Cadastro repetido é problema de cadastro, e não pode
+  // custar as mensagens dos clientes enquanto ninguém arruma.
+  ok("a mensagem ENTRA mesmo com o telefone cadastrado duas vezes",
+     t.sb.dados.mensagens.length === 1,
+     `ficaram ${t.sb.dados.mensagens.length} — o cliente respondeu e sumiu`);
+
+  ok("e a duplicidade é avisada",
+     /CADASTRO REPETIDO/.test(t.registro.join("")));
+  ok("dizendo qual telefone", /5567900000001/.test(t.registro.join("")));
+
+  const d = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/desconhecidos`)).json();
+  ok("e o /webhook/desconhecidos lista o cadastro repetido",
+     (d.cadastros_repetidos || []).includes("5567900000001"), JSON.stringify(d));
+
+  await t.parar();
+}
+
+// ==================================================================
+//  A BUSCA DO ADVOGADO FALHANDO
+// ==================================================================
+//
+//  Banco fora do ar, coluna que não existe, o que for. Antes era um
+//  `console.error` genérico e a mensagem ia embora sem nada dizer que era
+//  mensagem de cliente — e sem aparecer em lugar nenhum que alguém consultasse.
+{
+  console.log("\nA busca do advogado falhando");
+  const t = await subirTudo({}, {
+    quebrar: (metodo, tabela) => (metodo === "GET" && tabela.startsWith("advogados"))
+      ? "banco fora do ar" : null,
+  });
+
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mensagemDaUazapi("Oi", "falha-1")),
+  });
+  await espera(900);
+
+  const log = t.registro.join("");
+  ok("o aviso diz que é mensagem de cliente sendo perdida",
+     /MENSAGEM DE CLIENTE PERDIDA/.test(log));
+  ok("e aponta o cadastro repetido como causa mais comum",
+     /DUAS VEZES/.test(log), log.slice(-400));
+
+  const d = await (await fetch(`http://127.0.0.1:${t.porta}/webhook/desconhecidos`)).json();
+  const linha = (d.telefones || [])[0];
+  ok("e o /webhook/desconhecidos separa este motivo do 'não cadastrado'",
+     linha && linha.motivo === "busca", JSON.stringify(d.telefones));
+  ok("e diz o que fazer", !!(linha && /DUAS VEZES/.test(linha.o_que_fazer || "")),
+     JSON.stringify(linha || null));
 
   await t.parar();
 }
