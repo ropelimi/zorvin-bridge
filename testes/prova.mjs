@@ -1895,6 +1895,145 @@ console.log("\n18. O anexo não fica vazio");
 }
 
 // ==================================================================
+//  O VANTORO HIBERNANDO NÃO PODE VIRAR ERRO NA CARA DE QUEM ATENDE
+// ==================================================================
+//
+//  No plano gratuito da Render o serviço hiberna. A primeira chamada depois
+//  disso NÃO ESPERA: a Render responde na hora, com uma página de erro, e só
+//  então acorda o Django por baixo.
+//
+//  Do lado de quem atende isso aparecia como a ficha do cliente falhando sem
+//  motivo e voltando sozinha minutos depois. É o relato de 21/08.
+{
+  console.log("\nO Vantoro hibernando não vira erro na cara de quem atende");
+
+  // Dorme na PRIMEIRA chamada, acorda na segunda — exatamente como a Render.
+  {
+    // JANELA FECHADA de propósito: com ela aberta, o ping de manutenção
+    // absorve a primeira resposta "dormindo" e o reenvio nunca é exercitado.
+    // (Foi o que aconteceu na primeira rodada — o que prova que os dois
+    // mecanismos se cobrem, mas cada um precisa da sua própria conferência.)
+    const t = await subirTudo({ VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: { dormeAsPrimeiras: 1 } });
+    const comeco = Date.now();
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const levou = Date.now() - comeco;
+    console.log(`     serviço dormindo → a ficha respondeu ${r.status} em ${levou}ms`);
+
+    ok("a ficha responde certo mesmo com o serviço dormindo", r.status === 200,
+       `veio ${r.status} — quem atende veria a ficha falhar sem motivo`);
+    ok("e esperou o serviço acordar antes de responder", levou >= 6000,
+       `respondeu em ${levou}ms; a espera de 6s não aconteceu`);
+    ok("e o log diz que foi sono, não defeito",
+       /parece serviço hibernando/.test(t.registro.join("")));
+    await t.parar();
+  }
+
+  // DORMINDO DE VERDADE (não acorda nunca): tem de desistir com a mensagem que
+  // explica, e não ficar tentando para sempre.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: { dormeAsPrimeiras: 99 } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                          { headers: { Authorization: "Bearer jwt-bom" } });
+    const c = await r.json();
+    ok("serviço que não acorda desiste, com o motivo",
+       /502|fora do ar|dormindo|suspenso/i.test(c.erro || ""), c.erro);
+    await t.parar();
+  }
+
+  // O ENVIO NÃO É REPETIDO. Se o Vantoro chegou a receber o cadastro antes de a
+  // Render cortar, repetir criaria DOIS clientes — e um cadastro duplicado é
+  // pior do que um erro na tela, porque ninguém percebe na hora.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: { dormeAsPrimeiras: 1 } });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente`, {
+      method: "POST",
+      headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify({ nome: "Fulano", telefone: "5511999998888" }),
+    });
+    // TODOS os POSTs que o Vantoro recebeu, e não os de um caminho escolhido a
+    // dedo: a ponte chama "/clientes" lá dentro, não "/vantoro/cliente" (esse é
+    // o endereço DELA). Filtrando pelo caminho errado, a conta dava zero e a
+    // conferência passava sem olhar nada — foi assim na primeira rodada, e só
+    // apareceu porque a sabotagem correspondente NÃO derrubou nada.
+    const posts = t.van.recebidas.filter((x) => x.metodo === "POST");
+    ok("um cadastro que falhou NÃO é reenviado", posts.length <= 1,
+       `o Vantoro recebeu ${posts.length} POSTs — cria cliente duplicado`);
+    await t.parar();
+  }
+
+  // RESPOSTA LENTA NÃO É SONO. Serviço no ar e sobrecarregado responde devagar;
+  // insistir nesse caso só piora, e ainda dobra a espera de quem está olhando.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: { naoJson: { status: 503 }, demora: 5500 } });
+    const comeco = Date.now();
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                { headers: { Authorization: "Bearer jwt-bom" } });
+    const levou = Date.now() - comeco;
+    ok("resposta lenta não é tratada como sono (não tenta de novo)",
+       levou < 11000, `levou ${levou}ms — dobrou a espera de quem está olhando`);
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  A JANELA EM QUE O VANTORO É MANTIDO ACORDADO
+// ==================================================================
+//
+//  Acordado 24 horas, cada serviço consome ~730 h/mês. São DOIS serviços, e o
+//  plano gratuito dá 750 h para o workspace inteiro — manter os dois de pé o
+//  tempo todo estoura a franquia e troca o problema do sono pelo da conta.
+//
+//  Por isso a batida que mantém o Vantoro acordado tem hora para começar e
+//  para acabar. Estas conferências olham o que o Vantoro RECEBE, que é a única
+//  coisa que decide se a franquia vai ser gasta ou não.
+{
+  console.log("\nA janela em que o Vantoro é mantido acordado");
+
+  // Janela escancarada: o ping tem de sair assim que a ponte sobe.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24",
+                                VANTORO_ACORDADO_SABADO: "1" }, { vantoro: {} });
+    await espera(900);
+    const pings = t.van.recebidas.filter((x) => x.caminho === "/ping");
+    ok("dentro da janela, a ponte bate no /ping do Vantoro", pings.length >= 1,
+       `bateu ${pings.length} vez(es)`);
+    await t.parar();
+  }
+
+  // Janela fechada: NADA pode sair. É esta linha que protege a franquia de
+  // horas — sem ela, o Vantoro ficaria de pé 24h e a conta estouraria no fim
+  // do mês, sem nada apontando para a causa.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: {} });
+    await espera(900);
+    const pings = t.van.recebidas.filter((x) => x.caminho === "/ping");
+    ok("fora da janela, NÃO bate", pings.length === 0,
+       `bateu ${pings.length} vez(es) — o serviço ficaria de pé 24h`);
+    await t.parar();
+  }
+
+  // O PING NÃO LEVA O TOKEN. Ele não precisa — do outro lado é 200 vazio, sem
+  // banco e sem sessão. Mandar o token numa chamada que não pede é espalhá-lo
+  // por mais um lugar sem ganhar nada.
+  {
+    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24" },
+                              { vantoro: {} });
+    await espera(900);
+    const ping = t.van.recebidas.find((x) => x.caminho === "/ping");
+    ok("e o ping não leva o token junto", !!ping && !ping.autorizacao,
+       JSON.stringify(ping || null));
+    await t.parar();
+  }
+}
+
+
+// ==================================================================
 //  O ARQUIVO SOBE COM CACHE LONGO
 // ==================================================================
 //
