@@ -2564,7 +2564,7 @@ async function chamarVantoro(caminho, opcoes = {}) {
   if (!VANTORO_URL || !VANTORO_TOKEN) {
     return { status: 503, corpo: { ok: false, erro: 'Integração com o Vantoro não configurada (VANTORO_API_URL/VANTORO_API_TOKEN).' } };
   }
-  const r = await fetchComTimeout(`${VANTORO_URL}${caminho}`, {
+  const uma = () => fetchComTimeout(`${VANTORO_URL}${caminho}`, {
     ...opcoes,
     headers: {
       'Content-Type': 'application/json',
@@ -2572,11 +2572,53 @@ async function chamarVantoro(caminho, opcoes = {}) {
       ...(opcoes.headers || {}),
     },
   }, 20000);
+
+  // ESPERAR O VANTORO ACORDAR, EM VEZ DE DESISTIR.
+  //
+  // No plano gratuito da Render o serviço hiberna, e a primeira chamada depois
+  // disso NÃO ESPERA: a Render responde na hora, com uma página de erro, e só
+  // então acorda o Django por baixo. Do lado de quem atende isso aparece como a
+  // ficha do cliente falhando sem motivo e voltando sozinha minutos depois.
+  //
+  // A assinatura desse caso é específica: resposta RÁPIDA, código 5xx, e um
+  // corpo que não é JSON. Nenhuma das três sozinha basta — um 500 do Django vem
+  // em JSON, e uma resposta lenta é outra coisa (serviço no ar e sobrecarregado,
+  // e insistir aí só piora).
+  //
+  // Só nesse caso vale esperar e tentar de novo: a segunda chamada cai num
+  // serviço já de pé. Um envio (POST/PUT) NÃO é repetido — se o Vantoro chegou a
+  // receber o cadastro antes de a Render cortar, repetir criaria dois.
+  const comecou = Date.now();
+  let r = await uma();
+  const demorou = Date.now() - comecou;
+  let texto0 = await r.text().catch(() => '');
+
+  {
+    const metodo = String(opcoes.method || 'GET').toUpperCase();
+    const naoEhJson = (() => { try { JSON.parse(texto0); return false; } catch (_e) { return true; } })();
+    // RÁPIDA é parte da assinatura. A Render corta na hora enquanto acorda o
+    // serviço; uma resposta que DEMOROU é outra coisa — serviço no ar e
+    // sobrecarregado —, e insistir nesse caso só piora.
+    const parecendoSono = r.status >= 500 && naoEhJson && demorou < 5000
+      && (metodo === 'GET' || metodo === 'HEAD');
+    if (parecendoSono) {
+      console.warn(`Vantoro respondeu ${r.status} sem JSON em ${demorou}ms — parece `
+        + 'serviço hibernando na Render. Esperando 6s e tentando mais uma vez.');
+      await new Promise((ok) => setTimeout(ok, 6000));
+      try {
+        const r2 = await uma();
+        const texto2 = await r2.text().catch(() => '');
+        r = r2; texto0 = texto2;
+      } catch (_e) { /* fica com a primeira resposta, que já explica o que houve */ }
+    }
+  }
+
   // O CORPO SÓ PODE SER LIDO UMA VEZ. Chamar `r.json()` e, ao falhar, tentar
   // `r.text()` para saber o que tinha lá devolve VAZIO — o fluxo já foi
   // consumido pela primeira leitura. Era assim que a página de suspensão, que é
   // justamente a evidência que interessa, virava "uma resposta vazia".
-  const texto = await r.text().catch(() => '');
+  // Por isso o texto vem lido de cima, de uma vez só.
+  const texto = texto0;
   let corpo = null;
   try {
     corpo = JSON.parse(texto);
@@ -4392,6 +4434,65 @@ setInterval(processarFilaDeEnvio, 3000);
 // Os avisos de audiência mudam de hora em hora, não de segundo em segundo:
 // 5 minutos é de sobra e não pesa no plano free.
 setInterval(buscarAvisosDeAudiencia, 5 * 60 * 1000);
+
+// ------------------------------------------------------------
+//  MANTER O VANTORO ACORDADO — no horário de trabalho, e só nele
+//
+//  O plano gratuito da Render hiberna o serviço parado. A primeira chamada
+//  depois disso recebe uma PÁGINA DE ERRO enquanto o Django acorda por baixo, e
+//  do lado de cá isso vira "Resposta inválida do Vantoro": a ficha do cliente
+//  falha sem motivo e volta sozinha minutos depois.
+//
+//  A ponte já é mantida acordada por um cronjob de fora. Ela aproveita o mesmo
+//  ciclo para bater no /ping do Vantoro — sem serviço novo, sem custo novo.
+//
+//  POR QUE NÃO O DIA INTEIRO. O plano gratuito dá 750 horas de máquina por mês
+//  para o workspace, e são DOIS serviços. Acordado 24 horas, cada um consome
+//  ~730 h/mês: os dois juntos passam de 1400 e estouram a franquia — seria
+//  trocar o problema do sono pelo problema da conta.
+//
+//  Numa janela de 13 horas em dia útil, o Vantoro fica em ~290 h/mês e sobra
+//  espaço para a ponte. Fora do horário ele dorme, e quem entrar às 23h espera
+//  o primeiro acesso acordar — que é exatamente o comportamento de hoje, só que
+//  agora restrito às horas em que quase ninguém usa.
+//
+//  A janela é configurável porque quem sabe o horário do escritório não é quem
+//  escreve isto.
+const VANTORO_ACORDADO_DE = Number(process.env.VANTORO_ACORDADO_DE || 7);
+const VANTORO_ACORDADO_ATE = Number(process.env.VANTORO_ACORDADO_ATE || 20);
+const VANTORO_ACORDADO_SABADO = String(process.env.VANTORO_ACORDADO_SABADO || '1') === '1';
+
+function dentroDoHorarioDeTrabalho(agora = new Date()) {
+  // Em SÃO PAULO, não em UTC. A máquina da Render roda em UTC, e uma janela
+  // calculada nela abriria às 4h da manhã e fecharia às 17h — justamente na
+  // hora em que o escritório ainda está trabalhando.
+  const partes = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Sao_Paulo', hour: 'numeric', hour12: false, weekday: 'short',
+  }).formatToParts(agora);
+  const hora = Number(partes.find((p) => p.type === 'hour').value);
+  const dia = partes.find((p) => p.type === 'weekday').value;
+  if (dia === 'Sun') return false;
+  if (dia === 'Sat' && !VANTORO_ACORDADO_SABADO) return false;
+  return hora >= VANTORO_ACORDADO_DE && hora < VANTORO_ACORDADO_ATE;
+}
+
+async function manterVantoroAcordado() {
+  if (!VANTORO_URL || !dentroDoHorarioDeTrabalho()) return;
+  try {
+    // O /ping do Vantoro não pede token: responde 200 vazio, sem banco e sem
+    // sessão. Mandar o token aqui seria expô-lo numa chamada que não precisa.
+    await fetchComTimeout(`${VANTORO_URL.replace(/\/$/, '')}/ping`, {}, 15000);
+  } catch (_e) {
+    // Em silêncio de propósito: falhar em acordar não é problema para reportar,
+    // é o estado normal enquanto o serviço sobe. O que interessa reclamar é a
+    // chamada de verdade falhando — e essa já reclama, com o motivo.
+  }
+}
+
+// A Render hiberna com ~15 minutos de inatividade. 10 minutos deixa margem para
+// uma batida perdida sem o serviço chegar a dormir.
+setInterval(manterVantoroAcordado, 10 * 60 * 1000).unref();
+manterVantoroAcordado();
 
 const port = process.env.PORT || 3000;
 // ------------------------------------------------------------
