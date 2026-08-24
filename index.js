@@ -2955,6 +2955,39 @@ app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
   chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/documentos`,
     { method: 'POST', body: JSON.stringify(req.body || {}) })));
 
+// A NOTA INTERNA SOBE PARA O HISTÓRICO DO CLIENTE — e do processo, quando tem.
+//
+// A equipe escreve a nota dentro da conversa, que é onde ela está quando
+// descobre o que precisa anotar. Mas quem for procurar aquilo meses depois vai
+// à ficha do cliente, ou ao histórico do processo. Então a nota vive nos dois.
+//
+// O AUTOR É DECIDIDO AQUI, e não recebido do navegador. É a mesma regra do
+// histórico de alterações logo abaixo: a ponte confere o login antes de deixar
+// passar, então é aqui que se sabe QUEM é quem. Um histórico em que o autor é o
+// que o navegador disse ser não responde "quem escreveu isto?" — e num
+// escritório de advocacia essa é a pergunta que se faz.
+//
+// O `id` vai do painel de propósito: é o id da nota na tabela do Zorvin, e é
+// por ele que uma edição encontra o que reescrever no Vantoro em vez de criar
+// uma segunda. Sem ele as duas viram cópias, e cópias se separam no primeiro
+// que alguém corrigir.
+app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
+  const corpo = req.body || {};
+  const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
+  return chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/nota`, {
+    method: 'POST',
+    body: JSON.stringify({
+      id: corpo.id,
+      texto: corpo.texto,
+      processo_id: corpo.processo_id ?? null,
+      apagada: !!corpo.apagada,
+      // Sobrescreve o que veio do navegador, e não completa: aceitar o nome
+      // dele quando vier seria aceitar sempre, porque ele sempre pode mandar.
+      autor: nome || (usuario && usuario.email) || 'Zorvin',
+    }),
+  });
+}));
+
 // Diagnóstico rápido: a integração está configurada?
 app.get('/vantoro/status', (req, res) => {
   liberarCors(res);
