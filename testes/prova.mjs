@@ -277,6 +277,45 @@ const mensagemDaUazapi = (texto, id) => ({
      t.uaz.recebidas.some((x) => JSON.stringify(x.corpo).includes("Terceira")),
      JSON.stringify(t.uaz.recebidas));
 
+  // A FILA SAI NA ORDEM EM QUE ENTROU.
+  //
+  // Conversa de WhatsApp é sequência, não conjunto. Quem escreve "vou te mandar
+  // o documento" e em seguida "segue em anexo" está contando uma coisa em duas
+  // partes; trocadas, viram outra coisa. E o cliente não tem como desconfiar —
+  // ele lê o que está na tela, na ordem da tela.
+  //
+  // O código JÁ FAZ ISTO: lê com `order('criado_em')` e envia num laço que
+  // espera cada envio terminar. O que faltava era a PROVA. Sem ela, trocar o
+  // laço por um `Promise.all` — que parece só deixar mais rápido — embaralharia
+  // a conversa de todo mundo sem uma conferência sequer ficar vermelha.
+  //
+  // Isto foi MEDIDO, e não suposto: invertendo a leitura para
+  // `ascending: false`, a bancada inteira passava.
+  t.uaz.recebidas.length = 0;
+  const instante = Date.now();
+  // EMPURRADAS FORA DE ORDEM de propósito. Plantadas na ordem certa, a prova
+  // passaria também com uma fila que ignora `criado_em` e devolve as linhas na
+  // ordem em que estão no banco — mediria o acaso, e não a regra.
+  t.sb.dados.fila_envio.push(
+    { id: 11, conversa_id: 1, tipo: "texto", texto: "TERCEIRA parte", status: "pendente",
+      tentativas: 0, criado_em: new Date(instante - 10000).toISOString() },
+    { id: 12, conversa_id: 1, tipo: "texto", texto: "PRIMEIRA parte", status: "pendente",
+      tentativas: 0, criado_em: new Date(instante - 30000).toISOString() },
+    { id: 13, conversa_id: 1, tipo: "texto", texto: "SEGUNDA parte", status: "pendente",
+      tentativas: 0, criado_em: new Date(instante - 20000).toISOString() },
+  );
+  await fetch(`http://127.0.0.1:${t.porta}/ping`);
+  await espera(2000);
+
+  const ordem = t.uaz.recebidas
+    .map((x) => (JSON.stringify(x.corpo).match(/(PRIMEIRA|SEGUNDA|TERCEIRA)/) || [])[1])
+    .filter(Boolean);
+  ok("as três partes saíram", ordem.length === 3,
+     JSON.stringify(t.uaz.recebidas.map((x) => x.corpo)));
+  ok("da mais antiga para a mais nova, e não na ordem do banco",
+     ordem.join(",") === "PRIMEIRA,SEGUNDA,TERCEIRA",
+     `saiu ${JSON.stringify(ordem)} — o cliente leria a conversa embaralhada`);
+
   await t.parar();
 }
 
