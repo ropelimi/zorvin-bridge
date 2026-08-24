@@ -2988,6 +2988,222 @@ app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
   });
 }));
 
+// ============================================================
+//  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
+// ============================================================
+//
+//  Dois casos, uma máquina só — e é por isso que ela mora aqui em vez de estar
+//  escrita duas vezes:
+//
+//    1. O CONTATO VIRA CLIENTE. Enquanto ele não tinha cadastro, as notas
+//       ficaram só na conversa, que é o certo: não havia ficha para recebê-las.
+//       Criado o cadastro, tudo o que a equipe já anotou sobre ele passa a ter
+//       um lugar — e deixar para trás justamente o histórico anterior ao
+//       cadastro é perder o que costuma ser o mais importante.
+//
+//    2. O RETROATIVO, uma vez. Todas as notas escritas antes desta função
+//       existir. Sobem como NOTA GERAL, sem processo: é tudo passado, e
+//       adivinhar de qual ação era cada uma poria nota no histórico do processo
+//       errado. Daqui para frente quem escreve escolhe.
+//
+//  O AUTOR AQUI É O DA NOTA, e não quem mandou subir — ao contrário da rota de
+//  nota nova, onde o autor vem da sessão. A regra não mudou, a situação é que é
+//  outra: lá o risco é o navegador MENTIR sobre quem escreveu, e por isso não se
+//  acredita nele; aqui o autor já está gravado na tabela do próprio Zorvin, que
+//  é fonte confiável. Assinar com o nome de quem rodou o retroativo reescreveria
+//  a autoria de meses de histórico numa tacada.
+
+/** Sobe para o Vantoro as notas de um contato que ainda não subiram.
+ *
+ *  Devolve { subiram, falharam, jaEstavam }. Nunca levanta: é chamada em laço
+ *  sobre muitos contatos, e um cliente com problema não pode parar os outros.
+ */
+async function subirNotasDoContato(contato, { simular = false } = {}) {
+  const clienteId = contato && contato.vantoro_cliente_id;
+  if (!clienteId) return { subiram: 0, falharam: 0, jaEstavam: 0 };
+
+  const { data: conversas } = await supabase
+    .from('conversas').select('id').eq('contato_id', contato.id);
+  const ids = (conversas || []).map((c) => c.id);
+  if (!ids.length) return { subiram: 0, falharam: 0, jaEstavam: 0 };
+
+  // MAIS ANTIGA PRIMEIRO. O histórico do cliente é lido em ordem; subir
+  // embaralhado deixaria a leitura sem sentido para quem for entender o caso.
+  const { data: notas, error } = await supabase
+    .from('notas').select('*').in('conversa_id', ids)
+    .order('criado_em', { ascending: true });
+  if (error) return { subiram: 0, falharam: 1, jaEstavam: 0, erro: error.message };
+
+  return subirNotas(clienteId, notas || [], { simular });
+}
+
+/** O envio em si: uma lista de notas já lida, para um cliente do Vantoro.
+ *
+ *  Separado da leitura porque os dois caminhos que sobem nota leem de jeitos
+ *  diferentes — um contato só lê o dele; o retroativo lê tudo em lote —, mas o
+ *  que é feito com cada nota TEM de ser idêntico. Duas cópias desta regra se
+ *  separariam na primeira correção feita só de um lado.
+ */
+async function subirNotas(clienteId, notas, { simular = false } = {}) {
+  if (!clienteId) return { subiram: 0, falharam: 0, jaEstavam: 0 };
+  let subiram = 0, falharam = 0, jaEstavam = 0;
+  for (const n of (notas || [])) {
+    // JÁ SUBIU: pula. O Vantoro também deduplica pelo `id_externo`, então isto
+    // é a segunda trava, não a única — mas evita a chamada, que é o que custa.
+    if (n.vantoro_atividade_id) { jaEstavam += 1; continue; }
+    if (simular) { subiram += 1; continue; }
+
+    try {
+      const { status, corpo } = await chamarVantoro(`/clientes/${encodeURIComponent(clienteId)}/nota`, {
+        method: 'POST',
+        body: JSON.stringify({
+          id: n.id,
+          texto: n.texto || '',
+          // SEM PROCESSO, e de propósito: é tudo passado, e adivinhar de qual
+          // ação era cada nota poria informação no histórico do processo errado.
+          processo_id: null,
+          apagada: !!n.apagada_em,
+          autor: n.autor || 'Zorvin',
+        }),
+      });
+      if (status >= 200 && status < 300) {
+        subiram += 1;
+        const atividade = corpo && corpo.atividade && corpo.atividade.id;
+        if (atividade) {
+          // Marca de que subiu. Se esta gravação falhar, a nota sobe de novo na
+          // próxima rodada e o Vantoro a reconhece pelo `id_externo` — repetir é
+          // barato, perder não é.
+          await supabase.from('notas')
+            .update({ vantoro_atividade_id: atividade }).eq('id', n.id);
+        }
+      } else {
+        falharam += 1;
+      }
+    } catch (_e) {
+      falharam += 1;
+    }
+  }
+  return { subiram, falharam, jaEstavam };
+}
+
+// UM CONTATO SÓ — chamado pelo painel quando o contato acabou de virar cliente.
+app.post('/vantoro/contato/:id/subir-notas', rotaVantoro(async (req) => {
+  const { data: contato } = await supabase
+    .from('contatos').select('id, vantoro_cliente_id').eq('id', req.params.id).maybeSingle();
+  if (!contato) return { status: 404, corpo: { ok: false, erro: 'Contato não encontrado.' } };
+  if (!contato.vantoro_cliente_id) {
+    return { status: 200, corpo: { ok: true, subiram: 0,
+      detalhe: 'Este contato ainda não tem cadastro no Vantoro; as notas ficam na conversa.' } };
+  }
+  const r = await subirNotasDoContato(contato);
+  return { status: 200, corpo: { ok: true, ...r } };
+}));
+
+// LER TUDO DE UMA TABELA, EM PÁGINAS.
+//
+// O PostgREST devolve no máximo 1000 linhas e NÃO AVISA: a resposta vem com cara
+// de resposta inteira. Num escritório com milhares de contatos, quem confia num
+// `select` solto pula todo mundo a partir do milésimo e diz "pronto" — que é o
+// defeito que mais se repetiu neste projeto.
+//
+// `montar` recebe a página e devolve a consulta; o `range` é aplicado aqui, num
+// lugar só, para não haver uma versão certa e outra esquecida.
+const PAGINA_DE_LEITURA = 500;
+async function lerEmPaginas(montar) {
+  const tudo = [];
+  for (let de = 0; ; de += PAGINA_DE_LEITURA) {
+    const { data, error } = await montar().range(de, de + PAGINA_DE_LEITURA - 1);
+    if (error) throw new Error(error.message);
+    tudo.push(...(data || []));
+    if (!data || data.length < PAGINA_DE_LEITURA) return tudo;
+  }
+}
+
+// TODOS — o retroativo, uma vez. Só quem administra, e com simulação primeiro.
+app.post('/vantoro/notas/subir-tudo', soAdmin(async (req) => {
+  const simular = String(req.query.simular || '') === '1';
+
+  let contatos;
+  try {
+    contatos = await lerEmPaginas(() => supabase
+      .from('contatos').select('id, numero, vantoro_cliente_id')
+      .not('vantoro_cliente_id', 'is', null)
+      .order('id', { ascending: true }));
+  } catch (e) {
+    return { status: 502, corpo: { ok: false, erro: e.message } };
+  }
+
+  let subiram = 0, falharam = 0, jaEstavam = 0;
+  const comProblema = [];
+
+  // EM LOTES DE CONTATOS, E NÃO UM DE CADA VEZ.
+  //
+  // Antes isto perguntava as conversas e as notas de cada contato
+  // separadamente: duas idas ao Supabase POR CONTATO. Com três mil clientes são
+  // seis mil idas à rede em sequência — o retroativo levaria muito mais do que o
+  // tempo que a hospedagem dá a uma requisição, e morreria no meio sem dizer
+  // onde parou. E como cada ida abre uma conexão, a própria bancada ficou sem
+  // soquetes e passou a derrubar provas que nada tinham a ver com isto.
+  //
+  // MAS TAMBÉM NÃO TUDO DE UMA VEZ. Um `.in(...)` com os ids de três mil
+  // contatos vira uma URL de dezenas de quilobytes, que o servidor recusa antes
+  // de olhar o conteúdo; e as notas do escritório inteiro na memória de um
+  // processo que a Render mede é outro jeito de cair. O lote resolve os dois:
+  // URL curta, memória limitada, e ~3 leituras por lote em vez de 400.
+  const LOTE = 200;
+  for (let i = 0; i < contatos.length; i += LOTE) {
+    const lote = contatos.slice(i, i + LOTE);
+    let conversas, notas;
+    try {
+      conversas = await lerEmPaginas(() => supabase
+        .from('conversas').select('id, contato_id')
+        .in('contato_id', lote.map((c) => c.id))
+        .order('id', { ascending: true }));
+
+      // MAIS ANTIGA PRIMEIRO. O histórico do cliente é lido em ordem; subir
+      // embaralhado deixaria a leitura sem sentido para quem for entender o caso.
+      notas = conversas.length ? await lerEmPaginas(() => supabase
+        .from('notas').select('*')
+        .in('conversa_id', conversas.map((c) => c.id))
+        .order('criado_em', { ascending: true })) : [];
+    } catch (e) {
+      // O LOTE QUE FALHOU É CONTADO E NOMEADO, e os outros seguem. Parar tudo
+      // por causa de um pedaço deixaria o resto do escritório sem retroativo
+      // nenhum, e sem saber de quem foi o problema.
+      falharam += lote.length;
+      comProblema.push(...lote.map((c) => c.numero || c.id));
+      continue;
+    }
+
+    const contatoDaConversa = new Map(conversas.map((c) => [String(c.id), String(c.contato_id)]));
+    const notasPorContato = new Map();
+    for (const n of notas) {
+      const dono = contatoDaConversa.get(String(n.conversa_id));
+      if (!dono) continue;   // conversa que não é de nenhum contato deste lote
+      if (!notasPorContato.has(dono)) notasPorContato.set(dono, []);
+      notasPorContato.get(dono).push(n);
+    }
+
+    for (const c of lote) {
+      const r = await subirNotas(c.vantoro_cliente_id,
+                                 notasPorContato.get(String(c.id)) || [], { simular });
+      subiram += r.subiram; falharam += r.falharam; jaEstavam += r.jaEstavam;
+      if (r.falharam) comProblema.push(c.numero || c.id);
+    }
+  }
+  return { status: 200, corpo: {
+    ok: true, simulacao: simular,
+    clientes: contatos.length, subiram, falharam, jaEstavam,
+    // OS QUE FALHARAM, NOMEADOS. "3 falharam" no meio de um número grande é
+    // um dado que ninguém consegue usar: sem saber quais, não há o que refazer.
+    com_problema: comProblema.slice(0, 50),
+    detalhe: simular
+      ? `Simulação: ${subiram} nota(s) SUBIRIAM. Nada foi enviado nem gravado.`
+      : `${subiram} nota(s) subiram, ${jaEstavam} já estavam lá, ${falharam} falharam. `
+        + 'Rodar de novo é seguro: o que já subiu é reconhecido e não duplica.',
+  } };
+}));
+
 // Diagnóstico rápido: a integração está configurada?
 app.get('/vantoro/status', (req, res) => {
   liberarCors(res);

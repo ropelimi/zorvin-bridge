@@ -16,6 +16,16 @@ const eq = (a, b) => String(a ?? "") === String(b ?? "");
 
 /** Converte o valor de um filtro do PostgREST ("eq.5", "in.(1,2)") no teste. */
 function testeDoFiltro(bruto) {
+  // `not.` INVERTE O QUE VEM DEPOIS. É como o PostgREST escreve `.not('col',
+  // 'is', null)`: `col=not.is.null`.
+  //
+  // Sem isto, "not" caía no `default` e o filtro era IGNORADO — a bancada
+  // devolvia tudo e a conferência passava por não haver filtro nenhum, e não
+  // por o filtro estar certo. Um verde que fala de outro assunto.
+  if (String(bruto).startsWith("not.")) {
+    const dentro = testeDoFiltro(String(bruto).slice(4));
+    return (v) => !dentro(v);
+  }
   const [op, ...resto] = String(bruto).split(".");
   const valor = resto.join(".");
   switch (op) {
@@ -307,6 +317,9 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
+  // Contador de atividades, para cada nota receber um id diferente — dois ids
+  // iguais esconderiam uma nota gravada em cima da outra.
+  let atividades = 0;
   const recebidas = [];
   const lista = usuarios.slice();
   const servidor = http.createServer(async (req, res) => {
@@ -340,6 +353,19 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
         return res.end(JSON.stringify({ ok: false, erro: "Login ou senha incorretos." }));
       }
       return res.end(JSON.stringify({ ok: true, usuario: quem }));
+    }
+
+    // A NOTA, RESPONDIDA COMO O VANTORO DE VERDADE RESPONDE: com o id da
+    // atividade que ela virou (`core/api.py`, rota `api_cliente_nota`).
+    //
+    // Isto não é enfeite. É por esse id que a ponte grava
+    // `notas.vantoro_atividade_id`, e é essa marca que faz o retroativo rodado
+    // duas vezes não subir tudo de novo. Enquanto este de mentira respondia
+    // `{ok:true}` seco, a ponte certa parecia errada na bancada.
+    if (/^\/clientes\/[^/]+\/nota$/.test(url.pathname)) {
+      atividades += 1;
+      return res.end(JSON.stringify({ ok: true, criada: true,
+                                      atividade: { id: atividades, processo_id: null } }));
     }
 
     res.end(JSON.stringify({ ok: true }));
