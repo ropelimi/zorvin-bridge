@@ -2719,5 +2719,227 @@ console.log("\nContato sem cadastro: diz que não há para onde subir");
   await t.parar();
 }
 
+// ==================================================================
+//  O CAMINHO DE VOLTA — o Vantoro contando que a nota mudou lá
+// ==================================================================
+//
+//  Até agora a nota andava num sentido só. Quem corrigisse o texto pela tela do
+//  Vantoro via a correção ficar lá: na conversa continuava o texto velho, e quem
+//  lê a conversa durante o atendimento não tinha como saber que havia versão
+//  mais nova. Nada dava erro.
+//
+//  A porta fica na INTERNET ABERTA, sem sessão e sem token de usuário. O que
+//  prova que o aviso veio do Vantoro é a assinatura do corpo.
+
+const SEGREDO_VANTORO = "segredo-do-vantoro";
+
+function avisarQueMudou(porta, corpo, { segredo = SEGREDO_VANTORO, assinatura } = {}) {
+  // ASSINA OS BYTES QUE VÃO SER MANDADOS, e não o objeto. É o que o Vantoro faz
+  // do outro lado, e é o único jeito de a conferência ser sobre a mesma coisa.
+  const bytes = Buffer.from(JSON.stringify(corpo), "utf8");
+  const assinada = assinatura !== undefined ? assinatura
+    : crypto.createHmac("sha256", segredo).update(bytes).digest("hex");
+  return fetch(`http://127.0.0.1:${porta}/vantoro/nota-mudou`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json",
+               "X-Vantoro-Assinatura": assinada },
+    body: bytes,
+  });
+}
+
+const notaBase = (extra = {}) => ({
+  id: "nt-1", conversa_id: "cv-1", texto: "texto de antes", autor: "Ana",
+  criado_em: "2026-01-01T10:00:00Z", atualizado_em: "2026-01-01T10:00:00Z",
+  vantoro_atividade_id: null, apagada_em: null, ...extra,
+});
+const tabelasComNota = (extra = {}) => ({
+  contatos: [{ id: "ct-1", numero: "5511900001111", vantoro_cliente_id: "v-1" }],
+  conversas: [{ id: "cv-1", contato_id: "ct-1", advogado_id: "adv-1" }],
+  notas: [notaBase(extra)],
+  usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }],
+});
+const notaDe = (t) => t.sb.dados.notas.find((n) => n.id === "nt-1");
+
+console.log("\nO Vantoro avisa que a nota mudou lá, e a conversa acompanha");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: tabelasComNota(), vantoro: {} });
+  const r = await avisarQueMudou(t.porta, {
+    nota_id: "nt-1", atividade_id: 77, texto: "corrigido na tela do Vantoro",
+    processo_id: null, atualizado_em: "2026-06-01T10:00:00Z",
+  });
+  const corpo = await r.json();
+  ok("o aviso é aceito", r.status === 200 && corpo.atualizada === true,
+     `${r.status} ${JSON.stringify(corpo)}`);
+  ok("e o texto da conversa passa a ser o do Vantoro",
+     notaDe(t)?.texto === "corrigido na tela do Vantoro", notaDe(t)?.texto);
+  // O CARIMBO QUE CHEGOU, e não `now()`. Gravar a hora de agora faria esta
+  // linha parecer mais nova do que a versão que ela ACABOU de copiar — e no
+  // próximo aviso ela ganharia dele, desfazendo a cópia.
+  ok("guardando o carimbo do Vantoro, e não a hora de agora",
+     notaDe(t)?.atualizado_em === "2026-06-01T10:00:00Z", notaDe(t)?.atualizado_em);
+  ok("e o elo com a atividade de lá", String(notaDe(t)?.vantoro_atividade_id) === "77",
+     String(notaDe(t)?.vantoro_atividade_id));
+  await t.parar();
+}
+
+console.log("\nO Vantoro escreve JSON do jeito do Python, e a assinatura bate");
+{
+  // ESTA CONFERÊNCIA EXISTE POR CAUSA DE UMA SABOTAGEM QUE NÃO MORDEU.
+  //
+  // A porta confere a assinatura sobre os BYTES QUE CHEGARAM, e não sobre o
+  // objeto já lido e escrito de novo. Sabotei isso — trocando por
+  // `JSON.stringify(req.body)` — e a bancada inteira passou, porque aqui QUEM
+  // MANDA TAMBÉM É JAVASCRIPT: os dois lados serializam igual, e reserializar
+  // devolve exatamente os mesmos bytes.
+  //
+  // O Vantoro é Python, e o Python escreve diferente — foi medido:
+  //
+  //   Python : {"nota_id": "nt-1", "texto": "oi"}
+  //   JS     : {"nota_id":"nt-1","texto":"oi"}
+  //
+  // Com espaço, sem espaço. Bytes diferentes, assinatura diferente. Reserializar
+  // recusaria TODA entrega legítima do Vantoro, e o sintoma seria a nota
+  // parando de refletir sem erro em lugar nenhum.
+  //
+  // Então este corpo é montado À MÃO, com os separadores do Python.
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: tabelasComNota(), vantoro: {} });
+
+  const comoOPythonEscreve =
+    '{"nota_id": "nt-1", "atividade_id": 77, "texto": "veio do Python", '
+    + '"processo_id": null, "atualizado_em": "2026-06-01T10:00:00Z"}';
+  const bytes = Buffer.from(comoOPythonEscreve, "utf8");
+  const assinatura = crypto.createHmac("sha256", SEGREDO_VANTORO)
+    .update(bytes).digest("hex");
+
+  const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/nota-mudou`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Vantoro-Assinatura": assinatura },
+    body: bytes,
+  });
+  ok("a assinatura do Python é aceita", r.status === 200, `veio ${r.status}`);
+  ok("e a nota é reescrita", notaDe(t)?.texto === "veio do Python", notaDe(t)?.texto);
+  await t.parar();
+}
+
+console.log("\nA última edição vence — TAMBÉM deste lado");
+{
+  // A regra precisa existir nos DOIS lados. Se só um comparasse, a nota ficaria
+  // indo e voltando: o lado sem comparação aceitaria a versão velha e a
+  // devolveria como se fosse novidade.
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+    { tabelas: tabelasComNota({ texto: "escrito aqui agora",
+                                atualizado_em: "2026-07-01T10:00:00Z" }),
+      vantoro: {} });
+  const r = await avisarQueMudou(t.porta, {
+    nota_id: "nt-1", texto: "versão VELHA do Vantoro",
+    atualizado_em: "2026-01-01T10:00:00Z",
+  });
+  const corpo = await r.json();
+  ok("o aviso velho é ignorado", corpo.ignorada === true, JSON.stringify(corpo));
+  ok("e o texto daqui NÃO é apagado", notaDe(t)?.texto === "escrito aqui agora",
+     notaDe(t)?.texto);
+  await t.parar();
+}
+
+console.log("\nSem a assinatura certa, a porta não abre");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: tabelasComNota(), vantoro: {} });
+  const carga = { nota_id: "nt-1", texto: "invasão", atualizado_em: "2026-06-01T10:00:00Z" };
+
+  const semNada = await avisarQueMudou(t.porta, carga, { assinatura: "" });
+  ok("sem assinatura, recusa", semNada.status === 401, `veio ${semNada.status}`);
+
+  const comOutro = await avisarQueMudou(t.porta, carga, { segredo: "outro-segredo" });
+  ok("com o segredo errado, recusa", comOutro.status === 401, `veio ${comOutro.status}`);
+
+  // O CORPO TROCADO NO CAMINHO. É o ataque que a assinatura existe para
+  // impedir: o aviso é legítimo, mas o texto foi mexido depois de assinado.
+  const bytes = Buffer.from(JSON.stringify(carga), "utf8");
+  const assinaturaBoa = crypto.createHmac("sha256", SEGREDO_VANTORO).update(bytes).digest("hex");
+  const mexido = await fetch(`http://127.0.0.1:${t.porta}/vantoro/nota-mudou`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Vantoro-Assinatura": assinaturaBoa },
+    body: JSON.stringify({ ...carga, texto: "TROCADO no caminho" }),
+  });
+  ok("com o corpo trocado depois de assinado, recusa", mexido.status === 401,
+     `veio ${mexido.status}`);
+
+  ok("e nada disso encostou na nota", notaDe(t)?.texto === "texto de antes",
+     notaDe(t)?.texto);
+  await t.parar();
+}
+
+console.log("\nSem o segredo configurado, a porta TRANCA");
+{
+  // Diferente do `/webhook` da Uazapi, que deixa passar enquanto não há segredo.
+  // Aquele já estava no ar recebendo mensagem de cliente quando ganhou trava;
+  // esta porta nasce agora, sem tráfego legítimo para proteger. Deixá-la aberta
+  // seria deixar qualquer um que descubra o endereço reescrever nota no
+  // histórico do escritório.
+  const t = await subirTudo({}, { tabelas: tabelasComNota(), vantoro: {} });
+  const r = await avisarQueMudou(t.porta, {
+    nota_id: "nt-1", texto: "sem segredo nenhum", atualizado_em: "2026-06-01T10:00:00Z",
+  });
+  ok("recusa mesmo com assinatura bem feita", r.status === 401, `veio ${r.status}`);
+  ok("e a nota fica intacta", notaDe(t)?.texto === "texto de antes", notaDe(t)?.texto);
+  // NO LOG, e não na resposta: dizer a quem bateu QUAL conferência falhou é
+  // ensinar a passar pela próxima. No log é a diferença entre "o segredo está
+  // diferente dos dois lados" e "a variável não foi preenchida".
+  await espera(300);
+  ok("e o log diz que a variável não foi preenchida",
+     /VANTORO_WEBHOOK_SECRET não está preenchida/.test(t.registro.join("")),
+     t.registro.join("").slice(-300));
+  await t.parar();
+}
+
+console.log("\nAviso sobre nota que não existe mais não vira erro");
+{
+  // A nota pode ter sido apagada aqui, ou a atividade de lá pode ter nascido de
+  // outro lugar. Responder 404 faria o Vantoro registrar falha e reclamar no
+  // log dele de uma coisa que está certa.
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: tabelasComNota(), vantoro: {} });
+  const r = await avisarQueMudou(t.porta, {
+    nota_id: "nt-que-nao-existe", texto: "oi", atualizado_em: "2026-06-01T10:00:00Z",
+  });
+  const corpo = await r.json();
+  ok("responde 200, e não erro", r.status === 200, `veio ${r.status}`);
+  ok("dizendo que ignorou e por quê", corpo.ignorada === true
+     && /não existe mais/i.test(corpo.motivo || ""), JSON.stringify(corpo));
+  await t.parar();
+}
+
+console.log("\nAviso sem nota_id é recusado dizendo o que falta");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: tabelasComNota(), vantoro: {} });
+  const r = await avisarQueMudou(t.porta, { texto: "sem id", atualizado_em: "2026-06-01T10:00:00Z" });
+  const corpo = await r.json();
+  ok("recusa com 400", r.status === 400, `veio ${r.status}`);
+  ok("dizendo que falta o nota_id", /nota_id/.test(corpo.erro || ""), corpo.erro);
+  await t.parar();
+}
+
+console.log("\nA nota que sobe daqui leva o carimbo deste lado");
+{
+  // Sem mandar o carimbo, o Vantoro não tem o que comparar e o comportamento
+  // antigo volta: o Zorvin sobrescrevendo sempre, apagando correções feitas lá.
+  const t = await subirTudo({}, {
+    tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }] },
+    vantoro: {} });
+  await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/v-1/nota`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer jwt-bom" },
+    body: JSON.stringify({ id: "n-x", texto: "nota nova", processo_id: null }),
+  });
+  const enviada = t.van.recebidas.find((x) => /\/nota$/.test(x.caminho));
+  ok("o carimbo vai junto", !!enviada?.corpo?.atualizado_em,
+     JSON.stringify(enviada?.corpo));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

@@ -12,7 +12,14 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+// O CORPO CRU FICA GUARDADO, e não só o JSON já lido.
+//
+// O aviso que o Vantoro manda vem assinado sobre os BYTES que ele enviou. Para
+// conferir a assinatura é preciso ter esses bytes — reserializar o objeto já
+// lido NÃO devolve os mesmos: o Python separa os campos com ", " e o JavaScript
+// sem espaço nenhum, então a assinatura nunca bateria, e o sintoma seria toda
+// entrega legítima sendo recusada por "assinatura inválida".
+app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { req.corpoCru = buf; } }));
 
 // Rede de segurança: um erro assíncrono não tratado NÃO pode derrubar a ponte
 // (é um único processo no plano free do Render). Registra e segue vivo.
@@ -2984,9 +2991,117 @@ app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
       // Sobrescreve o que veio do navegador, e não completa: aceitar o nome
       // dele quando vier seria aceitar sempre, porque ele sempre pode mandar.
       autor: nome || (usuario && usuario.email) || 'Zorvin',
+      // O CARIMBO DESTE LADO. É por ele que o Vantoro decide se esta versão é
+      // mais nova do que a que ele tem — e agora ele PODE ter uma mais nova,
+      // porque a nota passou a ser editável dos dois lados. Sem mandar, o
+      // Vantoro não teria o que comparar e o comportamento antigo voltaria: o
+      // Zorvin sobrescrevendo sempre, apagando correções feitas lá.
+      atualizado_em: corpo.atualizado_em || new Date().toISOString(),
     }),
   });
 }));
+
+// ============================================================
+//  O CAMINHO DE VOLTA — o Vantoro contando que a nota mudou lá
+// ============================================================
+//
+//  Até agora a nota andava num sentido só. Quem corrigisse o texto pela tela do
+//  Vantoro via a correção ficar lá: na conversa continuava o texto velho, e
+//  quem lê a conversa durante o atendimento não tinha como saber que existia
+//  versão mais nova. Nada dava erro.
+//
+//  ESTA PORTA FICA NA INTERNET ABERTA, sem sessão e sem token de usuário — como
+//  as do LegalMail e da Uazapi no Vantoro. O que prova que o aviso veio de lá é
+//  a ASSINATURA do corpo, com o segredo combinado entre os dois.
+//
+//  E ELA TRANCA SEM O SEGREDO, ao contrário do `/webhook` da Uazapi. A diferença
+//  não é de gosto: aquele já estava no ar recebendo mensagem de cliente quando
+//  ganhou trava, e exigir o segredo antes de a Uazapi ter o dele faria as
+//  mensagens pararem de chegar em silêncio. Esta porta nasce agora, sem nenhum
+//  tráfego legítimo para proteger — deixá-la aberta seria deixar qualquer um que
+//  descubra o endereço reescrever nota no histórico do escritório.
+function assinaturaDoVantoroConfere(req) {
+  const segredo = String(process.env.VANTORO_WEBHOOK_SECRET || '').trim();
+  if (!segredo) return { ok: false, motivo: 'sem-segredo' };
+
+  const veio = String(req.headers['x-vantoro-assinatura'] || '').trim();
+  if (!veio) return { ok: false, motivo: 'sem-assinatura' };
+
+  // SOBRE OS BYTES QUE CHEGARAM. Ver o `verify` lá em cima: reserializar o
+  // objeto já lido daria outros bytes e recusaria toda entrega legítima.
+  const cru = req.corpoCru;
+  if (!cru || !cru.length) return { ok: false, motivo: 'sem-corpo' };
+
+  const esperada = crypto.createHmac('sha256', segredo).update(cru).digest('hex');
+  // COMPARAÇÃO DE TEMPO CONSTANTE, como no resto da ponte. `===` para na
+  // primeira letra diferente, e o tempo conta quantas bateram.
+  const a = Buffer.from(veio), b = Buffer.from(esperada);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, motivo: 'assinatura-errada' };
+  }
+  return { ok: true };
+}
+
+app.post('/vantoro/nota-mudou', async (req, res) => {
+  liberarCors(res);
+  const conferencia = assinaturaDoVantoroConfere(req);
+  if (!conferencia.ok) {
+    // O MOTIVO VAI NO LOG, e não na resposta. Dizer para quem bateu na porta
+    // QUAL das conferências falhou é ensinar a passar pela próxima; no log, é
+    // a diferença entre "o segredo está diferente dos dois lados" e "a variável
+    // não foi preenchida", que pedem coisas opostas.
+    console.warn(`Aviso do Vantoro recusado: ${conferencia.motivo}.`
+      + (conferencia.motivo === 'sem-segredo'
+        ? ' VANTORO_WEBHOOK_SECRET não está preenchida na ponte — preencha com o'
+          + ' MESMO valor de ZORVIN_WEBHOOK_SECRET no Vantoro.'
+        : ''));
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  const corpo = req.body || {};
+  const notaId = String(corpo.nota_id || '').trim();
+  if (!notaId) return res.status(400).json({ ok: false, erro: 'Falta o nota_id.' });
+
+  const { data: nota, error } = await supabase
+    .from('notas').select('id, texto, atualizado_em').eq('id', notaId).maybeSingle();
+  if (error) return res.status(502).json({ ok: false, erro: error.message });
+  if (!nota) {
+    // NÃO É ERRO NOSSO. A nota pode ter sido apagada aqui, ou a atividade do
+    // Vantoro pode ter nascido de outro lugar. Responder 404 faria o Vantoro
+    // registrar falha e reclamar no log dele de uma coisa que está certa.
+    return res.status(200).json({ ok: true, ignorada: true,
+      motivo: 'Esta nota não existe mais no Zorvin.' });
+  }
+
+  // A ÚLTIMA EDIÇÃO VENCE — a MESMA regra que o Vantoro aplica ao receber.
+  //
+  // Ela precisa existir nos DOIS lados. Se só um comparasse, a nota ficaria
+  // indo e voltando: o lado sem comparação aceitaria a versão velha e a
+  // devolveria como se fosse novidade.
+  const chegou = corpo.atualizado_em ? Date.parse(corpo.atualizado_em) : NaN;
+  const daqui = nota.atualizado_em ? Date.parse(nota.atualizado_em) : NaN;
+  if (Number.isFinite(chegou) && Number.isFinite(daqui) && daqui > chegou) {
+    return res.status(200).json({ ok: true, ignorada: true,
+      motivo: 'Há uma versão mais nova no Zorvin.' });
+  }
+
+  const mudanca = {
+    texto: corpo.texto || '',
+    // O CARIMBO QUE CHEGOU, e não `now()`. Gravar a hora de agora faria esta
+    // linha parecer mais nova do que a versão do Vantoro que ela ACABOU de
+    // copiar — e no próximo aviso ela ganharia dele, desfazendo a cópia.
+    atualizado_em: corpo.atualizado_em || new Date().toISOString(),
+  };
+  if (corpo.atividade_id) mudanca.vantoro_atividade_id = corpo.atividade_id;
+  if ('processo_id' in corpo) mudanca.processo_id = corpo.processo_id;
+
+  const { error: erroAoGravar } = await supabase
+    .from('notas').update(mudanca).eq('id', notaId);
+  if (erroAoGravar) {
+    return res.status(502).json({ ok: false, erro: erroAoGravar.message });
+  }
+  return res.status(200).json({ ok: true, atualizada: true });
+});
 
 // ============================================================
 //  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
