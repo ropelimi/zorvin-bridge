@@ -2261,5 +2261,97 @@ console.log("\n18. O anexo não fica vazio");
   await t.parar();
 }
 
+// ==================================================================
+//  A NOTA INTERNA SOBE PARA O VANTORO
+// ==================================================================
+//
+//  A equipe escreve a nota dentro da conversa, que é onde ela está quando
+//  descobre o que precisa anotar. Mas quem for procurar aquilo meses depois vai
+//  à ficha do cliente, ou ao histórico do processo.
+//
+//  O VÍNCULO É SEMPRE COM O CLIENTE; o processo é opcional, e serve para achar
+//  a informação depois.
+{
+  console.log("\nA nota interna sobe para o Vantoro");
+
+  const t = await subirTudo({}, { vantoro: {
+    usuarios: [{ id: 1, login: "ana", nome: "Ana Aguiar" }] } });
+
+  async function mandarNota(corpo) {
+    return fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/nota`, {
+      method: "POST",
+      headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify(corpo),
+    });
+  }
+
+  const r = await mandarNota({ id: "n-1", texto: "Cliente vai mandar o RG" });
+  ok("a ponte aceita e responde", r.status === 200, `veio ${r.status}`);
+
+  const recebida = t.van.recebidas.find((x) => x.caminho === "/clientes/7/nota");
+  ok("e chama o endereço certo do Vantoro", !!recebida,
+     JSON.stringify(t.van.recebidas.map((x) => x.caminho)));
+  ok("levando o texto", recebida?.corpo?.texto === "Cliente vai mandar o RG");
+  ok("e o id da nota, que é o elo entre os dois", recebida?.corpo?.id === "n-1",
+     "sem ele, editar cria uma segunda em vez de reescrever");
+
+  // O PROCESSO É OPCIONAL — a "nota geral" do cliente é o caso comum.
+  ok("sem processo, manda null e não inventa um",
+     recebida?.corpo?.processo_id === null, JSON.stringify(recebida?.corpo));
+
+  await t.parar();
+}
+
+console.log("\nCom processo, ele vai junto");
+{
+  const t = await subirTudo({}, { vantoro: {} });
+  await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/nota`, {
+    method: "POST",
+    headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+    body: JSON.stringify({ id: "n-2", texto: "sobre a ação", processo_id: 42 }),
+  });
+  const recebida = t.van.recebidas.find((x) => x.caminho === "/clientes/7/nota");
+  ok("o processo escolhido chega ao Vantoro", recebida?.corpo?.processo_id === 42,
+     JSON.stringify(recebida?.corpo));
+  await t.parar();
+}
+
+console.log("\nO AUTOR É DECIDIDO NA PONTE, e não recebido do navegador");
+{
+  // É a mesma regra do histórico de alterações: a ponte confere o login antes
+  // de deixar passar, então é aqui que se sabe QUEM é quem. Um histórico em que
+  // o autor é o que o navegador disse ser não responde "quem escreveu isto?" —
+  // e num escritório de advocacia essa é a pergunta que se faz.
+  const t = await subirTudo({}, {
+    vantoro: {},
+    contas: [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom",
+               user_metadata: { nome: "Rodrigo Alves" } }],
+  });
+  await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/nota`, {
+    method: "POST",
+    headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+    body: JSON.stringify({ id: "n-3", texto: "oi", autor: "Eu Sou Outro" }),
+  });
+  const recebida = t.van.recebidas.find((x) => x.caminho === "/clientes/7/nota");
+  ok("o autor é quem está logado", recebida?.corpo?.autor === "Rodrigo Alves",
+     `foi como "${recebida?.corpo?.autor}"`);
+  ok("e NÃO o que o navegador mandou", recebida?.corpo?.autor !== "Eu Sou Outro",
+     "qualquer um assinaria com o nome de qualquer um");
+  await t.parar();
+}
+
+console.log("\nSem login, a nota não passa");
+{
+  const t = await subirTudo({}, { vantoro: {} });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/nota`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: "n-4", texto: "oi" }),
+  });
+  ok("recusa sem sessão", r.status === 401, `veio ${r.status}`);
+  ok("e nada chega ao Vantoro",
+     !t.van.recebidas.some((x) => x.caminho === "/clientes/7/nota"));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
