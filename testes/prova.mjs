@@ -13,6 +13,31 @@ const ok = (nome, cond, det = "") => {
 };
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// UMA PORTA LIVRE DE VERDADE, pedida ao sistema.
+//
+// Antes isto era `3000 + Math.floor(Math.random() * 900)`, e sorteio não é
+// escolha: duas provas podiam tirar a mesma porta, e aí a segunda ponte não
+// subia — mas `subirTudo` devolvia a porta assim mesmo, e a prova falhava lá
+// adiante, longe da causa.
+//
+// Pior: 3659 está na LISTA DE PORTAS BLOQUEADAS da especificação do `fetch`,
+// que o Node aplica. Caindo nela, o `fetch` recusa com "bad port" antes de
+// tentar conectar. Como o sorteio mudava a cada rodada, o estouro aparecia num
+// bloco diferente a cada vez e passava por instabilidade da máquina.
+//
+// Pedir a porta ao sistema (`listen(0)`) resolve os dois: ele só oferece porta
+// livre, e nunca uma da lista bloqueada.
+async function portaLivre() {
+  return new Promise((resolve, reject) => {
+    const s = http.createServer();
+    s.on("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+}
+
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
@@ -34,7 +59,7 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
     usuarios: contas || [{ id: "u1", email: "rodrigo@x", jwt: "jwt-bom", user_metadata: { nome: "Rodrigo" } }],
     authNoChao, jwksAssimetrico,
   });
-  const porta = 3000 + Math.floor(Math.random() * 900);
+  const porta = await portaLivre();
   // O caminho sai DESTE arquivo, e não do diretório de onde se chamou. Com
   // "../index.js" solto, `npm test` a partir da raiz procurava a ponte um nível
   // acima do projeto e nada subia — o teste só funcionava quando rodado de
@@ -50,9 +75,22 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uaza
   const registro = [];
   filho.stdout.on("data", (d) => registro.push(String(d)));
   filho.stderr.on("data", (d) => registro.push(String(d)));
-  // Espera a porta responder.
+  // Espera a porta responder — E RECLAMA SE NUNCA RESPONDER.
+  //
+  // Antes o laço desistia calado e `subirTudo` devolvia a porta assim mesmo. A
+  // ponte que não subiu só era percebida na primeira conferência que a usasse,
+  // com uma mensagem que não menciona a ponte — e o que ela mostrava era o
+  // ASSUNTO daquela conferência, não a causa. Ficar sem subir é falha da
+  // bancada, e falha de bancada tem de dizer o próprio nome.
+  let subiu = false;
   for (let i = 0; i < 60; i++) {
-    try { await fetch(`http://127.0.0.1:${porta}/ping`); break; } catch (_) { await espera(120); }
+    try { await fetch(`http://127.0.0.1:${porta}/ping`); subiu = true; break; }
+    catch (_) { await espera(120); }
+  }
+  if (!subiu) {
+    filho.kill(); await sb.parar(); await uaz.parar(); if (van) await van.parar();
+    throw new Error(`a ponte não subiu na porta ${porta} em 7s. Log dela:\n`
+                    + registro.join("").slice(-2000));
   }
   return { sb, uaz, van, porta, registro,
            parar: async () => {
@@ -2350,6 +2388,295 @@ console.log("\nSem login, a nota não passa");
   ok("recusa sem sessão", r.status === 401, `veio ${r.status}`);
   ok("e nada chega ao Vantoro",
      !t.van.recebidas.some((x) => x.caminho === "/clientes/7/nota"));
+  await t.parar();
+}
+
+// ==================================================================
+//  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
+// ==================================================================
+//
+//  Dois casos, uma máquina só:
+//    • o contato VIRA cliente, e o que a equipe já anotou passa a ter lugar;
+//    • o retroativo, uma vez, para tudo o que foi escrito antes.
+//
+//  SOBEM COMO NOTA GERAL, sem processo: é tudo passado, e adivinhar de qual
+//  ação era cada uma poria nota no histórico do processo errado.
+{
+  console.log("\nAs notas que já existem sobem para o Vantoro");
+
+  const TABELAS = {
+    contatos: [
+      { id: "ct-1", numero: "5511900001111", vantoro_cliente_id: "v-1" },
+      { id: "ct-2", numero: "5511900002222", vantoro_cliente_id: null },
+      // UM SEGUNDO CLIENTE, e não por simetria. O retroativo lê as notas de
+      // muitos contatos numa consulta só e DEPOIS separa de quem é cada uma.
+      // Com um cliente só na amostra, uma separação errada passaria batida — e
+      // o que ela esconderia é a nota de um cliente entrando na ficha de outro,
+      // que numa banca não é defeito de software, é incidente com o cliente.
+      { id: "ct-3", numero: "5511900003333", vantoro_cliente_id: "v-3" },
+    ],
+    conversas: [
+      { id: "cv-1", contato_id: "ct-1", advogado_id: "adv-1" },
+      { id: "cv-2", contato_id: "ct-2", advogado_id: "adv-1" },
+      { id: "cv-3", contato_id: "ct-3", advogado_id: "adv-1" },
+    ],
+    notas: [
+      { id: "nt-1", conversa_id: "cv-1", texto: "primeira", autor: "Isabela",
+        criado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+      { id: "nt-2", conversa_id: "cv-1", texto: "segunda", autor: "Davi",
+        criado_em: "2026-02-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+      { id: "nt-3", conversa_id: "cv-1", texto: "ja subiu", autor: "Ana",
+        criado_em: "2026-03-01T10:00:00Z", vantoro_atividade_id: 999, apagada_em: null },
+      // Do contato SEM cadastro: não tem para onde subir.
+      { id: "nt-4", conversa_id: "cv-2", texto: "de quem nao e cliente", autor: "Ana",
+        criado_em: "2026-01-05T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+      // Do OUTRO cliente. A data cai NO MEIO das do primeiro de propósito: a
+      // leitura em lote vem ordenada por data, misturando os dois donos, que é
+      // exatamente a situação em que uma separação frouxa erra.
+      { id: "nt-5", conversa_id: "cv-3", texto: "do outro cliente", autor: "Ana",
+        criado_em: "2026-01-15T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+    ],
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }],
+  };
+
+  const t = await subirTudo({}, { tabelas: TABELAS, vantoro: {} });
+
+  // SIMULAÇÃO PRIMEIRO — nada sai, nada é gravado.
+  const sim = await (await fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+  ok("a simulação diz quantas subiriam", sim.subiram === 3,
+     JSON.stringify(sim));
+  ok("e não manda nada ao Vantoro",
+     !t.van.recebidas.some((x) => /\/nota$/.test(x.caminho)),
+     JSON.stringify(t.van.recebidas.map((x) => x.caminho)));
+
+  // AGORA DE VERDADE.
+  const r = await (await fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+  ok("sobem as que faltavam", r.subiram === 3, JSON.stringify(r));
+  ok("a que já tinha subido é reconhecida e não repete", r.jaEstavam === 1,
+     JSON.stringify(r));
+
+  const notas = t.van.recebidas.filter((x) => /\/nota$/.test(x.caminho));
+  ok("três chegaram ao Vantoro", notas.length === 3,
+     JSON.stringify(notas.map((x) => x.corpo?.texto)));
+
+  // CADA NOTA NA FICHA DO SEU DONO. A leitura em lote traz as notas dos dois
+  // clientes juntas e ordenadas por data; se a separação errar, a nota de um vai
+  // parar no histórico do outro.
+  const enderecoDe = (texto) =>
+    notas.find((x) => x.corpo?.texto === texto)?.caminho;
+  ok("as do primeiro cliente vão para a ficha dele",
+     enderecoDe("primeira") === "/clientes/v-1/nota"
+     && enderecoDe("segunda") === "/clientes/v-1/nota",
+     JSON.stringify(notas.map((x) => [x.corpo?.texto, x.caminho])));
+  ok("e a do SEGUNDO não entra na ficha do primeiro",
+     enderecoDe("do outro cliente") === "/clientes/v-3/nota",
+     JSON.stringify(notas.map((x) => [x.corpo?.texto, x.caminho])));
+
+  // SEM PROCESSO — é tudo passado.
+  ok("todas como NOTA GERAL, sem processo",
+     notas.every((x) => x.corpo?.processo_id === null),
+     JSON.stringify(notas.map((x) => x.corpo?.processo_id)));
+
+  // O AUTOR É O DA NOTA, e não quem mandou subir. Assinar tudo com o nome de
+  // quem rodou o retroativo reescreveria a autoria de meses de histórico.
+  ok("o autor é quem escreveu a nota, não quem rodou o retroativo",
+     notas.some((x) => x.corpo?.autor === "Isabela")
+     && notas.some((x) => x.corpo?.autor === "Davi"),
+     JSON.stringify(notas.map((x) => x.corpo?.autor)));
+
+  // MAIS ANTIGA PRIMEIRO: o histórico é lido em ordem.
+  ok("na ordem em que foram escritas",
+     notas[0]?.corpo?.texto === "primeira" && notas[1]?.corpo?.texto === "segunda",
+     JSON.stringify(notas.map((x) => x.corpo?.texto)));
+
+  // QUEM NÃO É CLIENTE FICA DE FORA — não há ficha para receber.
+  ok("a nota de quem não tem cadastro não sobe",
+     !notas.some((x) => /nao e cliente/.test(x.corpo?.texto || "")),
+     JSON.stringify(notas.map((x) => x.corpo?.texto)));
+
+  await t.parar();
+}
+
+console.log("\nRodar o retroativo DE NOVO não duplica");
+{
+  const TABELAS = {
+    contatos: [{ id: "ct-1", numero: "5511900001111", vantoro_cliente_id: "v-1" }],
+    conversas: [{ id: "cv-1", contato_id: "ct-1", advogado_id: "adv-1" }],
+    notas: [{ id: "nt-1", conversa_id: "cv-1", texto: "uma so", autor: "Ana",
+              criado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null }],
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }],
+  };
+  const t = await subirTudo({}, { tabelas: TABELAS, vantoro: {} });
+  const chamar = () => fetch(`http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } }).then((x) => x.json());
+
+  await chamar();
+  const segunda = await chamar();
+  ok("na segunda rodada nada sobe de novo", segunda.subiram === 0,
+     JSON.stringify(segunda));
+  ok("e ela reconhece que já estava lá", segunda.jaEstavam === 1,
+     JSON.stringify(segunda));
+  await t.parar();
+}
+
+console.log("\nO retroativo não para no milésimo contato");
+{
+  // O DEFEITO QUE MAIS SE REPETIU NESTE PROJETO, e o pior lugar possível para
+  // ele voltar. O PostgREST devolve no máximo 1000 linhas e NÃO AVISA: a
+  // resposta vem com cara de resposta inteira. Um `select` solto aqui leria
+  // 1000 contatos, subiria as notas deles, e responderia "pronto" — e as notas
+  // de todo mundo a partir do milésimo primeiro ficariam para trás em silêncio,
+  // que é a pior forma de perder informação: sem erro, sem lista, sem rastro.
+  //
+  // 1100 contatos, portanto: acima do teto, para a conta bater só se a leitura
+  // for paginada de verdade.
+  const QUANTOS = 1100;
+  const contatos = [], conversas = [], notas = [];
+  for (let i = 0; i < QUANTOS; i++) {
+    // ID COM ZEROS À ESQUERDA. A leitura é ordenada por `id`, e sem os zeros
+    // "ct-1000" viria antes de "ct-999" na ordem de texto — as páginas se
+    // sobreporiam e o teste passaria por acaso, medindo outra coisa.
+    const n = String(i).padStart(4, "0");
+    contatos.push({ id: `ct-${n}`, numero: `55119${n}0000`, vantoro_cliente_id: `v-${n}` });
+    conversas.push({ id: `cv-${n}`, contato_id: `ct-${n}`, advogado_id: "adv-1" });
+    notas.push({ id: `nt-${n}`, conversa_id: `cv-${n}`, texto: `nota ${n}`, autor: "Ana",
+                 criado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null,
+                 apagada_em: null });
+  }
+  const t = await subirTudo({}, {
+    tabelas: { contatos, conversas, notas,
+               usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }] },
+    vantoro: {} });
+
+  // EM SIMULAÇÃO: a conta é a mesma e nada sai pela rede. É a leitura que está
+  // sendo medida aqui, não o envio.
+  const r = await (await fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+  ok("leu os 1100 clientes, e não só os 1000 do teto", r.clientes === QUANTOS,
+     JSON.stringify({ clientes: r.clientes, subiram: r.subiram }));
+  ok("e contou a nota de cada um deles", r.subiram === QUANTOS,
+     JSON.stringify({ clientes: r.clientes, subiram: r.subiram }));
+  await t.parar();
+}
+
+console.log("\nUm lote com problema não derruba o retroativo inteiro");
+{
+  // O RETROATIVO RODA UMA VEZ, sobre o histórico inteiro do escritório. Se um
+  // pedaço da leitura falhar — e o Supabase falha: instabilidade, tempo
+  // esgotado, o Auth no chão como em 19/08 —, parar tudo deixaria o resto do
+  // escritório sem retroativo NENHUM, e sem dizer de quem foi o problema.
+  //
+  // O certo é o oposto: conta o lote que falhou, NOMEIA quem estava nele, e
+  // segue com os outros. Quem for refazer sabe exatamente o que refazer.
+  const QUANTOS = 250;   // 2 lotes: 200 + 50
+  const contatos = [], conversas = [], notas = [];
+  for (let i = 0; i < QUANTOS; i++) {
+    const n = String(i).padStart(4, "0");
+    contatos.push({ id: `ct-${n}`, numero: `55119${n}0000`, vantoro_cliente_id: `v-${n}` });
+    conversas.push({ id: `cv-${n}`, contato_id: `ct-${n}`, advogado_id: "adv-1" });
+    notas.push({ id: `nt-${n}`, conversa_id: `cv-${n}`, texto: `nota ${n}`, autor: "Ana",
+                 criado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null,
+                 apagada_em: null });
+  }
+  const t = await subirTudo({}, {
+    tabelas: { contatos, conversas, notas,
+               usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }] },
+    vantoro: {},
+    // SÓ O PRIMEIRO LOTE QUEBRA. O `ct-0000` só aparece na consulta do lote que
+    // o contém — é assim que se derruba um pedaço e se deixa o outro de pé.
+    // Quebrar tudo provaria apenas que dá erro, e não que os outros seguem.
+    quebrar: (metodo, tabela, busca) =>
+      (metodo === "GET" && tabela.startsWith("conversas") && String(busca).includes("ct-0000"))
+        ? "conexão perdida no meio da leitura" : null,
+  });
+
+  const r = await (await fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+
+  ok("responde, em vez de estourar", r.ok === true, JSON.stringify(r));
+  ok("o lote que sobreviveu subiu assim mesmo", r.subiram === 50,
+     JSON.stringify({ subiram: r.subiram, falharam: r.falharam }));
+  ok("e o que falhou é contado, e não esquecido", r.falharam === 200,
+     JSON.stringify({ subiram: r.subiram, falharam: r.falharam }));
+  // NOMEADOS. "200 falharam" no meio de um número grande é um dado que ninguém
+  // consegue usar: sem saber QUAIS, não há o que refazer.
+  ok("com os telefones de quem ficou para trás",
+     (r.com_problema || []).includes("5511900000000"),
+     JSON.stringify((r.com_problema || []).slice(0, 3)));
+  await t.parar();
+}
+
+console.log("\nSó quem administra pode rodar o retroativo");
+{
+  const t = await subirTudo({}, {
+    tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }] },
+    vantoro: {} });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } });
+  ok("quem não é admin é recusado", r.status === 403, `veio ${r.status}`);
+  await t.parar();
+}
+
+console.log("\nUM contato só — quando ele acaba de virar cliente");
+{
+  const TABELAS = {
+    contatos: [{ id: "ct-1", numero: "5511900001111", vantoro_cliente_id: "v-7" }],
+    // DUAS CONVERSAS. Um contato que voltou meses depois tem mais de uma, e as
+    // notas das duas são do mesmo cliente — com uma conversa só, um caminho que
+    // lesse apenas a primeira passaria batido.
+    conversas: [
+      { id: "cv-1", contato_id: "ct-1", advogado_id: "adv-1" },
+      { id: "cv-2", contato_id: "ct-1", advogado_id: "adv-1" },
+    ],
+    // PLANTADAS FORA DE ORDEM de propósito: se o caminho de um contato só não
+    // ordenar, ele sobe na ordem em que o banco devolver, e o histórico do
+    // cliente fica ilegível para quem for entender o caso meses depois.
+    notas: [
+      { id: "nt-2", conversa_id: "cv-2", texto: "a segunda coisa", autor: "Davi",
+        criado_em: "2026-03-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+      { id: "nt-1", conversa_id: "cv-1", texto: "antes do cadastro", autor: "Ana",
+        criado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+    ],
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }],
+  };
+  const t = await subirTudo({}, { tabelas: TABELAS, vantoro: {} });
+  const r = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/contato/ct-1/subir-notas`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+  ok("sobe o que ele já tinha anotado", r.subiram === 2, JSON.stringify(r));
+  ok("e NÃO exige ser admin — é o fluxo normal de quem atende", r.ok === true);
+
+  const enviadas = t.van.recebidas.filter((x) => /\/nota$/.test(x.caminho));
+  const nota = enviadas[0];
+  ok("no cliente que acabou de ser criado", nota?.caminho === "/clientes/v-7/nota",
+     nota?.caminho);
+  ok("como nota geral", nota?.corpo?.processo_id === null);
+  ok("das duas conversas dele, e não só da primeira", enviadas.length === 2,
+     JSON.stringify(enviadas.map((x) => x.corpo?.texto)));
+  ok("e na ordem em que foram escritas",
+     enviadas[0]?.corpo?.texto === "antes do cadastro"
+     && enviadas[1]?.corpo?.texto === "a segunda coisa",
+     JSON.stringify(enviadas.map((x) => x.corpo?.texto)));
+  await t.parar();
+}
+
+console.log("\nContato sem cadastro: diz que não há para onde subir");
+{
+  const t = await subirTudo({}, {
+    tabelas: {
+      contatos: [{ id: "ct-9", numero: "5511900009999", vantoro_cliente_id: null }],
+      usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }],
+    }, vantoro: {} });
+  const r = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/contato/ct-9/subir-notas`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+  ok("responde sem erro", r.ok === true, JSON.stringify(r));
+  ok("e explica que a nota fica na conversa",
+     /ainda não tem cadastro/i.test(r.detalhe || ""), r.detalhe);
   await t.parar();
 }
 
