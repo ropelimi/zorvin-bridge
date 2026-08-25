@@ -61,6 +61,103 @@ function lerSelect(sel, esquema) {
   return { embutidos };
 }
 
+// COLUNA QUE NÃO EXISTE: O POSTGREST RECUSA A CONSULTA INTEIRA.
+// ---------------------------------------------------------------------------
+//
+// Este falso guarda objetos JavaScript. Pedir um campo que nenhum deles tem
+// devolvia `undefined` e seguia adiante — quer dizer, QUALQUER PROVA PODIA
+// PASSAR PEDINDO UMA COLUNA QUE O BANCO DE VERDADE NÃO TEM. É a lacuna mais
+// perigosa que uma bancada pode ter: ela não deixa um teste falhar por engano,
+// ela deixa o teste passar por engano.
+//
+// E não é hipótese. Foi exatamente assim que a subida das notas ficou meses
+// sem funcionar: o painel pedia `contatos.vantoro_cliente_id`, a coluna não
+// existia no Supabase, o PostgREST recusava a consulta INTEIRA, e o código
+// descia para o conjunto antigo de colunas sem que ninguém visse erro. Aqui, a
+// mesma consulta passava verde.
+//
+// O de verdade responde 400 com `42703`, e a consulta inteira morre — não é um
+// campo que vem nulo, é a leitura que não acontece. É esse comportamento que
+// dispara os defeitos, e é ele que este falso passa a imitar.
+//
+// COMO ELE SABE QUAIS COLUNAS EXISTEM: pela união de duas coisas.
+//
+//   1. AS CHAVES DAS LINHAS que a montagem deu;
+//   2. A LISTA ABAIXO, para as colunas que existem no banco e que uma amostra
+//      pode não mencionar.
+//
+// A LISTA PRECISA EXISTIR, e isso foi medido: deduzir só das linhas recusou 81
+// consultas CORRETAS numa rodada — `permissoes.telefone_id`, `conversas.arquivada`,
+// `fila_envio.enviando_em`, `usuarios.foto_url`, `notas.vantoro_atividade_id`.
+// Todas essas colunas existem lá; o que não existe é uma amostra que as
+// mencione, porque numa amostra de três linhas quase toda coluna está vazia.
+//
+// Uma amostra incompleta é normal e não deve reprovar nada — obrigar cada
+// montagem a listar a tabela inteira só faria as pessoas encherem as amostras
+// de `null` até o falso calar a boca, que é ruído sem informação.
+//
+// QUANDO UMA COLUNA NOVA ENTRAR NO BANCO, ela entra aqui junto. O sintoma de
+// esquecer é claro e imediato: a prova reprova dizendo o nome exato da coluna.
+// É o erro barato — o caro é o contrário, e é o que existia antes.
+const COLUNAS_DO_BANCO = {
+  contatos: ["id", "numero", "nome", "foto_url", "vantoro_cliente_id", "criado_em", "atualizado_em"],
+  conversas: ["id", "contato_id", "advogado_id", "arquivada", "fixada", "favorita",
+              "nao_lidas", "ultima_mensagem", "ultima_em", "criado_em"],
+  mensagens: ["id", "conversa_id", "texto", "de_mim", "criado_em", "id_uazapi",
+              "midia_url", "midia_tipo", "enviado_por_id", "autor"],
+  notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
+          "vantoro_atividade_id", "atualizado_em"],
+  advogados: ["id", "nome", "numero", "departamento_id", "foto_url", "ativo", "token"],
+  usuarios: ["id", "login", "email", "nome", "admin", "ativo", "foto_url"],
+  permissoes: ["id", "usuario_id", "departamento_id", "telefone_id"],
+  departamentos: ["id", "nome", "slug", "cor", "ordem", "ativo"],
+  fila_envio: ["id", "conversa_id", "texto", "estado", "criado_em", "enviando_em",
+               "tentativas", "erro"],
+};
+
+// A OUTRA LIMITAÇÃO, ESCRITA PARA NÃO VIRAR SURPRESA: numa tabela que não está
+// na lista acima E não tem nenhuma linha, não há como saber nada, e aí nada é
+// recusado. Uma prova que queira exercitar coluna inexistente numa tabela assim
+// continua precisando do `quebrar`. Recusar por não saber seria pior:
+// transformaria "não sei" em "não existe", e reprovaria consulta correta.
+const RESERVADAS = new Set(["select", "order", "limit", "offset", "on_conflict", "or", "and", "columns"]);
+
+/** As colunas de primeiro nível de um `select`, sem as junções embutidas. */
+export function colunasDoSelect(sel) {
+  // Tira `apelido:coluna(campos)` inteiro: a coluna da junção é conferida pelo
+  // nome dela, que sobra na lista de fora depois deste corte.
+  const semJuncoes = String(sel || "").replace(/(\w+):(\w+)\s*\([^)]*\)/g, "$2");
+  return semJuncoes.split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
+}
+
+/** O erro do PostgREST, ou `null` quando está tudo bem.
+ *
+ *  `semColunas` é para imitar uma base ATRASADA — aquela em que o SQL ainda não
+ *  foi rodado. É o estado mais interessante de todos, porque é o que estava
+ *  acontecendo de verdade: a coluna existe no código e não no banco.
+ */
+export function recusarColunaInexistente(dados, tabela, pedidas, semColunas = {}) {
+  const linhas = dados[tabela] || [];
+  const declaradas = COLUNAS_DO_BANCO[tabela];
+  // Nada sabido sobre a tabela: não há o que conferir.
+  if (!linhas.length && !declaradas) return null;
+  const existe = new Set(declaradas || []);
+  for (const l of linhas) for (const k of Object.keys(l)) existe.add(k);
+  for (const c of (semColunas[tabela] || [])) existe.delete(c);
+  for (const c of pedidas) {
+    if (!c || RESERVADAS.has(c) || existe.has(c)) continue;
+    return {
+      code: "42703",
+      message: `column ${tabela}.${c} does not exist`,
+      // O de verdade manda estes dois; a ponte já lê `message`, mas quem for
+      // depurar uma prova vai procurar o resto aqui.
+      details: null,
+      hint: null,
+    };
+  }
+  return null;
+}
+
 // O TETO DE MIL LINHAS.
 //
 // O PostgREST devolve no máximo 1000 linhas por consulta e NÃO avisa: a
@@ -74,7 +171,7 @@ function lerSelect(sel, esquema) {
 // corta em mil.
 const TETO_POSTGREST = 1000;
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, semColunas = {}, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -210,24 +307,40 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       }
 
       const filtros = [];
+      // AS COLUNAS QUE ESTA CONSULTA ENCOSTA, guardadas para serem conferidas
+      // logo abaixo. Ver `recusarColunaInexistente`.
+      const pedidas = [];
       let ordem = null, limite = Infinity, deslocamento = 0, sel = "*";
       for (const [k, v] of url.searchParams.entries()) {
-        if (k === "select") { sel = v; continue; }
-        if (k === "order") { const [c, d] = v.split("."); ordem = { c, asc: d !== "desc" }; continue; }
+        if (k === "select") { sel = v; pedidas.push(...colunasDoSelect(v)); continue; }
+        if (k === "order") {
+          const [c, d] = v.split("."); ordem = { c, asc: d !== "desc" };
+          pedidas.push(c); continue;
+        }
         if (k === "limit") { limite = Number(v); continue; }
         if (k === "offset") { deslocamento = Number(v); continue; }
         if (k === "on_conflict") continue;
         if (k === "or") {
           const partes = v.replace(/^\(|\)$/g, "").split(",");
+          pedidas.push(...partes.map((p) => p.slice(0, p.indexOf("."))));
           filtros.push((l) => partes.some((p) => {
             const i = p.indexOf(".");
             return testeDoFiltro(p.slice(i + 1))(l[p.slice(0, i)]);
           }));
           continue;
         }
+        pedidas.push(k);
         const teste = testeDoFiltro(v);
         filtros.push((l) => teste(l[k]));
       }
+
+      // COLUNA QUE NÃO EXISTE RECUSA A CONSULTA INTEIRA — como o de verdade.
+      const recusa = recusarColunaInexistente(dados, tabela, pedidas, semColunas);
+      if (recusa) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(recusa));
+      }
+
       const casam = () => linhas.filter((l) => filtros.every((f) => f(l)));
 
       // A CONTAGEM, que o PostgREST responde no cabeçalho `Content-Range`.
