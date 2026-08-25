@@ -230,6 +230,31 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       }
       const casam = () => linhas.filter((l) => filtros.every((f) => f(l)));
 
+      // A CONTAGEM, que o PostgREST responde no cabeçalho `Content-Range`.
+      //
+      // `select('id', { count: 'exact', head: true })` quer dizer "não me mande
+      // as linhas, me diga QUANTAS são" — e isso vira, na rede, um HTTP HEAD
+      // com `Prefer: count=exact`. Foi MEDIDO, não suposto:
+      //
+      //     método : HEAD
+      //     headers: [['prefer', 'count=exact']]
+      //
+      // Este falso não tratava HEAD: a consulta caía no fim do arquivo e o
+      // cliente recebia contagem indefinida. Uma conferência sobre contagem
+      // passaria medindo zero — verde falando de outro assunto.
+      //
+      // O NÚMERO É O TOTAL QUE CASA COM O FILTRO, e não o que caberia numa
+      // página. É justamente essa diferença — "quantos existem" contra "quantos
+      // vieram" — que faz alguém pedir a contagem em vez de contar a resposta.
+      if (req.method === "HEAD") {
+        const total = casam().length;
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Content-Range": `0-${Math.max(total - 1, 0)}/${total}`,
+        });
+        return res.end();
+      }
+
       if (req.method === "GET") {
         let saida = casam();
         if (ordem) saida = saida.slice().sort((a, b) => {
