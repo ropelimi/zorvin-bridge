@@ -2928,7 +2928,9 @@ console.log("\nA nota que sobe daqui leva o carimbo deste lado");
   // Sem mandar o carimbo, o Vantoro não tem o que comparar e o comportamento
   // antigo volta: o Zorvin sobrescrevendo sempre, apagando correções feitas lá.
   const t = await subirTudo({}, {
-    tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }] },
+    tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }],
+               notas: [{ id: "n-x", conversa_id: "cv-1", texto: "nota nova",
+                         vantoro_atividade_id: null }] },
     vantoro: {} });
   await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/v-1/nota`, {
     method: "POST",
@@ -2938,6 +2940,49 @@ console.log("\nA nota que sobe daqui leva o carimbo deste lado");
   const enviada = t.van.recebidas.find((x) => /\/nota$/.test(x.caminho));
   ok("o carimbo vai junto", !!enviada?.corpo?.atualizado_em,
      JSON.stringify(enviada?.corpo));
+
+  // A MARCA DE QUE SUBIU, que esta rota não gravava.
+  //
+  // ESTA CONFERÊNCIA VEIO DE UM DEFEITO MEDIDO NO ESCRITÓRIO. O Vantoro devolve
+  // o id da atividade que a nota virou, e este caminho jogava fora — só o
+  // retroativo gravava. Toda nota escrita normalmente ficava com
+  // `vantoro_atividade_id` nulo PARA SEMPRE, mesmo tendo chegado perfeitamente.
+  //
+  // O estrago não foi o campo vazio: foi o diagnóstico lendo esse zero e
+  // concluindo "a subida está sendo recusada", mandando procurar defeito no
+  // token do Vantoro, que estava certo.
+  ok("e a marca de que subiu é gravada",
+     String(t.sb.dados.notas.find((n) => n.id === "n-x")?.vantoro_atividade_id || "") !== "",
+     JSON.stringify(t.sb.dados.notas));
+  await t.parar();
+}
+
+console.log("\nSe a marca não puder ser gravada, a nota ainda assim subiu");
+{
+  // A nota JÁ chegou ao Vantoro, que é o que importava. Devolver erro aqui faria
+  // o painel avisar que a nota não subiu quando ela subiu — e a pessoa
+  // reescreveria uma nota que já está lá.
+  const t = await subirTudo({}, {
+    tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }],
+               notas: [{ id: "n-y", conversa_id: "cv-1", texto: "nota",
+                         vantoro_atividade_id: null }] },
+    vantoro: {},
+    quebrar: (metodo, tabela) =>
+      (metodo === "PATCH" && tabela.startsWith("notas")) ? "sem conexão" : null });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/v-1/nota`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer jwt-bom" },
+    body: JSON.stringify({ id: "n-y", texto: "nota", processo_id: null }),
+  });
+  ok("a resposta continua sendo de sucesso", r.status >= 200 && r.status < 300,
+     `veio ${r.status}`);
+  ok("e a nota chegou ao Vantoro assim mesmo",
+     t.van.recebidas.some((x) => /\/nota$/.test(x.caminho)),
+     JSON.stringify(t.van.recebidas.map((x) => x.caminho)));
+  await espera(200);
+  ok("o log conta que a marca não foi gravada",
+     /não consegui gravar a marca/i.test(t.registro.join("")),
+     t.registro.join("").slice(-200));
   await t.parar();
 }
 
@@ -3059,15 +3104,33 @@ console.log("\nColuna existe e ninguém está ligado: isso é o CERTO, e ele exp
   await t.parar();
 }
 
-console.log("\nTem cadastro, tem nota, e nenhuma subiu: aí é a subida falhando");
+console.log("\nTem cadastro, tem nota, nenhuma marcada: ele DIZ QUE NÃO SABE");
 {
+  // ESTA CONFERÊNCIA MUDOU POR CAUSA DE UM ERRO MEU, medido no escritório.
+  //
+  // Antes ela cobrava a frase "a subida está sendo tentada e recusada" — e essa
+  // frase era CONCLUSÃO, não medição. Por muito tempo a rota normal não gravava
+  // `vantoro_atividade_id`, então zero aqui era o esperado até para nota que
+  // chegou perfeitamente. A ferramenta mandou procurar defeito no token do
+  // Vantoro, que estava certo.
+  //
+  // A conferência antiga não estava frouxa: ela EXIGIA a afirmação errada. Uma
+  // prova que cobra uma conclusão sem base a cimenta no lugar de pegá-la.
+  //
+  // Agora ela cobra o oposto: que a ferramenta admita as duas causas possíveis
+  // e ensine o teste que as separa.
   const t = await subirTudo({}, { vantoro: {}, tabelas: {
     contatos: [{ id: "c1", numero: "1", vantoro_cliente_id: "v-1" }],
     notas: [{ id: "n1", conversa_id: "cv", vantoro_atividade_id: null }] } });
   const r = await diagnosticar(t);
-  ok("aponta para o log e para as variáveis do Vantoro",
-     /NENHUMA subiu/.test(r.diagnostico || "")
-     && /VANTORO_API_TOKEN/.test(r.diagnostico || ""), r.diagnostico);
+  ok("admite que daqui não dá para separar as causas",
+     /não dá para separar/i.test(r.diagnostico || ""), r.diagnostico);
+  ok("e ensina o teste que separa, em vez de chutar uma delas",
+     /nota NOVA/.test(r.diagnostico || "")
+     && /Apareceu/.test(r.diagnostico || ""), r.diagnostico);
+  ok("citando as duas: retroativo e subida recusada",
+     /retroativo/i.test(r.diagnostico || "")
+     && /recusada/i.test(r.diagnostico || ""), r.diagnostico);
   await t.parar();
 }
 

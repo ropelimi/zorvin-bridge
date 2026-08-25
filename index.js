@@ -2981,7 +2981,7 @@ app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
 app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
   const corpo = req.body || {};
   const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
-  return chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/nota`, {
+  const resposta = await chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/nota`, {
     method: 'POST',
     body: JSON.stringify({
       id: corpo.id,
@@ -2999,6 +2999,37 @@ app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
       atualizado_em: corpo.atualizado_em || new Date().toISOString(),
     }),
   });
+
+  // A MARCA DE QUE SUBIU, que esta rota não gravava.
+  //
+  // O Vantoro devolve o id da atividade que a nota virou, e este caminho jogava
+  // fora. Só o retroativo gravava — então TODA nota escrita pelo caminho normal
+  // ficava com `vantoro_atividade_id` nulo para sempre, mesmo tendo chegado
+  // perfeitamente.
+  //
+  // Isso não era só um campo vazio. Foi medido no escritório: o diagnóstico
+  // mostrou "164 notas, NENHUMA subiu" e concluiu que a subida estava sendo
+  // recusada — quando o que ele via era a marca que ninguém escrevia. Uma
+  // ferramenta de diagnóstico afirmando o que não sabe é pior do que não ter
+  // ferramenta: manda procurar defeito no lugar errado.
+  //
+  // E o retroativo depende desta marca para pular o que já subiu. Sem ela, ele
+  // reenviaria tudo toda vez — o Vantoro deduplica pelo `id_externo`, então não
+  // duplicaria, mas seriam centenas de chamadas à toa a cada rodada.
+  const atividade = resposta && resposta.corpo && resposta.corpo.atividade
+    && resposta.corpo.atividade.id;
+  if (atividade && corpo.id) {
+    // FALHAR AQUI NÃO DESFAZ NADA, e nem devolve erro: a nota JÁ chegou ao
+    // Vantoro, que é o que importava. Perder a marca custa uma chamada repetida
+    // no próximo retroativo; devolver erro faria o painel avisar que a nota não
+    // subiu quando ela subiu.
+    const { error } = await supabase.from('notas')
+      .update({ vantoro_atividade_id: atividade }).eq('id', corpo.id);
+    if (error) {
+      console.warn(`Nota ${corpo.id} subiu, mas não consegui gravar a marca: ${error.message}`);
+    }
+  }
+  return resposta;
 }));
 
 // ============================================================
@@ -3407,9 +3438,23 @@ app.get('/vantoro/diagnostico-notas', async (req, res) => {
   } else if (!notas) {
     diagnostico = 'Não há nota interna nenhuma gravada ainda. Nada para subir.';
   } else if (notasQueSubiram === 0) {
+    // AQUI ELE NÃO SABE, E PASSOU A DIZER QUE NÃO SABE.
+    //
+    // Antes esta frase afirmava "a subida está sendo tentada e recusada". Era
+    // conclusão, não medição — e estava errada: por muito tempo a rota normal
+    // não gravava `vantoro_atividade_id`, então zero aqui era o esperado até
+    // para nota que chegou perfeitamente. No escritório, essa frase mandou
+    // procurar defeito no token do Vantoro, que estava certo.
+    //
+    // Ferramenta de diagnóstico que conclui além do que mediu é pior do que
+    // ferramenta nenhuma: ela dá confiança para procurar no lugar errado.
     diagnostico = `Existem ${comCadastro} contato(s) com cadastro e ${notas} nota(s), `
-      + 'mas NENHUMA subiu. A subida está sendo tentada e recusada — veja o log da '
-      + 'ponte por "Vantoro" e confira VANTORO_API_URL e VANTORO_API_TOKEN.';
+      + 'e NENHUMA está marcada como subida. Duas causas possíveis, e daqui não dá '
+      + 'para separar: (1) são notas ANTIGAS, escritas antes de a subida existir — '
+      + 'nesse caso rode o retroativo; ou (2) a subida está sendo recusada. '
+      + 'PARA SABER QUAL: escreva uma nota NOVA numa conversa de quem já tem ficha '
+      + 'no Vantoro e olhe o histórico daquele cliente. Apareceu = caso 1. '
+      + 'Não apareceu = caso 2, e aí veja o log da ponte por "Vantoro".';
   } else {
     diagnostico = `${notasQueSubiram} de ${notas} nota(s) já subiram. O caminho está `
       + 'funcionando; as que faltam são de contatos sem cadastro no Vantoro, ou '
