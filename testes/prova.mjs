@@ -2540,6 +2540,107 @@ console.log("\nSem login, a nota não passa");
   await t.parar();
 }
 
+//  O RETROATIVO EM FATIAS — é o que permite ele virar um botão.
+//
+//  Rodando de ponta a ponta, ele sobe uma nota de cada vez para o Vantoro, que
+//  é outra hospedagem e que hiberna. Com centenas de clientes, a chamada passa
+//  do tempo que a Render dá a uma requisição e morre no meio — sem dizer onde
+//  parou. Em fatias, cada chamada termina depressa e o painel pede a seguinte.
+//
+//  O QUE ESTE BLOCO PROTEGE é a propriedade que faz as fatias valerem alguma
+//  coisa: percorrer todas elas tem de cobrir TODO MUNDO, sem repetir e sem
+//  pular. Uma fatia que pula um cliente não dá erro nenhum — só deixa o
+//  histórico dele sem as notas, e ninguém descobre.
+console.log("\nO retroativo em fatias cobre todo mundo, sem pular ninguém");
+{
+  const TABELAS = {
+    contatos: [], conversas: [], notas: [],
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }],
+  };
+  // Sete clientes, uma nota cada. Sete e não dois: com fatias de dois, o
+  // último grupo fica INCOMPLETO — e é no grupo incompleto que uma conta de
+  // fim mal feita erra, tanto para mais (repete) quanto para menos (pula).
+  for (let i = 1; i <= 7; i += 1) {
+    TABELAS.contatos.push({ id: `ct-${i}`, numero: `551190000${i}`, vantoro_cliente_id: `v-${i}` });
+    TABELAS.conversas.push({ id: `cv-${i}`, contato_id: `ct-${i}`, advogado_id: "adv-1" });
+    TABELAS.notas.push({ id: `nt-${i}`, conversa_id: `cv-${i}`, texto: `nota ${i}`,
+                         autor: "Ana", criado_em: `2026-01-0${i}T10:00:00Z`,
+                         vantoro_atividade_id: null, apagada_em: null });
+  }
+
+  const t = await subirTudo({}, { tabelas: TABELAS, vantoro: {} });
+  const fatia = (de) => fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?de=${de}&quantos=2`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } }).then((x) => x.json());
+
+  const primeira = await fatia(0);
+  ok("a primeira fatia pega só os dois primeiros", primeira.clientes === 2,
+     JSON.stringify(primeira));
+  ok("e diz que NÃO acabou", primeira.fim === false, JSON.stringify(primeira));
+  ok("dizendo também quantos existem ao todo", primeira.total_clientes === 7,
+     JSON.stringify(primeira));
+  // O NÚMERO QUE O PAINEL USA PARA PEDIR A SEGUINTE. Se ele vier errado, o
+  // laço repete a mesma fatia para sempre ou pula um pedaço do escritório.
+  ok("e onde ela parou", primeira.ate === 2, JSON.stringify(primeira));
+  ok("o texto avisa que é uma fatia, para quem chamar na mão",
+     /fatia/.test(primeira.detalhe || "") && /de=2/.test(primeira.detalhe || ""),
+     primeira.detalhe);
+
+  // O LAÇO INTEIRO, como o painel faz.
+  let r = primeira, voltas = 1;
+  while (!r.fim && voltas < 20) { r = await fatia(r.ate); voltas += 1; }
+  ok("percorrendo as fatias, chega ao fim", r.fim === true, JSON.stringify(r));
+
+  const notas = t.van.recebidas.filter((x) => /\/nota$/.test(x.caminho));
+  ok("e TODAS as sete notas chegaram", notas.length === 7,
+     JSON.stringify(notas.map((x) => x.corpo?.texto)));
+  // NENHUMA REPETIDA. A fatia que se sobrepõe à anterior manda a mesma nota
+  // duas vezes; aqui ela ainda não tem marca, então nada a pararia.
+  ok("cada uma uma vez só",
+     new Set(notas.map((x) => x.corpo?.texto)).size === 7,
+     JSON.stringify(notas.map((x) => x.corpo?.texto)));
+  // E CADA UMA NA FICHA DO SEU DONO — a fatia não pode embaralhar donos.
+  ok("cada nota na ficha do seu dono",
+     notas.every((x) => x.caminho === `/clientes/v-${x.corpo?.texto?.split(" ")[1]}/nota`),
+     JSON.stringify(notas.map((x) => [x.corpo?.texto, x.caminho])));
+
+  await t.parar();
+}
+
+console.log("\nA fatia não deixa uma URL torta pular gente em silêncio");
+{
+  const TABELAS = {
+    contatos: [], conversas: [], notas: [],
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: true }],
+  };
+  for (let i = 1; i <= 3; i += 1) {
+    TABELAS.contatos.push({ id: `ct-${i}`, numero: `551190000${i}`, vantoro_cliente_id: `v-${i}` });
+    TABELAS.conversas.push({ id: `cv-${i}`, contato_id: `ct-${i}`, advogado_id: "adv-1" });
+    TABELAS.notas.push({ id: `nt-${i}`, conversa_id: `cv-${i}`, texto: `nota ${i}`,
+                         autor: "Ana", criado_em: `2026-01-0${i}T10:00:00Z`,
+                         vantoro_atividade_id: null, apagada_em: null });
+  }
+  const t = await subirTudo({}, { tabelas: TABELAS, vantoro: {} });
+  const chamar = (q) => fetch(`http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?${q}`,
+    { method: "POST", headers: { Authorization: "Bearer jwt-bom" } }).then((x) => x.json());
+
+  // Chave que não pode existir não é filtro: na dúvida, o padrão — e o padrão
+  // cobre todo mundo. O contrário seria uma URL torta fazendo o retroativo
+  // pular clientes sem dizer nada.
+  const torto = await chamar("de=banana&quantos=-5");
+  ok("com valores impossíveis, percorre desde o começo",
+     torto.de === 0 && torto.clientes === 3, JSON.stringify(torto));
+  ok("e diz que acabou", torto.fim === true, JSON.stringify(torto));
+
+  // Passando do fim: nada a fazer, e ele diz isso em vez de dar erro.
+  const depoisDoFim = await chamar("de=999");
+  ok("pedindo depois do último, não faz nada e não quebra",
+     depoisDoFim.ok === true && depoisDoFim.clientes === 0 && depoisDoFim.fim === true,
+     JSON.stringify(depoisDoFim));
+
+  await t.parar();
+}
+
 console.log("\nRodar o retroativo DE NOVO não duplica");
 {
   const TABELAS = {
@@ -2593,8 +2694,12 @@ console.log("\nO retroativo não para no milésimo contato");
 
   // EM SIMULAÇÃO: a conta é a mesma e nada sai pela rede. É a leitura que está
   // sendo medida aqui, não o envio.
+  //
+  // `quantos=tudo` porque a fatia padrão pararia nos primeiros 50 e esta prova
+  // ficaria medindo a fatia em vez do teto de leitura — o teto do PostgREST
+  // continuaria escondido, que é justamente o que ela existe para pegar.
   const r = await (await fetch(
-    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1`,
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1&quantos=tudo`,
     { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
   ok("leu os 1100 clientes, e não só os 1000 do teto", r.clientes === QUANTOS,
      JSON.stringify({ clientes: r.clientes, subiram: r.subiram }));
@@ -2634,8 +2739,10 @@ console.log("\nUm lote com problema não derruba o retroativo inteiro");
         ? "conexão perdida no meio da leitura" : null,
   });
 
+  // `quantos=tudo`: o que se mede aqui é um lote de leitura cair no meio do
+  // caminho, e com a fatia padrão os dois lotes nem seriam alcançados.
   const r = await (await fetch(
-    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1`,
+    `http://127.0.0.1:${t.porta}/vantoro/notas/subir-tudo?simular=1&quantos=tudo`,
     { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
 
   ok("responde, em vez de estourar", r.ok === true, JSON.stringify(r));

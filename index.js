@@ -3265,19 +3265,53 @@ async function lerEmPaginas(montar) {
   }
 }
 
-// TODOS — o retroativo, uma vez. Só quem administra, e com simulação primeiro.
+// Quantos clientes uma chamada percorre quando ninguém diz o contrário.
+//
+// EXISTE PARA O RETROATIVO PODER SER UM BOTÃO. Rodando de ponta a ponta, ele
+// sobe uma nota de cada vez para o Vantoro, que é outra hospedagem e que
+// hiberna: com centenas de clientes, a chamada passa do tempo que a Render dá
+// a uma requisição e MORRE NO MEIO — sem dizer onde parou, e sem ninguém
+// conseguir apertar de novo com proveito.
+//
+// Em fatias, cada chamada termina depressa e o painel pede a próxima. Como
+// subir é idempotente (a nota que já subiu é reconhecida e pulada), uma fatia
+// repetida não faz mal — o pior caso é ela não fazer nada.
+const FATIA_DE_CLIENTES = 50;
+
+function inteiroDaConsulta(valor, padrao) {
+  // Chave que não pode existir não é filtro. Uma URL editada à mão não pode
+  // fazer o retroativo pular gente em silêncio — na dúvida, o padrão.
+  const n = Number.parseInt(String(valor ?? ''), 10);
+  return Number.isFinite(n) && n >= 0 ? n : padrao;
+}
+
+// TODOS — o retroativo. Só quem administra, e com simulação primeiro.
+//
+// `de` e `quantos` recortam a lista de clientes: é o que permite ao painel
+// mostrar progresso em vez de uma tela parada, e é o que impede a chamada de
+// estourar o tempo da hospedagem. Sem eles, percorre tudo.
 app.post('/vantoro/notas/subir-tudo', soAdmin(async (req) => {
   const simular = String(req.query.simular || '') === '1';
+  const de = inteiroDaConsulta(req.query.de, 0);
+  const quantos = inteiroDaConsulta(req.query.quantos, 0) || FATIA_DE_CLIENTES;
+  // `quantos=tudo` é a saída para quem quiser rodar de uma vez só — pela linha
+  // de comando, onde não há tempo limite de requisição no caminho.
+  const tudoDeUmaVez = String(req.query.quantos || '') === 'tudo';
 
-  let contatos;
+  let todos;
   try {
-    contatos = await lerEmPaginas(() => supabase
+    todos = await lerEmPaginas(() => supabase
       .from('contatos').select('id, numero, vantoro_cliente_id')
       .not('vantoro_cliente_id', 'is', null)
+      // ORDEM ESTÁVEL, e é ela que faz a fatia significar alguma coisa: sem
+      // uma ordem fixa, "os 50 seguintes" seriam 50 quaisquer, e o painel
+      // repetiria uns e pularia outros achando que percorreu tudo.
       .order('id', { ascending: true }));
   } catch (e) {
     return { status: 502, corpo: { ok: false, erro: e.message } };
   }
+
+  const contatos = tudoDeUmaVez ? todos.slice(de) : todos.slice(de, de + quantos);
 
   let subiram = 0, falharam = 0, jaEstavam = 0;
   const comProblema = [];
@@ -3337,16 +3371,31 @@ app.post('/vantoro/notas/subir-tudo', soAdmin(async (req) => {
       if (r.falharam) comProblema.push(c.numero || c.id);
     }
   }
+  const ate = de + contatos.length;
   return { status: 200, corpo: {
     ok: true, simulacao: simular,
     clientes: contatos.length, subiram, falharam, jaEstavam,
+    // ONDE ESTA FATIA COMEÇOU E ONDE PAROU, para o painel pedir a seguinte e
+    // para quem lê saber que não viu o escritório inteiro.
+    de, ate, total_clientes: todos.length,
+    // `fim` é calculado AQUI, e não no painel. A conta é "passei do último?",
+    // e ela depende de coisas que só este lado sabe — quantos clientes existem
+    // e quantos couberam na fatia. Refeita do outro lado, ela erraria na
+    // primeira vez que uma delas mudasse.
+    fim: ate >= todos.length,
     // OS QUE FALHARAM, NOMEADOS. "3 falharam" no meio de um número grande é
     // um dado que ninguém consegue usar: sem saber quais, não há o que refazer.
     com_problema: comProblema.slice(0, 50),
-    detalhe: simular
+    detalhe: (simular
       ? `Simulação: ${subiram} nota(s) SUBIRIAM. Nada foi enviado nem gravado.`
       : `${subiram} nota(s) subiram, ${jaEstavam} já estavam lá, ${falharam} falharam. `
-        + 'Rodar de novo é seguro: o que já subiu é reconhecido e não duplica.',
+        + 'Rodar de novo é seguro: o que já subiu é reconhecido e não duplica.')
+      // FALTA GENTE, E ISSO PRECISA ESTAR ESCRITO. Quem chamar uma vez e ler
+      // só o número vai embora achando que acabou — e o retroativo pela metade
+      // é pior que o não feito, porque ninguém volta para conferir.
+      + (ate >= todos.length ? ''
+         : ` Esta é uma fatia: clientes ${de + 1} a ${ate} de ${todos.length}. `
+           + `Chame de novo com de=${ate} para continuar.`),
   } };
 }));
 
