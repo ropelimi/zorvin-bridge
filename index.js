@@ -1712,17 +1712,66 @@ function caminhoDoStorage(url) {
 async function salvarMensagem(base, extras) {
   const temExtras = extras && Object.keys(extras).length > 0;
   const payload = temExtras ? { ...base, ...extras } : base;
-  let { error } = await supabase
+  // O `.select('id')` existe para saber SE GRAVOU. Com `ignoreDuplicates`, a
+  // chave repetida não dá erro nem grava: sem pedir as linhas de volta, os dois
+  // desfechos são indistinguíveis — e um deles é uma mensagem sumindo.
+  let { data, error } = await supabase
     .from('mensagens')
-    .upsert(payload, { onConflict: 'id_uazapi', ignoreDuplicates: true });
+    .upsert(payload, { onConflict: 'id_uazapi', ignoreDuplicates: true })
+    .select('id');
   if (error && temExtras) {
     // Provável coluna inexistente: grava sem os campos de citação.
     console.log('Regravando mensagem sem campos de citação:', error.message);
-    ({ error } = await supabase
+    ({ data, error } = await supabase
       .from('mensagens')
-      .upsert(base, { onConflict: 'id_uazapi', ignoreDuplicates: true }));
+      .upsert(base, { onConflict: 'id_uazapi', ignoreDuplicates: true })
+      .select('id'));
+  }
+  if (!error && Array.isArray(data) && data.length === 0) {
+    // Nada foi gravado, e não houve erro: a chave já existia.
+    await avisarSeForOutraMensagem(base);
   }
   return error;
+}
+
+// DUAS MENSAGENS DIFERENTES COM A MESMA CHAVE — o caso que some sem rastro.
+//
+// `ignoreDuplicates` descarta em silêncio, e é o certo para o caso comum: a
+// Uazapi reenvia a mesma mensagem quando desconfia que não entregou, e gravar
+// duas vezes encheria a conversa de repetição.
+//
+// Mas o descarte também acontece quando chegam DUAS MENSAGENS DIFERENTES com o
+// mesmo `messageid` — e aí não é repetição, é perda. O escritório relatou
+// exatamente isso: um álbum de três fotos em que só duas apareceram, junto de
+// uma bolha "Album: 3 images". Se o contêiner do álbum e uma das fotos dividem
+// a chave, a foto é engolida aqui, sem erro e sem log.
+//
+// NÃO SE AVISA DO REENVIO LEGÍTIMO. Um aviso em toda repetição faria ninguém
+// ler o log, e é lá que este precisa ser visto. Por isso a linha que já está
+// gravada é LIDA e comparada: mesmo tipo e mesmo texto é reenvio, e sai calado.
+//
+// Isto NÃO conserta o álbum: consertar exige saber o que a Uazapi manda num, e
+// esse dado ainda não foi lido. Isto faz o dado aparecer.
+async function avisarSeForOutraMensagem(base) {
+  try {
+    const { data: atual } = await supabase.from('mensagens')
+      .select('tipo, texto, midia_url')
+      .eq('id_uazapi', base.id_uazapi).maybeSingle();
+    // Sumiu entre uma consulta e outra: não há o que comparar, e inventar uma
+    // conclusão aqui seria pior do que ficar calado.
+    if (!atual) return;
+    const mesmoTexto = String(atual.texto || '') === String(base.texto || '');
+    if (atual.tipo === base.tipo && mesmoTexto) return;   // reenvio: silêncio
+    console.log(
+      `DUAS MENSAGENS DIFERENTES COM A MESMA CHAVE (id_uazapi=${base.id_uazapi}). `
+      + `A que já estava: tipo="${atual.tipo}", texto="${String(atual.texto || '').slice(0, 60)}". `
+      + `A que foi DESCARTADA: tipo="${base.tipo}", texto="${String(base.texto || '').slice(0, 60)}". `
+      + 'A descartada não aparece na conversa.');
+  } catch (e) {
+    // Uma base sem a coluna, ou uma oscilação: o aviso é diagnóstico, e não
+    // pode derrubar a gravação que já deu certo.
+    console.log('Não consegui conferir a chave repetida:', (e && e.message) || e);
+  }
 }
 
 // ------------------------------------------------------------

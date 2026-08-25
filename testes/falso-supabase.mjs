@@ -103,8 +103,20 @@ const COLUNAS_DO_BANCO = {
   contatos: ["id", "numero", "nome", "foto_url", "vantoro_cliente_id", "criado_em", "atualizado_em"],
   conversas: ["id", "contato_id", "advogado_id", "arquivada", "fixada", "favorita",
               "nao_lidas", "ultima_mensagem", "ultima_em", "criado_em"],
-  mensagens: ["id", "conversa_id", "texto", "de_mim", "criado_em", "id_uazapi",
-              "midia_url", "midia_tipo", "enviado_por_id", "autor"],
+  // AS COLUNAS QUE A PONTE USA, e não a tabela inteira do banco. A lista serve
+  // para o falso saber recusar o que não existe; uma coluna real que a ponte
+  // nunca toca não faz falta aqui, e inventá-la de memória seria pior.
+  //
+  // Esta linha estava incompleta e o defeito ficou ESCONDIDO pelas amostras: a
+  // união com as chaves das linhas gravadas durante a prova cobria o que
+  // faltava, então uma consulta a `tipo` passava por causa das linhas que a
+  // própria ponte tinha acabado de inserir. Uma prova que lesse `tipo` ANTES de
+  // qualquer inserção teria reprovado sem motivo.
+  mensagens: ["id", "conversa_id", "origem", "tipo", "texto", "criado_em",
+              "id_uazapi", "status", "midia_url", "midia_mime", "midia_nome",
+              "midia_segundos", "enviado_por", "enviado_por_id",
+              "enviado_por_foto", "apagada", "apagada_pelo_contato", "reacoes",
+              "resposta_previa", "resposta_autor", "responder_id_uazapi"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
           "vantoro_atividade_id", "atualizado_em"],
   advogados: ["id", "nome", "numero", "departamento_id", "foto_url", "ativo", "token"],
