@@ -41,12 +41,12 @@ async function portaLivre() {
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar, bilhetesQueFalham,
+    quebrar, semColunas, bilhetesQueFalham,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
@@ -3170,22 +3170,23 @@ console.log("\nColuna que não existe é a causa mais silenciosa, e ele diz isso
   // conjunto de colunas antigo pela sessão toda. A partir daí o `if` que decide
   // subir nunca é verdadeiro, e ninguém vê erro nenhum.
   //
-  // A FALTA DA COLUNA É SIMULADA COM `quebrar`, e vale dizer por quê: este
-  // Supabase de mentira ACEITA QUALQUER COLUNA — ele guarda objetos, e pedir um
-  // campo que nenhum tem devolve indefinido em vez de recusar. O PostgREST de
-  // verdade recusa a CONSULTA INTEIRA com "column ... does not exist", e é
-  // justamente essa recusa que dispara o defeito que estamos caçando.
+  // A FALTA DA COLUNA É DE VERDADE AGORA, e não mais um erro forjado.
   //
-  // Isso é uma lacuna da bancada, e não deste teste: enquanto o falso aceitar
-  // coluna que não existe, qualquer prova pode passar pedindo campo inexistente.
-  // Fica anotado. Aqui, o que interessa é a resposta da rota diante do erro que
-  // o banco de verdade dá — e ela é reproduzida com o texto que ele usa.
+  // Este teste vivia com um remendo: o Supabase de mentira aceitava qualquer
+  // coluna — guardava objetos, e pedir um campo que nenhum tinha devolvia
+  // indefinido em vez de recusar —, então a recusa era simulada com `quebrar`,
+  // mandando o texto do erro escrito na mão. Ficava anotado aqui como lacuna da
+  // bancada: enquanto o falso aceitasse coluna inexistente, QUALQUER prova
+  // podia passar pedindo campo que o banco não tem.
+  //
+  // A lacuna foi fechada. `semColunas` diz ao falso que aquela coluna não
+  // existe naquela tabela — o estado de uma base em que o SQL ainda não foi
+  // rodado —, e é o PRÓPRIO FALSO que recusa a consulta inteira com 42703,
+  // como o PostgREST faz. O caminho exercitado aqui passa a ser o de lá.
   const t = await subirTudo({}, { vantoro: {}, tabelas: {
     contatos: [{ id: "c1", numero: "1" }],
     notas: [{ id: "n1", conversa_id: "cv" }] },
-    quebrar: (metodo, tabela, busca) =>
-      (tabela.startsWith("contatos") && String(busca).includes("vantoro_cliente_id"))
-        ? "column contatos.vantoro_cliente_id does not exist" : null });
+    semColunas: { contatos: ["vantoro_cliente_id"] } });
   const r = await diagnosticar(t);
   ok("percebe que a coluna não existe",
      r.coluna_contatos_vantoro_cliente_id === false, JSON.stringify(r));
@@ -3257,6 +3258,85 @@ console.log("\nO diagnóstico não vaza dado nenhum");
   ok("nenhum telefone", !/5511987654321/.test(bruto));
   ok("nenhum texto de nota", !/segredo do cliente/.test(bruto));
   ok("e nenhum nome de quem escreveu", !/Isabela/.test(bruto));
+  await t.parar();
+}
+
+//  A BANCADA CONFERINDO A SI MESMA.
+//
+//  Toda conferência deste arquivo vale o que valer o Supabase de mentira. Ele
+//  aceitava QUALQUER coluna — guardava objetos, e pedir um campo que nenhum
+//  tinha devolvia indefinido em vez de recusar. Quer dizer: qualquer prova
+//  podia passar pedindo uma coluna que o banco de verdade não tem.
+//
+//  Não é hipótese. Foi assim que a subida das notas ficou meses sem funcionar:
+//  o código pedia `contatos.vantoro_cliente_id`, a coluna não existia, o
+//  PostgREST recusava a CONSULTA INTEIRA, e ninguém via erro nenhum.
+//
+//  As conferências abaixo são sobre o instrumento, e não sobre a ponte. Sem
+//  elas, a regra nova poderia estar desligada e todo o resto continuaria verde
+//  do mesmo jeito — que é exatamente o problema que ela veio resolver.
+console.log("\nO Supabase de mentira recusa coluna que não existe");
+{
+  const { recusarColunaInexistente, colunasDoSelect } =
+    await import("./falso-supabase.mjs");
+
+  const dados = { contatos: [{ id: "c1", numero: "1" }] };
+
+  ok("coluna inventada é recusada, com o código do PostgREST",
+     recusarColunaInexistente(dados, "contatos", ["banana"])?.code === "42703");
+  ok("e a mensagem diz QUAL coluna e de qual tabela",
+     /column contatos\.banana does not exist/.test(
+       recusarColunaInexistente(dados, "contatos", ["banana"])?.message || ""));
+
+  // COLUNA QUE EXISTE NO BANCO E NÃO NA AMOSTRA NÃO É RECUSADA, e esta é a
+  // conferência que impede a regra de virar um estorvo. Numa amostra de três
+  // linhas quase toda coluna está vazia; recusar por isso obrigaria a encher as
+  // montagens de `null` até o falso calar a boca — ruído sem informação.
+  ok("coluna que existe no banco passa mesmo sem aparecer na amostra",
+     recusarColunaInexistente(dados, "contatos", ["vantoro_cliente_id"]) === null);
+  ok("e uma coluna que só a amostra tem também passa",
+     recusarColunaInexistente({ contatos: [{ id: "c1", inventada_na_montagem: 1 }] },
+                              "contatos", ["inventada_na_montagem"]) === null);
+
+  // "NÃO SEI" NÃO É "NÃO EXISTE". Tabela desconhecida e vazia não recusa nada:
+  // transformar ignorância em recusa reprovaria consulta correta.
+  ok("tabela que ninguém conhece e está vazia não recusa nada",
+     recusarColunaInexistente({}, "tabela_que_nao_conheco", ["qualquer"]) === null);
+
+  // O `select` é lido sem confundir a junção embutida com coluna solta.
+  ok("o select é lido sem tropeçar na junção embutida",
+     JSON.stringify(colunasDoSelect("id, texto, contato:contato_id (numero, nome)"))
+       === JSON.stringify(["id", "texto", "contato_id"]));
+  ok("e `*` não é uma coluna",
+     colunasDoSelect("*").length === 0);
+}
+
+console.log("\nE recusa DE PONTA A PONTA, pela rede, como o PostgREST");
+{
+  // O de cima prova a função. Este prova que ela está LIGADA no caminho da
+  // rede — uma regra certa e desconectada não protege nada.
+  const t = await subirTudo({}, { tabelas: {
+    contatos: [{ id: "c1", numero: "5511900001111" }] } });
+  const base = `${t.sb.url}/rest/v1/contatos`;
+
+  const pedindoColuna = await fetch(`${base}?select=id,banana`);
+  const corpo = await pedindoColuna.json();
+  ok("pedir coluna inventada devolve 400", pedindoColuna.status === 400,
+     String(pedindoColuna.status));
+  ok("com o código e a mensagem do banco de verdade",
+     corpo.code === "42703" && /banana/.test(corpo.message || ""),
+     JSON.stringify(corpo));
+
+  // FILTRAR POR COLUNA QUE NÃO EXISTE TAMBÉM RECUSA — e este é o caso mais
+  // traiçoeiro dos dois: antes o filtro simplesmente não casava com nada, e a
+  // resposta vinha vazia. Lista vazia parece "não achei", não parece defeito.
+  const filtrando = await fetch(`${base}?select=id&banana=eq.1`);
+  ok("filtrar por coluna inventada também recusa, em vez de devolver vazio",
+     filtrando.status === 400, String(filtrando.status));
+
+  const certo = await fetch(`${base}?select=id,numero`);
+  ok("e a consulta certa continua passando", certo.status === 200);
+
   await t.parar();
 }
 
