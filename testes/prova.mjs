@@ -3340,5 +3340,70 @@ console.log("\nE recusa DE PONTA A PONTA, pela rede, como o PostgREST");
   await t.parar();
 }
 
+//  TIPO DE MENSAGEM QUE ESTE CÓDIGO NÃO CONHECE.
+//
+//  O escritório relatou: um álbum de três fotos chegou como UMA bolha só,
+//  escrita "Documento — indisponível", com o texto "Album: 3 images". As três
+//  fotos não apareceram.
+//
+//  Este bloco não conserta o álbum — para consertá-lo é preciso saber o que a
+//  Uazapi manda num, e isso ainda não foi lido. Ele conserta a razão de não se
+//  saber: a mensagem entrava como "documento" ou "texto" SEM DEIXAR RASTRO de
+//  que era outra coisa, então a única forma de descobrir o formato era chutar.
+//
+//  Um evento desconhecido continua virando bolha — anexo que não se sabe ler é
+//  melhor na tela do que sumido —, mas agora deixa no log o NOME EXATO do tipo
+//  e o corpo. É a mesma decisão já tomada para as reações.
+console.log("\nTipo de mensagem desconhecido fica registrado, com o nome exato");
+{
+  const t = await subirTudo();
+  const evento = (extra, id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageTimestamp: Date.now(), wasSentByApi: false, senderName: "Cliente Teste",
+      ...extra,
+    },
+  });
+  const mandar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+
+  // O caso do relato, com o tipo cru trocado por um nome inventado: o que se
+  // prova aqui é que QUALQUER tipo desconhecido é nomeado no log — não que o
+  // álbum se chame assim, o que ainda não se sabe.
+  await mandar(evento({ messageType: "tipoQueNinguemConhece",
+                        text: "Album: 3 images" }, "msg-desconhecida"));
+  await espera(700);
+
+  const log = t.registro.join("");
+  ok("o log diz o NOME EXATO do tipo que não foi reconhecido",
+     /DESCONHECIDO: "tipoQueNinguemConhece"/.test(log),
+     (log.match(/Tipo de mensagem.*/) || [""])[0].slice(0, 160));
+  // O CORPO JUNTO. É com um exemplo real em mãos que se ajusta a leitura.
+  ok("e manda o corpo junto, para não precisar adivinhar o formato",
+     /Album: 3 images/.test(log));
+  // E ELA NÃO SOME DA CONVERSA. Anexo que não se sabe ler é melhor na tela do
+  // que sumido: quem atende ao menos vê que algo chegou.
+  ok("e a mensagem entra na conversa assim mesmo",
+     t.sb.dados.mensagens.length === 1,
+     JSON.stringify(t.sb.dados.mensagens.map((m) => [m.tipo, m.texto])));
+
+  // O QUE JÁ É CONHECIDO NÃO VIRA RUÍDO. Um aviso em toda mensagem faria
+  // ninguém ler o log — e é lá que o aviso precisa ser visto.
+  await mandar(mensagemDaUazapi("bom dia", "msg-comum"));
+  await mandar(evento({ messageType: "imageMessage", mediaType: "image" }, "msg-foto"));
+  await mandar(evento({ messageType: "audioMessage", mediaType: "ptt" }, "msg-audio"));
+  await espera(800);
+  const avisos = (t.registro.join("").match(/Tipo de mensagem DESCONHECIDO/g) || []).length;
+  ok("e o aviso NÃO sai para os tipos que já são conhecidos", avisos === 1,
+     `saiu ${avisos} vez(es)`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
