@@ -325,6 +325,32 @@ function tipoDaMensagem(m) {
   if (m.type === 'media') return 'documento';
   return 'texto';
 }
+
+// "ESTE TIPO EU RECONHECI, OU SÓ CHUTEI UM PADRÃO?"
+//
+// É uma pergunta diferente de "que tipo é este", e a diferença some no
+// resultado: `tipoDaMensagem` devolve 'documento' tanto para um PDF de verdade
+// quanto para qualquer coisa que a Uazapi anuncie de um jeito que este código
+// não conhece — e devolve 'texto' para todo o resto. Nos dois casos a mensagem
+// entra na conversa parecendo entendida.
+//
+// O ESCRITÓRIO RELATOU ISTO: um álbum de três fotos chegou como uma bolha só,
+// escrita "Documento — indisponível", com o texto "Album: 3 images". A bolha
+// não diz que tipo era, e o log também não dizia — então não havia como saber
+// o que a Uazapi manda num álbum sem sair adivinhando.
+//
+// Devolve o tipo CRU quando nenhuma regra casou pelo nome, e `null` quando
+// casou. Uma linha de log com o nome exato vale mais do que três tentativas de
+// conserto baseadas em palpite.
+function tipoCruNaoReconhecido(m) {
+  const mt = String(m.mediaType || m.messageType || m.type || '').trim();
+  if (!mt) return null;                       // não anunciou tipo: não há o que registrar
+  const b = mt.toLowerCase();
+  const conhecido = ['sticker', 'figurinha', 'image', 'audio', 'voice', 'video',
+                     'document', 'file', 'text', 'chat', 'conversation', 'reaction']
+    .some((p) => b.includes(p)) || b === 'ptt';
+  return conhecido ? null : mt;
+}
 const tipoDaMidiaHist = tipoDaMensagem;
 function previaMidiaHist(tipo) {
   if (tipo === 'figurinha') return '🩹 Figurinha';
@@ -1061,6 +1087,23 @@ app.post('/webhook', async (req, res) => {
     // TIPO da mensagem. Mesma leitura da importação de histórico, agora que
     // as duas usam a mesma função.
     const tipo = tipoDaMensagem(m);
+
+    // TIPO QUE ESTE CÓDIGO NÃO CONHECE: fica registrado com o nome exato.
+    //
+    // A mensagem entra na conversa do mesmo jeito — um anexo que não se sabe
+    // ler ainda é melhor na tela do que sumido. Mas ela entrava como
+    // "documento" ou "texto" SEM DEIXAR RASTRO de que era outra coisa, e aí a
+    // única forma de descobrir o formato era adivinhar.
+    //
+    // O corpo vai junto, cortado: é com um exemplo real em mãos que se ajusta
+    // a leitura, e não com mais um palpite. É a mesma decisão já tomada para
+    // as reações, algumas centenas de linhas abaixo.
+    const tipoCru = tipoCruNaoReconhecido(m);
+    if (tipoCru) {
+      console.log(`Tipo de mensagem DESCONHECIDO: "${tipoCru}". `
+        + `Entrou como "${tipo}" para não sumir da conversa. `
+        + `Corpo: ${JSON.stringify(m).slice(0, 800)}`);
+    }
 
     const origem = m.fromMe ? 'advogado' : 'contato';
     // `m.caption` É A LEGENDA DA FOTO, e ela não estava sendo lida aqui.
