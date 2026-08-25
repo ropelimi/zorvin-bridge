@@ -3330,6 +3330,106 @@ app.get('/vantoro/status', (req, res) => {
 });
 
 // ============================================================
+//  POR QUE A NOTA NÃO CHEGOU NO VANTORO
+// ============================================================
+//
+//  O escritório relatou que as notas internas não aparecem no histórico do
+//  cliente. O caminho tem quatro pontos onde ela pode parar, e TRÊS DELES SÃO
+//  MUDOS — não há erro em lugar nenhum, a nota simplesmente fica na conversa:
+//
+//    1. a coluna `contatos.vantoro_cliente_id` não existe. O painel pede a
+//       coluna, o banco recusa a consulta inteira, e ele desce para o conjunto
+//       de colunas antigo PELA SESSÃO INTEIRA. A partir daí `vantoro_cliente_id`
+//       chega indefinido em toda conversa, e o `if` que decide subir nunca é
+//       verdadeiro. Este é o mais silencioso dos quatro;
+//    2. a coluna existe e está VAZIA no contato. É o certo: quem ainda não tem
+//       cadastro no Vantoro não tem ficha para receber. Mas se estiver vazia em
+//       TODO MUNDO, o vínculo nunca foi feito — e aí o problema é outro;
+//    3. a subida foi tentada e falhou. Este ponto FALA: o painel avisa na tela;
+//    4. a coluna `notas.vantoro_atividade_id` não existe, e aí a nota até sobe,
+//       mas a marca de que subiu não é gravada.
+//
+//  ESTA ROTA RESPONDE QUAL DOS QUATRO É, em números. Um `console.log` no
+//  navegador não serve: o defeito aparece em quem atende, não em quem
+//  desenvolve, e pedir para alguém abrir o inspetor no meio do atendimento não
+//  é caminho.
+//
+//  SÓ CONTAGENS, NENHUM DADO. Nome, telefone e texto de nota não passam por
+//  aqui. É o que permite deixá-la aberta como as outras de diagnóstico — e a
+//  pergunta que ela responde é justamente a que alguém precisa fazer quando não
+//  consegue entrar em lugar nenhum.
+app.get('/vantoro/diagnostico-notas', async (req, res) => {
+  liberarCors(res);
+
+  // A COLUNA EXISTE? A pergunta não é "quantos têm valor", é se a coluna está
+  // lá — e a única forma honesta de saber é pedir e ver se o banco recusa.
+  const existe = async (tabela, coluna) => {
+    const { error } = await supabase.from(tabela).select(coluna).limit(1);
+    if (!error) return true;
+    if (/column|coluna|does not exist|não existe/i.test(error.message || '')) return false;
+    return null;    // outro erro: não dá para afirmar nem uma coisa nem outra
+  };
+
+  const contar = async (tabela, ajustar = (q) => q) => {
+    const { count, error } = await ajustar(
+      supabase.from(tabela).select('id', { count: 'exact', head: true }));
+    return error ? null : (count ?? 0);
+  };
+
+  const temClienteId = await existe('contatos', 'vantoro_cliente_id');
+  const temAtividadeId = await existe('notas', 'vantoro_atividade_id');
+
+  const contatos = await contar('contatos');
+  const comCadastro = temClienteId
+    ? await contar('contatos', (q) => q.not('vantoro_cliente_id', 'is', null))
+    : null;
+  const notas = await contar('notas');
+  const notasQueSubiram = temAtividadeId
+    ? await contar('notas', (q) => q.not('vantoro_atividade_id', 'is', null))
+    : null;
+
+  // O DIAGNÓSTICO EM UMA FRASE, e não só os números. Quem abre isto quer saber
+  // o que fazer, não interpretar uma tabela.
+  let diagnostico;
+  if (temClienteId === false) {
+    diagnostico = 'A coluna `contatos.vantoro_cliente_id` NÃO EXISTE no Supabase '
+      + 'do Zorvin. Sem ela o painel nunca sabe para qual cliente subir, e a nota '
+      + 'fica só na conversa — sem erro nenhum. É a causa mais provável. '
+      + 'Rode o SQL que cria essa coluna.';
+  } else if (temClienteId === null) {
+    diagnostico = 'Não consegui perguntar ao banco se a coluna existe. Veja o log '
+      + 'da ponte: pode ser SUPABASE_URL/SUPABASE_SERVICE_KEY errada.';
+  } else if (comCadastro === 0) {
+    diagnostico = 'A coluna existe, mas NENHUM contato está ligado a um cliente do '
+      + 'Vantoro. Enquanto o contato não tem cadastro, a nota fica na conversa — '
+      + 'isso é o certo. Abra a ficha de um cliente pelo painel para criar o '
+      + 'vínculo, e as notas dele sobem na hora.';
+  } else if (!notas) {
+    diagnostico = 'Não há nota interna nenhuma gravada ainda. Nada para subir.';
+  } else if (notasQueSubiram === 0) {
+    diagnostico = `Existem ${comCadastro} contato(s) com cadastro e ${notas} nota(s), `
+      + 'mas NENHUMA subiu. A subida está sendo tentada e recusada — veja o log da '
+      + 'ponte por "Vantoro" e confira VANTORO_API_URL e VANTORO_API_TOKEN.';
+  } else {
+    diagnostico = `${notasQueSubiram} de ${notas} nota(s) já subiram. O caminho está `
+      + 'funcionando; as que faltam são de contatos sem cadastro no Vantoro, ou '
+      + 'são anteriores a esta função existir — nesse caso rode o retroativo.';
+  }
+
+  res.json({
+    ok: true,
+    coluna_contatos_vantoro_cliente_id: temClienteId,
+    coluna_notas_vantoro_atividade_id: temAtividadeId,
+    contatos,
+    contatos_com_cadastro_no_vantoro: comCadastro,
+    notas,
+    notas_que_ja_subiram: notasQueSubiram,
+    vantoro_configurado: Boolean(VANTORO_URL && VANTORO_TOKEN),
+    diagnostico,
+  });
+});
+
+// ============================================================
 //  LOGIN ÚNICO — a senha mora no Vantoro
 //
 //  Antes: cada pessoa tinha uma conta criada à mão no Supabase, com uma senha

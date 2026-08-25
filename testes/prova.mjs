@@ -2941,5 +2941,154 @@ console.log("\nA nota que sobe daqui leva o carimbo deste lado");
   await t.parar();
 }
 
+// ==================================================================
+//  POR QUE A NOTA NÃO CHEGOU NO VANTORO
+// ==================================================================
+//
+//  O escritório relatou que as notas internas não aparecem no histórico do
+//  cliente. O caminho tem quatro pontos onde ela pode parar, e três deles são
+//  MUDOS — nada dá erro, a nota simplesmente fica na conversa.
+//
+//  Esta rota responde QUAL dos quatro é, em números. Ela existe porque o
+//  defeito aparece em quem atende, e pedir para alguém abrir o inspetor do
+//  navegador no meio de um atendimento não é caminho.
+
+const diagnosticar = async (t) =>
+  (await fetch(`http://127.0.0.1:${t.porta}/vantoro/diagnostico-notas`)).json();
+
+console.log("\nO diagnóstico conta o que existe");
+{
+  const t = await subirTudo({}, { vantoro: {}, tabelas: {
+    contatos: [{ id: "c1", numero: "1", vantoro_cliente_id: "v-1" },
+               { id: "c2", numero: "2", vantoro_cliente_id: null },
+               { id: "c3", numero: "3", vantoro_cliente_id: "v-3" }],
+    notas: [{ id: "n1", conversa_id: "cv", vantoro_atividade_id: 5 },
+            { id: "n2", conversa_id: "cv", vantoro_atividade_id: null }] } });
+  const r = await diagnosticar(t);
+
+  // AS CONTAGENS SÃO O TOTAL QUE CASA COM O FILTRO, e não o tamanho da página.
+  // Contar o que veio na resposta esbarraria no teto de mil linhas do PostgREST
+  // e diria "1000 contatos" para um escritório com três mil — que é o defeito
+  // que mais se repetiu neste projeto, agora dentro da ferramenta que existe
+  // para diagnosticar defeito.
+  ok("conta os contatos", r.contatos === 3, JSON.stringify(r));
+  ok("e quantos têm cadastro no Vantoro", r.contatos_com_cadastro_no_vantoro === 2,
+     JSON.stringify(r));
+  ok("conta as notas", r.notas === 2, JSON.stringify(r));
+  ok("e quantas já subiram", r.notas_que_ja_subiram === 1, JSON.stringify(r));
+  await t.parar();
+}
+
+console.log("\nA contagem é o TOTAL, e não o que coube na página");
+{
+  // ESTA CONFERÊNCIA EXISTE POR CAUSA DE UMA SABOTAGEM QUE NÃO MORDEU.
+  //
+  // Troquei a contagem exata por `select('id').length` — contar o tamanho da
+  // resposta — e a bancada inteira passou. Porque a amostra tinha TRÊS
+  // contatos: abaixo do teto, contar a página e contar o total dão o mesmo
+  // número, e a conferência media as duas coisas ao mesmo tempo sem distinguir.
+  //
+  // O PostgREST corta em 1000 linhas e NÃO AVISA. Num escritório com três mil
+  // contatos, a ferramenta que existe para DIAGNOSTICAR defeito passaria a
+  // conter o defeito que mais se repetiu neste projeto: diria "1000" com cara
+  // de resposta inteira, e o diagnóstico sairia errado com toda a confiança.
+  //
+  // 1100 contatos, portanto: acima do teto, para os dois jeitos de contar
+  // deixarem de coincidir.
+  const QUANTOS = 1100;
+  const contatos = [];
+  for (let i = 0; i < QUANTOS; i++) {
+    const n = String(i).padStart(4, "0");
+    contatos.push({ id: `ct-${n}`, numero: `55119${n}0000`, vantoro_cliente_id: `v-${n}` });
+  }
+  const t = await subirTudo({}, { vantoro: {}, tabelas: { contatos, notas: [] } });
+  const r = await diagnosticar(t);
+  ok("conta os 1100, e não os 1000 do teto", r.contatos === QUANTOS,
+     JSON.stringify({ contatos: r.contatos }));
+  ok("e o mesmo vale para os que têm cadastro",
+     r.contatos_com_cadastro_no_vantoro === QUANTOS,
+     JSON.stringify({ com_cadastro: r.contatos_com_cadastro_no_vantoro }));
+  await t.parar();
+}
+
+console.log("\nColuna que não existe é a causa mais silenciosa, e ele diz isso");
+{
+  // O CASO MAIS PROVÁVEL, e o mais mudo dos quatro: o painel pede
+  // `vantoro_cliente_id`, o banco recusa a consulta INTEIRA, e ele desce para o
+  // conjunto de colunas antigo pela sessão toda. A partir daí o `if` que decide
+  // subir nunca é verdadeiro, e ninguém vê erro nenhum.
+  //
+  // A FALTA DA COLUNA É SIMULADA COM `quebrar`, e vale dizer por quê: este
+  // Supabase de mentira ACEITA QUALQUER COLUNA — ele guarda objetos, e pedir um
+  // campo que nenhum tem devolve indefinido em vez de recusar. O PostgREST de
+  // verdade recusa a CONSULTA INTEIRA com "column ... does not exist", e é
+  // justamente essa recusa que dispara o defeito que estamos caçando.
+  //
+  // Isso é uma lacuna da bancada, e não deste teste: enquanto o falso aceitar
+  // coluna que não existe, qualquer prova pode passar pedindo campo inexistente.
+  // Fica anotado. Aqui, o que interessa é a resposta da rota diante do erro que
+  // o banco de verdade dá — e ela é reproduzida com o texto que ele usa.
+  const t = await subirTudo({}, { vantoro: {}, tabelas: {
+    contatos: [{ id: "c1", numero: "1" }],
+    notas: [{ id: "n1", conversa_id: "cv" }] },
+    quebrar: (metodo, tabela, busca) =>
+      (tabela.startsWith("contatos") && String(busca).includes("vantoro_cliente_id"))
+        ? "column contatos.vantoro_cliente_id does not exist" : null });
+  const r = await diagnosticar(t);
+  ok("percebe que a coluna não existe",
+     r.coluna_contatos_vantoro_cliente_id === false, JSON.stringify(r));
+  ok("e diz QUE SQL rodar, em vez de só apontar o defeito",
+     /NÃO EXISTE/.test(r.diagnostico || "") && /SQL/.test(r.diagnostico || ""),
+     r.diagnostico);
+  await t.parar();
+}
+
+console.log("\nColuna existe e ninguém está ligado: isso é o CERTO, e ele explica");
+{
+  // Aqui não há defeito nenhum — enquanto o contato não tem cadastro, a nota
+  // fica na conversa, que é o desenho. Chamar isto de erro mandaria alguém
+  // caçar um problema que não existe.
+  const t = await subirTudo({}, { vantoro: {}, tabelas: {
+    contatos: [{ id: "c1", numero: "1", vantoro_cliente_id: null }],
+    notas: [{ id: "n1", conversa_id: "cv", vantoro_atividade_id: null }] } });
+  const r = await diagnosticar(t);
+  ok("vê a coluna", r.coluna_contatos_vantoro_cliente_id === true, JSON.stringify(r));
+  ok("e diz que isso é o certo, com o que fazer",
+     /é o certo/.test(r.diagnostico || "") && /ficha/.test(r.diagnostico || ""),
+     r.diagnostico);
+  await t.parar();
+}
+
+console.log("\nTem cadastro, tem nota, e nenhuma subiu: aí é a subida falhando");
+{
+  const t = await subirTudo({}, { vantoro: {}, tabelas: {
+    contatos: [{ id: "c1", numero: "1", vantoro_cliente_id: "v-1" }],
+    notas: [{ id: "n1", conversa_id: "cv", vantoro_atividade_id: null }] } });
+  const r = await diagnosticar(t);
+  ok("aponta para o log e para as variáveis do Vantoro",
+     /NENHUMA subiu/.test(r.diagnostico || "")
+     && /VANTORO_API_TOKEN/.test(r.diagnostico || ""), r.diagnostico);
+  await t.parar();
+}
+
+console.log("\nO diagnóstico não vaza dado nenhum");
+{
+  // SÓ CONTAGENS. É o que permite deixar esta rota aberta como as outras de
+  // diagnóstico — e aberta é justamente o que ela precisa ser, porque a
+  // pergunta que ela responde é a de quem não está conseguindo entrar.
+  const t = await subirTudo({}, { vantoro: {}, tabelas: {
+    contatos: [{ id: "c1", numero: "5511987654321", nome: "Maria Silva",
+                 vantoro_cliente_id: "v-1" }],
+    notas: [{ id: "n1", conversa_id: "cv", texto: "segredo do cliente",
+              autor: "Isabela", vantoro_atividade_id: null }] } });
+  const bruto = await (await fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/diagnostico-notas`)).text();
+  ok("nenhum nome de contato", !/Maria Silva/.test(bruto));
+  ok("nenhum telefone", !/5511987654321/.test(bruto));
+  ok("nenhum texto de nota", !/segredo do cliente/.test(bruto));
+  ok("e nenhum nome de quem escreveu", !/Isabela/.test(bruto));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
