@@ -3405,5 +3405,74 @@ console.log("\nTipo de mensagem desconhecido fica registrado, com o nome exato")
   await t.parar();
 }
 
+//  DUAS MENSAGENS DIFERENTES COM A MESMA CHAVE.
+//
+//  `ignoreDuplicates` descarta em silêncio, e é o certo para o caso comum: a
+//  Uazapi reenvia a mesma mensagem quando desconfia que não entregou.
+//
+//  Mas o descarte também acontece quando chegam DUAS MENSAGENS DIFERENTES com o
+//  mesmo `messageid` — e aí não é repetição, é perda. O escritório relatou
+//  exatamente isso: um álbum de três fotos em que só DUAS apareceram, junto de
+//  uma bolha "Album: 3 images".
+//
+//  Este bloco não conserta o álbum. Ele faz a perda deixar rastro: sem isso,
+//  não há como distinguir "a terceira foto nunca chegou" de "chegou e foi
+//  engolida aqui" — e são consertos diferentes.
+console.log("\nDuas mensagens DIFERENTES com a mesma chave deixam rastro");
+{
+  const t = await subirTudo();
+  const evento = (extra, id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageTimestamp: Date.now(), wasSentByApi: false, senderName: "Cliente Teste",
+      ...extra,
+    },
+  });
+  const mandar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+
+  // O ÁLBUM E UMA DAS FOTOS DIVIDINDO A CHAVE — a forma do relato.
+  await mandar(evento({ messageType: "conversation", text: "Album: 3 images" }, "msg-album"));
+  await espera(600);
+  await mandar(evento({ messageType: "imageMessage", mediaType: "image",
+                        text: "a foto que some" }, "msg-album"));
+  await espera(700);
+
+  const log = t.registro.join("");
+  ok("o log diz que duas mensagens diferentes dividiram a chave",
+     /DUAS MENSAGENS DIFERENTES COM A MESMA CHAVE/.test(log),
+     (log.match(/DUAS MENSAGENS.*/) || [""])[0].slice(0, 200));
+  ok("e diz QUAL foi descartada, com o que ela trazia",
+     /a foto que some/.test(log), "sem isso não há o que investigar");
+  ok("e qual já estava lá",
+     /Album: 3 images/.test(log));
+  // A REALIDADE CONTINUA A MESMA: uma linha só. O aviso é diagnóstico, não
+  // conserto — gravar as duas com a mesma chave é o que a coluna única impede.
+  ok("e a conversa continua com uma mensagem só",
+     t.sb.dados.mensagens.length === 1,
+     JSON.stringify(t.sb.dados.mensagens.map((m) => m.texto)));
+
+  // O REENVIO LEGÍTIMO NÃO VIRA RUÍDO. A Uazapi repete a MESMA mensagem quando
+  // desconfia que não entregou; um aviso em cada repetição faria ninguém ler o
+  // log, e é lá que este precisa ser visto.
+  const antes = (t.registro.join("").match(/DUAS MENSAGENS DIFERENTES/g) || []).length;
+  await mandar(evento({ messageType: "conversation", text: "bom dia" }, "msg-repetida"));
+  await espera(500);
+  await mandar(evento({ messageType: "conversation", text: "bom dia" }, "msg-repetida"));
+  await espera(600);
+  const depois = (t.registro.join("").match(/DUAS MENSAGENS DIFERENTES/g) || []).length;
+  ok("a mesma mensagem reenviada NÃO gera aviso", depois === antes,
+     `o aviso saiu ${depois - antes} vez(es) a mais`);
+  ok("e ela continua sem duplicar", t.sb.dados.mensagens.length === 2,
+     JSON.stringify(t.sb.dados.mensagens.map((m) => m.texto)));
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
