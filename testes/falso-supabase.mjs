@@ -100,7 +100,8 @@ function lerSelect(sel, esquema) {
 // esquecer é claro e imediato: a prova reprova dizendo o nome exato da coluna.
 // É o erro barato — o caro é o contrário, e é o que existia antes.
 const COLUNAS_DO_BANCO = {
-  contatos: ["id", "numero", "nome", "foto_url", "vantoro_cliente_id", "criado_em", "atualizado_em"],
+  contatos: ["id", "numero", "nome", "nome_zorvin", "foto_url", "vantoro_cliente_id",
+             "vantoro_nome", "criado_em", "atualizado_em"],
   conversas: ["id", "contato_id", "advogado_id", "arquivada", "fixada", "favorita",
               "nao_lidas", "ultima_mensagem", "ultima_em", "criado_em"],
   // AS COLUNAS QUE A PONTE USA, e não a tabela inteira do banco. A lista serve
