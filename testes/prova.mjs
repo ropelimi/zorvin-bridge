@@ -3474,5 +3474,140 @@ console.log("\nDuas mensagens DIFERENTES com a mesma chave deixam rastro");
   await t.parar();
 }
 
+//  O CADASTRO MUDOU NO VANTORO: nome e telefone.
+//
+//  Pedido do escritório: "quando eu altero alguma informação no Vantoro, não
+//  está atualizando no Zorvin". Não era um sincronismo quebrado — era a
+//  ausência de um.
+//
+//  AS DUAS METADES SÃO DIFERENTES, e é isso que este bloco protege:
+//
+//    NOME é cópia, e cópia velha se atualiza.
+//
+//    TELEFONE não é cópia. Aqui o número É o da conversa do WhatsApp, e não
+//    pode ser sobrescrito por nada que venha do Vantoro. O que a mudança dele
+//    faz é tornar FALSO um vínculo que existe — o caso da mãe e do filho no
+//    mesmo número, com o telefone da mãe corrigido lá. Sem desfazer o vínculo,
+//    a nota escrita naquela conversa continuaria subindo para a ficha de quem
+//    não atende mais por aquele número.
+function avisarCadastroMudou(porta, corpo, { segredo = SEGREDO_VANTORO, assinatura } = {}) {
+  const bytes = Buffer.from(JSON.stringify(corpo), "utf8");
+  const assinada = assinatura !== undefined ? assinatura
+    : crypto.createHmac("sha256", segredo).update(bytes).digest("hex");
+  return fetch(`http://127.0.0.1:${porta}/vantoro/cliente-mudou`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Vantoro-Assinatura": assinada },
+    body: bytes,
+  });
+}
+
+const contatosDeTeste = () => ([
+  // A MÃE e o FILHO no mesmo número — a montagem do relato. Só a conversa da
+  // mãe está ligada a ela.
+  { id: "ct-mae", numero: "5567992183107", vantoro_cliente_id: "v-mae",
+    vantoro_nome: "MARIA DAS GRACAS" },
+  // Outro contato, de outro cliente: ele NÃO pode ser tocado por um aviso que
+  // não é dele. Sem esta linha na amostra, um `update` sem filtro passaria.
+  { id: "ct-outro", numero: "5511900001111", vantoro_cliente_id: "v-outro",
+    vantoro_nome: "OUTRO CLIENTE" },
+]);
+
+console.log("\nNome mudou no Vantoro: a conversa passa a mostrar o nome novo");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: { contatos: contatosDeTeste() } });
+  const r = await avisarCadastroMudou(t.porta, {
+    cliente_id: "v-mae", nome: "MARIA DAS GRACAS PEREIRA",
+    chaves_de_telefone: ["92183107"],
+  });
+  const corpo = await r.json();
+  ok("a ponte aceita o aviso", r.status === 200 && corpo.ok === true, JSON.stringify(corpo));
+  ok("e renomeia o contato ligado",
+     t.sb.dados.contatos.find((c) => c.id === "ct-mae")?.vantoro_nome === "MARIA DAS GRACAS PEREIRA",
+     JSON.stringify(t.sb.dados.contatos.map((c) => [c.id, c.vantoro_nome])));
+  // O VÍNCULO CONTINUA: o número não mudou, então nada a desfazer.
+  ok("sem desligar o vínculo, porque o número continua sendo dele",
+     t.sb.dados.contatos.find((c) => c.id === "ct-mae")?.vantoro_cliente_id === "v-mae");
+  // NINGUÉM MAIS É TOCADO. Um `update` sem o filtro do cliente renomearia o
+  // escritório inteiro com o nome de um cliente só.
+  ok("e o contato de OUTRO cliente não é tocado",
+     t.sb.dados.contatos.find((c) => c.id === "ct-outro")?.vantoro_nome === "OUTRO CLIENTE");
+  await t.parar();
+}
+
+console.log("\nTelefone mudou: o vínculo que deixou de ser verdade é desfeito");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: { contatos: contatosDeTeste() } });
+  // A mãe passou a atender por OUTRO número. A conversa antiga não é mais dela.
+  const r = await avisarCadastroMudou(t.porta, {
+    cliente_id: "v-mae", nome: "MARIA DAS GRACAS",
+    chaves_de_telefone: ["11112222"],
+  });
+  const corpo = await r.json();
+  ok("a ponte responde quantos desligou", corpo.desligados === 1, JSON.stringify(corpo));
+
+  const mae = t.sb.dados.contatos.find((c) => c.id === "ct-mae");
+  ok("o vínculo foi desfeito", mae?.vantoro_cliente_id == null, JSON.stringify(mae));
+  ok("e o nome copiado saiu junto", mae?.vantoro_nome == null, JSON.stringify(mae));
+
+  // O NÚMERO DA CONVERSA NÃO É TOCADO. Ele é do WhatsApp, não do Vantoro:
+  // trocá-lo desligaria a conversa do aparelho que a mandou.
+  ok("o número da conversa continua o mesmo",
+     mae?.numero === "5567992183107", JSON.stringify(mae));
+  await t.parar();
+}
+
+console.log("\nSem as chaves, o vínculo NÃO é desfeito");
+{
+  // "Não sei" não pode virar "não é". Um aviso que chegue sem a lista de
+  // telefones — versão antiga do Vantoro, campo perdido no caminho — desligaria
+  // TODOS os vínculos do escritório se a ausência fosse lida como ausência de
+  // número.
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: { contatos: contatosDeTeste() } });
+  await avisarCadastroMudou(t.porta, { cliente_id: "v-mae", nome: "NOME NOVO" });
+  const mae = t.sb.dados.contatos.find((c) => c.id === "ct-mae");
+  ok("o vínculo fica de pé", mae?.vantoro_cliente_id === "v-mae", JSON.stringify(mae));
+  ok("e o nome é atualizado assim mesmo", mae?.vantoro_nome === "NOME NOVO");
+  await t.parar();
+}
+
+console.log("\nA porta do cadastro exige a assinatura, como a da nota");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: { contatos: contatosDeTeste() } });
+  const semAssinatura = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente-mudou`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cliente_id: "v-mae", nome: "INVASOR" }),
+  });
+  ok("sem assinatura, recusa", semAssinatura.status === 401, String(semAssinatura.status));
+
+  const comOutroSegredo = await avisarCadastroMudou(
+    t.porta, { cliente_id: "v-mae", nome: "INVASOR" }, { segredo: "outro" });
+  ok("com o segredo errado, recusa", comOutroSegredo.status === 401,
+     String(comOutroSegredo.status));
+
+  ok("e nada foi alterado",
+     t.sb.dados.contatos.find((c) => c.id === "ct-mae")?.vantoro_nome === "MARIA DAS GRACAS");
+  await t.parar();
+}
+
+console.log("\nCliente sem conversa nenhuma aqui não é erro");
+{
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO },
+                            { tabelas: { contatos: contatosDeTeste() } });
+  const r = await avisarCadastroMudou(t.porta, {
+    cliente_id: "v-que-nao-tem-conversa", nome: "FULANO",
+    chaves_de_telefone: ["99998888"],
+  });
+  const corpo = await r.json();
+  // É o normal para a maior parte do cadastro do escritório. Responder erro
+  // faria o Vantoro registrar falha no log dele de uma coisa que está certa.
+  ok("responde ok, com zero ligados", r.status === 200 && corpo.ligados === 0,
+     JSON.stringify(corpo));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

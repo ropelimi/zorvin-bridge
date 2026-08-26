@@ -3226,6 +3226,108 @@ app.post('/vantoro/nota-mudou', async (req, res) => {
   return res.status(200).json({ ok: true, atualizada: true });
 });
 
+// O CADASTRO MUDOU NO VANTORO: nome e telefone.
+//
+// Pedido do escritório: "quando eu altero alguma informação no Vantoro, não
+// está atualizando no Zorvin". Não era um sincronismo quebrado — era a ausência
+// de um. O que este lado guarda do Vantoro são dois campos do contato,
+// `vantoro_nome` e `vantoro_cliente_id`, e os dois eram escritos PELO PAINEL,
+// quando alguém abre a ficha. Uma correção feita lá só aparecia aqui na próxima
+// abertura daquela conversa — e ninguém abre a ficha de um contato cujo nome já
+// parece certo.
+//
+// DUAS COISAS DIFERENTES CHEGAM POR AQUI, e vale separar:
+//
+//   NOME — é cópia, e cópia velha se atualiza. Todo contato ligado a este
+//   cliente passa a mostrar o nome novo na lista de conversas.
+//
+//   TELEFONE — NÃO é cópia. Aqui o número É o da conversa do WhatsApp, e não
+//   pode ser sobrescrito por nada que venha do Vantoro: a conversa pertence
+//   àquele número, e trocá-lo desligaria o histórico do aparelho que o mandou.
+//
+//   O que a mudança de telefone faz é outra coisa: ela pode ter tornado FALSO
+//   um vínculo que existe aqui. Foi o caso relatado — mãe e filho no mesmo
+//   número, o telefone da mãe corrigido no Vantoro. A conversa continuava
+//   ligada a ela, e a nota escrita ali continuaria subindo para a ficha de quem
+//   não atende mais por aquele número.
+//
+// POR ISSO O VÍNCULO QUE DEIXOU DE SER VERDADE É DESFEITO. É o oposto de
+// destruir informação: o vínculo é derivado, o painel refaz na próxima abertura
+// da ficha — e agora ele PERGUNTA quando há mais de um candidato. Deixá-lo de
+// pé é que seria escolher, em silêncio, mandar a anotação para a ficha errada.
+//
+// E NÃO SE LIGA NINGUÉM AQUI. Ligar o cliente ao contato do número NOVO
+// pareceria simétrico e não é: o número novo pode ter uma conversa que é de
+// outra pessoa, e escolher por conta própria é exatamente o sorteio que o
+// seletor do painel existe para não fazer.
+app.post('/vantoro/cliente-mudou', async (req, res) => {
+  liberarCors(res);
+  const conferencia = assinaturaDoVantoroConfere(req);
+  if (!conferencia.ok) {
+    console.warn(`Aviso de cadastro do Vantoro recusado: ${conferencia.motivo}.`
+      + (conferencia.motivo === 'sem-segredo'
+        ? ' VANTORO_WEBHOOK_SECRET não está preenchida na ponte — preencha com o'
+          + ' MESMO valor de ZORVIN_WEBHOOK_SECRET no Vantoro.'
+        : ''));
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  const corpo = req.body || {};
+  const clienteId = String(corpo.cliente_id || '').trim();
+  if (!clienteId) return res.status(400).json({ ok: false, erro: 'Falta o cliente_id.' });
+  const nome = String(corpo.nome || '').trim();
+  // AS CHAVES, e não os números. São os últimos 8 dígitos, que é como o Vantoro
+  // casa telefone desde sempre — eles não mudam com DDD, com o dígito 9 extra
+  // nem com o código do país. Mandá-las prontas evita a regra existir duas
+  // vezes: quem sabe o que é um telefone brasileiro é o Vantoro; aqui se
+  // compara conjunto.
+  const chaves = Array.isArray(corpo.chaves_de_telefone)
+    ? corpo.chaves_de_telefone.map((c) => String(c || '').trim()).filter(Boolean)
+    : null;
+
+  const { data: ligados, error } = await supabase
+    .from('contatos').select('id, numero, vantoro_nome')
+    .eq('vantoro_cliente_id', clienteId);
+  if (error) return res.status(502).json({ ok: false, erro: error.message });
+  if (!ligados || !ligados.length) {
+    // NÃO É ERRO. O cliente pode não ter conversa nenhuma aqui, e isso é o
+    // normal para a maior parte do cadastro do escritório.
+    return res.status(200).json({ ok: true, ligados: 0 });
+  }
+
+  const miolo = (numero) => {
+    const d = String(numero || '').replace(/\D/g, '');
+    return d.length >= 8 ? d.slice(-8) : '';
+  };
+
+  let renomeados = 0, desligados = 0;
+  for (const c of ligados) {
+    // O VÍNCULO AINDA É VERDADE? Só quando as chaves vieram: sem elas não se
+    // sabe nada sobre telefone, e "não sei" não pode virar "não é".
+    const perdeuONumero = chaves !== null && !chaves.includes(miolo(c.numero));
+    if (perdeuONumero) {
+      const { error: e1 } = await supabase.from('contatos')
+        .update({ vantoro_cliente_id: null, vantoro_nome: null }).eq('id', c.id);
+      if (e1) { console.warn(`Não consegui desligar o contato ${c.id}: ${e1.message}`); continue; }
+      desligados += 1;
+      // EM VOZ ALTA. Desfazer um vínculo é mexer em para onde vão as anotações
+      // daquela conversa; quem for procurar depois precisa achar o registro.
+      console.log(`Contato ${c.id} (${c.numero}) foi DESLIGADO do cliente ${clienteId}: `
+        + 'o telefone mudou no Vantoro e este número não é mais dele. '
+        + 'A ficha do painel refaz o vínculo na próxima abertura.');
+      continue;
+    }
+    if (nome && c.vantoro_nome !== nome) {
+      const { error: e2 } = await supabase.from('contatos')
+        .update({ vantoro_nome: nome }).eq('id', c.id);
+      if (e2) { console.warn(`Não consegui renomear o contato ${c.id}: ${e2.message}`); continue; }
+      renomeados += 1;
+    }
+  }
+
+  return res.status(200).json({ ok: true, ligados: ligados.length, renomeados, desligados });
+});
+
 // ============================================================
 //  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
 // ============================================================
