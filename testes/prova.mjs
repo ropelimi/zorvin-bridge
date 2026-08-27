@@ -3609,5 +3609,98 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  O ÁLBUM DE FOTOS: três fotos são três bolhas, e não quatro
+// ==================================================================
+//
+// Relato do escritório, com o log em mãos: mandar três fotos de uma vez fazia
+// aparecer uma bolha vazia ANTES delas — "Documento — indisponível", com o
+// texto "Album: 3 images".
+//
+// O corpo abaixo é o que veio no log de produção, palavra por palavra. Guardá-lo
+// aqui é o que impede o conserto de ser um palpite: se a Uazapi mudar o
+// formato, esta prova é que vai dizer, e não o escritório.
+//
+//   messageType: "AlbumMessage",  mediaType: "collection",
+//   content: { expectedImageCount: 3, expectedVideoCount: 0 },
+//   text: "Album: 3 images"
+//
+// O aviso não carrega arquivo — o `content` dele são dois números. Era por isso
+// que o download falhava e a bolha nascia vazia: não havia o que baixar. As
+// três fotos chegam em seguida, cada uma como mensagem própria, e são elas que
+// a pessoa mandou.
+{
+  console.log("\nO álbum de fotos");
+
+  /** O aviso de álbum, exatamente como a Uazapi mandou em produção. */
+  const avisoDeAlbum = {
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id: "5511992057503:3A6D12E5AA5DCB8B6C19",
+      messageid: "3A6D12E5AA5DCB8B6C19",
+      chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net",
+      fromMe: false, isGroup: false,
+      messageType: "AlbumMessage", mediaType: "collection", type: "media",
+      content: { expectedImageCount: 3, expectedVideoCount: 0 },
+      text: "Album: 3 images",
+      messageTimestamp: Date.now(), wasSentByApi: false,
+      senderName: "Cliente Teste",
+    },
+  };
+
+  /** Uma das fotos do álbum — chega logo depois, com id e arquivo próprios. */
+  const fotoDoAlbum = (id) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageType: "imageMessage", mediaType: "image", type: "media",
+      content: {}, text: "",
+      messageTimestamp: Date.now(), wasSentByApi: false,
+      senderName: "Cliente Teste",
+    },
+  });
+
+  const t = await subirTudo();
+  const mandar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+
+  await mandar(avisoDeAlbum);
+  await espera(700);
+  ok("o aviso de álbum NÃO vira bolha",
+     t.sb.dados.mensagens.length === 0,
+     `entraram ${t.sb.dados.mensagens.length}: ` +
+     JSON.stringify(t.sb.dados.mensagens.map((m) => [m.tipo, m.texto])));
+  ok("e o log diz que ele chegou, em vez de sumir calado",
+     t.registro.join("").includes("Aviso de álbum"),
+     t.registro.join("").slice(-300));
+  // O ALERTA DE TIPO DESCONHECIDO TAMBÉM PARA. Ele existe para dizer "há algo
+  // a investigar aqui", e não há mais: 800 caracteres de log por álbum
+  // recebido enterrariam o alerta do dia em que houver mesmo.
+  ok("e não grita mais 'tipo DESCONHECIDO' por um formato que já se conhece",
+     !t.registro.join("").includes("Tipo de mensagem DESCONHECIDO"),
+     t.registro.join("").slice(-300));
+
+  // E AS FOTOS ENTRAM. É a conferência que impede o conserto largo demais:
+  // descartar o álbum inteiro seria mais fácil e apagaria o que a pessoa mandou.
+  await mandar(fotoDoAlbum("3AB6491AA389F1A53C2F"));
+  await mandar(fotoDoAlbum("3A2B447468DAF6A8D7F8"));
+  await mandar(fotoDoAlbum("3A57BB31ED8EB0B9CB04"));
+  await espera(1500);
+  const imagens = t.sb.dados.mensagens.filter((m) => m.tipo === "imagem");
+  ok("as três fotos do álbum entram, cada uma na sua bolha",
+     imagens.length === 3, `entraram ${imagens.length} de 3`);
+  ok("e nenhuma bolha de documento sobrou no meio delas",
+     !t.sb.dados.mensagens.some((m) => m.tipo === "documento"),
+     JSON.stringify(t.sb.dados.mensagens.map((m) => [m.tipo, m.texto])));
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

@@ -342,7 +342,53 @@ function tipoDaMensagem(m) {
 // Devolve o tipo CRU quando nenhuma regra casou pelo nome, e `null` quando
 // casou. Uma linha de log com o nome exato vale mais do que três tentativas de
 // conserto baseadas em palpite.
+// O AVISO DE ÁLBUM — que não é mensagem, e por isso não pode virar bolha.
+//
+// Relato do escritório, agora com o log em mãos: um álbum de três fotos
+// aparecia como QUATRO bolhas — as três fotos, e antes delas uma bolha vazia
+// escrita "Documento — indisponível", com o texto "Album: 3 images".
+//
+// O log mostrou exatamente o que ela é:
+//
+//   messageType: "AlbumMessage",  mediaType: "collection",
+//   content: { expectedImageCount: 3, expectedVideoCount: 0 },
+//   text: "Album: 3 images"
+//
+// É um AVISO. O WhatsApp diz "vêm três imagens aí" e manda as três em seguida,
+// cada uma como mensagem própria, com id próprio e arquivo próprio — o log da
+// mesma rodada mostra as três chegando e as três recebendo o arquivo dois
+// segundos depois.
+//
+// O aviso não carrega arquivo nenhum: o `content` dele são dois números. Era
+// por isso que o download falhava ("Mídia que não deu para baixar (content)")
+// e a bolha nascia vazia — não havia o que baixar. Aquela bolha era o retrato
+// de um download impossível, tentado toda vez que alguém manda um álbum.
+//
+// Então ele não entra. As três fotos entram, que é o que a pessoa mandou.
+//
+// O QUE SE PERDE, e é de propósito: dá para reagir a um álbum INTEIRO no
+// WhatsApp, e essa reação aponta para o aviso. Sem a linha dele, ela não tem
+// onde se prender e fica registrada no log. Uma reação sem lugar é muito menos
+// ruim do que uma bolha vazia permanente em toda conversa que receba um álbum.
+function ehAvisoDeAlbum(m) {
+  if (!m) return false;
+  const tipo = String(m.messageType || '').toLowerCase();
+  const midia = String(m.mediaType || '').toLowerCase();
+  return tipo.includes('album') || midia === 'collection';
+}
+
+/** Quantas peças o aviso diz que vêm — só para o log dizer algo útil. */
+function quantasNoAlbum(m) {
+  const c = (m && m.content) || {};
+  const n = Number(c.expectedImageCount || 0) + Number(c.expectedVideoCount || 0);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function tipoCruNaoReconhecido(m) {
+  // O álbum já tem tratamento próprio: não é tipo desconhecido, é aviso
+  // conhecido. Sem isto, todo álbum recebido imprimiria no log um alerta de
+  // 800 caracteres pedindo investigação — e não há mais o que investigar.
+  if (ehAvisoDeAlbum(m)) return null;
   const mt = String(m.mediaType || m.messageType || m.type || '').trim();
   if (!mt) return null;                       // não anunciou tipo: não há o que registrar
   const b = mt.toLowerCase();
@@ -364,6 +410,11 @@ function previaMidiaHist(tipo) {
 function mapearMensagemHistorico(m, conversaId) {
   const idUazapi = m.messageid || m.id || (m.key && m.key.id) || null;
   if (!idUazapi) return null;
+  // O AVISO DE ÁLBUM TAMBÉM NÃO ENTRA POR AQUI. É a mesma mensagem lida por
+  // outra porta: importar o histórico de quem já mandou álbuns encheria a
+  // conversa das mesmas bolhas vazias que o webhook acabou de parar de criar.
+  // Duas leituras diferentes do mesmo evento é sempre uma delas errada.
+  if (ehAvisoDeAlbum(m)) return null;
   const fromMe = m.fromMe === true || (m.key && m.key.fromMe === true);
   const tipo = tipoDaMidiaHist(m);
   const texto = m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
@@ -1081,6 +1132,18 @@ app.post('/webhook', async (req, res) => {
       const reacao = extrairReacao(m);
       if (reacao) await aplicarReacao(reacao, m.fromMe ? 'advogado' : 'contato');
       else console.log('Reação sem alvo identificável; ignorada (nada foi gravado).');
+      return;
+    }
+
+    // AVISO DE ÁLBUM: não vira bolha. Ver `ehAvisoDeAlbum`, lá em cima.
+    //
+    // Aqui e não antes do contato: a chegada do álbum é o que faz a conversa
+    // subir na lista e o contato ser criado, e isso continua valendo. O que não
+    // pode acontecer é a LINHA.
+    if (ehAvisoDeAlbum(m)) {
+      const quantas = quantasNoAlbum(m);
+      console.log(`Aviso de álbum${quantas ? ` (${quantas} peças)` : ''} de ${contatoNumero}: `
+        + 'não vira bolha — cada foto chega como mensagem própria em seguida.');
       return;
     }
 
