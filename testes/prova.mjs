@@ -3702,5 +3702,69 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  O TOQUE QUE CHEGA NO MEIO DO CICLO NÃO PODE SER JOGADO FORA
+// ==================================================================
+//
+// Relato do escritório: "ao enviar mensagem tá demorando muito, fica só com um
+// relógio carregando".
+//
+// O painel toca a campainha da ponte a cada mensagem que entra na fila, para
+// ela despachar na hora em vez de esperar o `setInterval` de 3 segundos. Mas
+// `filaRodando` fazia a chamada voltar EM SILÊNCIO quando um ciclo já estava
+// rodando — e o toque se perdia.
+//
+// Três mensagens seguidas: a primeira acorda a fila e o ciclo começa; as duas
+// seguintes tocam enquanto ele roda, e os dois toques eram descartados. Elas só
+// saíam no próximo tique de 3 segundos. É esse o relóginho parado na bolha.
+//
+// A PROVA SEGURA O CICLO ABERTO de propósito: a falsa Uazapi demora 900 ms para
+// responder o envio. Nesse intervalo entra a segunda mensagem e toca de novo —
+// o toque que antes se perdia. Se ela sair logo depois do primeiro envio, o
+// toque foi aproveitado; se demorar até o tique, foi jogado fora.
+{
+  console.log("\nO toque perdido no meio do ciclo");
+  const t = await subirTudo({}, { uazapi: { demoraDoEnvio: 900 } });
+  t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente Teste" });
+  t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+  t.sb.dados.fila_envio.push({
+    id: 1, conversa_id: 1, tipo: "texto", texto: "PRIMEIRA", status: "pendente",
+    tentativas: 0, criado_em: new Date().toISOString(),
+  });
+
+  const comecou = Date.now();
+  await fetch(`http://127.0.0.1:${t.porta}/ping`);       // acorda: o ciclo começa
+  await espera(300);                                     // o ciclo está no meio do envio
+
+  // A SEGUNDA ENTRA AGORA, com o ciclo aberto — e toca a campainha.
+  t.sb.dados.fila_envio.push({
+    id: 2, conversa_id: 1, tipo: "texto", texto: "SEGUNDA", status: "pendente",
+    tentativas: 0, criado_em: new Date().toISOString(),
+  });
+  await fetch(`http://127.0.0.1:${t.porta}/ping`);       // o toque que antes se perdia
+
+  // Espera o suficiente para o primeiro envio terminar (900 ms) e o ciclo
+  // seguinte rodar — e NÃO o suficiente para o `setInterval` de 3 s salvar.
+  await espera(1500);
+  const quando = Date.now() - comecou;
+
+  const sairam = t.uaz.recebidas
+    .map((x) => (JSON.stringify(x.corpo).match(/(PRIMEIRA|SEGUNDA)/) || [])[1])
+    .filter(Boolean);
+  console.log(`     saíram ${JSON.stringify(sairam)} em ${quando} ms`);
+
+  ok("a primeira sai assim que a campainha toca",
+     sairam.includes("PRIMEIRA"), JSON.stringify(sairam));
+  // A CONFERÊNCIA QUE PEGA O DEFEITO. Antes, a segunda ficava esperando o
+  // tique de 3 segundos: aqui, em 1,8 s de janela, ela não tinha saído.
+  ok("e a segunda sai logo atrás, sem esperar o tique de 3 segundos",
+     sairam.includes("SEGUNDA"),
+     `saiu só ${JSON.stringify(sairam)} — o toque do meio do ciclo foi jogado fora`);
+  ok("e na ordem certa", sairam.join(",") === "PRIMEIRA,SEGUNDA",
+     `saiu ${JSON.stringify(sairam)}`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

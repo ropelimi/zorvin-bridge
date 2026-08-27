@@ -2081,6 +2081,18 @@ async function aplicarReacao(reacao, de) {
 //  painel quer enviar, e manda cada uma pela Uazapi.
 // ------------------------------------------------------------
 let filaRodando = false; // impede que dois ciclos processem a fila ao mesmo tempo
+// UM PEDIDO QUE CHEGA DURANTE O CICLO NÃO PODE SER JOGADO FORA.
+//
+// `filaRodando` fazia a chamada voltar em silêncio, e com isso o toque do
+// painel se perdia. Envie três mensagens seguidas: a primeira acorda a fila e
+// o ciclo começa; as duas seguintes tocam a campainha enquanto ele roda, e os
+// dois toques eram descartados. Elas só saíam no `setInterval` de 3 segundos —
+// e é isso que o escritório vê como o relóginho parado na bolha.
+//
+// Agora o toque perdido fica anotado, e o ciclo que estava rodando chama outro
+// assim que termina. Um só, por mais toques que tenham chegado: o ciclo seguinte
+// lê a fila inteira de qualquer jeito.
+let filaPedidaDeNovo = false;
 // ============================================================
 //  POR QUE A MENSAGEM NÃO SAIU — dito em português
 //
@@ -2225,7 +2237,7 @@ function avisarQueALinhaCaiu(bruto, numero, nome) {
 }
 
 async function processarFilaDeEnvio() {
-  if (filaRodando) return; // o ciclo anterior ainda não terminou
+  if (filaRodando) { filaPedidaDeNovo = true; return; } // fica anotado para o fim deste ciclo
   filaRodando = true;
   try {
     // Recuperação: se um item ficou preso em 'enviando' por mais de 5 min
@@ -2588,6 +2600,13 @@ async function processarFilaDeEnvio() {
     console.error('Erro ao processar fila:', e.message);
   } finally {
     filaRodando = false;
+    // Alguém tocou enquanto este ciclo rodava: vai mais um, agora. `setImmediate`
+    // para o ciclo atual terminar de sair da pilha antes — chamar aqui dentro
+    // faria a recursão crescer a cada toque, e um dia estourar.
+    if (filaPedidaDeNovo) {
+      filaPedidaDeNovo = false;
+      setImmediate(() => { processarFilaDeEnvio().catch(() => {}); });
+    }
   }
 }
 
