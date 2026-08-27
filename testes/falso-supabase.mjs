@@ -569,6 +569,13 @@ export function subirFalsaUazapi({
   // Com o botão, dá para MEDIR: quanto tempo passa entre o webhook chegar e a
   // mensagem existir no banco, que é o instante em que a bolha nasce na tela.
   demoraDoDownload = 0,
+  // QUANTO O ENVIO DEMORA A RESPONDER, em milissegundos.
+  //
+  // Serve para segurar um ciclo da fila aberto e ver o que acontece com um
+  // pedido que chega no MEIO dele. Com a bancada respondendo na hora, o ciclo
+  // começa e termina antes de qualquer outra coisa acontecer, e um toque
+  // perdido durante o ciclo não tem como aparecer em prova nenhuma.
+  demoraDoEnvio = 0,
 } = {}) {
   const recebidas = [];
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
@@ -582,6 +589,10 @@ export function subirFalsaUazapi({
       res.writeHead(codigo, { "Content-Type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+
+    if (demoraDoEnvio > 0 && /^\/send\//.test(url.pathname)) {
+      await new Promise((r) => setTimeout(r, demoraDoEnvio));
+    }
 
     if (falharEnvio && /^\/send\//.test(url.pathname)) {
       res.writeHead(falharEnvio.status || 400, { "Content-Type": "application/json" });
