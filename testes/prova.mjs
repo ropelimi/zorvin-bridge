@@ -818,9 +818,14 @@ const mensagemDaUazapi = (texto, id) => ({
 {
   console.log("\n9. Por que a mensagem não saiu");
 
-  /** Põe uma mensagem na fila, deixa a Uazapi recusar, e devolve a linha. */
-  async function tentarEnviar(falharEnvio) {
-    const t = await subirTudo({}, { uazapi: { falharEnvio } });
+  /** Põe uma mensagem na fila, deixa a Uazapi recusar, e devolve a linha.
+   *
+   *  `extra` serve para o caso em que a Uazapi não RECUSA: ela demora, e quem
+   *  desiste somos nós. Esse caminho precisa de um tempo limite curto, senão a
+   *  prova esperaria os 15 segundos de produção. */
+  async function tentarEnviar(falharEnvio, extra = {}) {
+    const t = await subirTudo(extra.env || {},
+                              { uazapi: { falharEnvio, ...(extra.uazapi || {}) } });
     t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
     t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
     t.sb.dados.fila_envio.push({
@@ -913,6 +918,75 @@ const mensagemDaUazapi = (texto, id) => ({
     ok("e o log avisa que apareceu um motivo novo",
        /MOTIVO DE ERRO NÃO RECONHECIDO/.test(registro),
        "sem esse aviso, a lista de motivos nunca aprende com o uso");
+  }
+
+  // ---- 9e. AS FORMAS QUE APARECERAM DE VERDADE NO BANCO DO ESCRITÓRIO ----
+  //
+  // Não são exemplos inventados: saíram de uma varredura dos 238 erros
+  // guardados no banco, agrupados pela forma do texto cru. Eram estas as seis
+  // que chegavam à tela SEM tradução — 193 bolhas vermelhas mostrando JSON em
+  // inglês para quem atende.
+  //
+  // Cinco o Zorvin já entendia: os registros eram antigos, de antes de a lista
+  // ter aprendido essas frases (a última de cada grupo é de 12 a 18 de agosto,
+  // e a varredura é de 28). Sobra uma, e ela estava VIVA — a mais recente de
+  // todas, de ontem.
+  //
+  // Ficam aqui as seis, e não só a que faltava. Uma lista de motivos cresce
+  // quando alguém acrescenta uma linha, e é fácil acrescentar uma linha que
+  // apaga outra: `/abort/` no lugar de `/aborterror/` é exatamente o tipo de
+  // alargamento que poderia engolir um caso vizinho. Estas são as formas que o
+  // escritório vive, e agora elas se defendem sozinhas.
+  {
+    const DO_BANCO = [
+      { quantas: 125, nome: "número não tem WhatsApp",
+        falha: { status: 500, corpo: { error: "the number 5511991777483@s.whatsapp.net is not on WhatsApp" } },
+        espera: /conta no WhatsApp|escrito errado/i },
+      { quantas: 49, nome: "linha caída, sessão não reconectável",
+        falha: { status: 503, corpo: { error: true, message: "WhatsApp disconnected: session is not reconnectable" } },
+        espera: /desconectada|reconectar/i },
+      { quantas: 16, nome: "linha caída, sem detalhe",
+        falha: { status: 503, corpo: { error: true, message: "WhatsApp disconnected" } },
+        espera: /desconectada|reconectar/i },
+      { quantas: 1, nome: "whatsmeow não inicializado",
+        falha: { status: 500, corpo: { error: "error sending message after 2 attempts: whatsmeow client not initialized" } },
+        espera: /daqui a pouco|reenviar/i },
+      { quantas: 1, nome: "cliente do WhatsApp desconectado",
+        falha: { status: 500, corpo: { error: "WhatsApp client is not connected" } },
+        espera: /desconectada|reconectar/i },
+    ];
+    for (const caso of DO_BANCO) {
+      const { linha } = await tentarEnviar(caso.falha);
+      ok(`traduz o que apareceu ${String(caso.quantas).padStart(3)}x — ${caso.nome}`,
+         caso.espera.test(linha?.erro_motivo || ""),
+         `veio: ${JSON.stringify(linha?.erro_motivo)} (cru: ${JSON.stringify(linha?.erro_detalhe)})`);
+    }
+
+    // A SEXTA, E A ÚNICA QUE AINDA ESTAVA VIVA: o nosso próprio tempo limite.
+    //
+    // Aqui a Uazapi não recusa nada — ela DEMORA, e quem desiste somos nós. O
+    // Node anuncia isso como "This operation was aborted", sem o "error"
+    // colado; o filtro procurava `aborterror`, que é o NOME DA CLASSE e não o
+    // texto da mensagem. Resultado na tela da advogada: "This operation was
+    // aborted", em inglês, sem nada a fazer com aquilo.
+    //
+    // Este caminho nunca tinha sido provado, e não por descuido: com o tempo
+    // limite fixo em 15 segundos, prová-lo custava 15 segundos de espera. Ele
+    // passou a vir de `UAZAPI_TIMEOUT_MS`, e a bancada o baixa para 300 ms.
+    {
+      const { linha } = await tentarEnviar(null, {
+        env: { UAZAPI_TIMEOUT_MS: "300" },
+        uazapi: { demoraDoEnvio: 1500 },
+      });
+      ok("a Uazapi que demora demais vira erro, e não fica pendurada",
+         linha?.status === "erro", `ficou ${linha?.status}`);
+      ok("traduz o nosso próprio tempo limite — era a única forma ainda viva",
+         /não respondeu a tempo|nao respondeu a tempo/i.test(linha?.erro_motivo || ""),
+         `veio: ${JSON.stringify(linha?.erro_motivo)} (cru: ${JSON.stringify(linha?.erro_detalhe)})`);
+      ok("e o texto técnico continua guardado à parte",
+         /abort/i.test(linha?.erro_detalhe || ""),
+         `veio: ${JSON.stringify(linha?.erro_detalhe)}`);
+    }
   }
 }
 
