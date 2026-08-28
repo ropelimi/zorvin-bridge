@@ -4465,18 +4465,39 @@ async function rodada() {
   }
 }
 
+// UM TROPEÇO NÃO PARA A RODADA — MAS APARECE NO LOG.
+//
+// Eram quatro `.catch(() => {})`. A intenção estava certa: o departamento que
+// falha não pode impedir a permissão de ser aplicada. O preço é que um erro
+// INESPERADO dentro de qualquer uma das quatro — a rede caindo no meio da
+// chamada ao Vantoro, por exemplo — sumia sem deixar rastro. As quatro tratam
+// os erros que esperam e escrevem no log; só os que não esperam eram engolidos,
+// e são justamente esses que a gente precisa ver.
+//
+// Foi assim que "a conexão com o Vantoro não está funcionando" chegou como
+// relato de tela, e não como linha de log: o painel via a falha, a ponte
+// tentava de três em três minutos, e o log não tinha uma palavra sobre o
+// assunto para dizer de que lado estava o problema.
+async function semDerrubarARodada(nome, tarefa) {
+  try {
+    await tarefa();
+  } catch (e) {
+    console.error(`Rodada: ${nome} tropeçou — ${e?.message || e}`);
+  }
+}
+
 async function umaRodada() {
   // A ordem importa: o telefone precisa ter departamento ANTES de a permissão
   // ser conferida, senão a primeira rodada aplica permissão que ainda não
   // alcança conversa nenhuma.
-  await garantirDepartamentoDosTelefones().catch(() => {});
-  await mandarDepartamentosAoVantoro().catch(() => {});
+  await semDerrubarARodada('departamento dos telefones', garantirDepartamentoDosTelefones);
+  await semDerrubarARodada('departamentos para o Vantoro', mandarDepartamentosAoVantoro);
   // Os telefones vão DEPOIS dos departamentos: a tela de permissões mostra a que
   // departamento cada número pertence, e para isso o departamento já tem de
   // existir lá. Na ordem inversa, a primeira sincronização mostraria os números
   // soltos, e quem marcasse ali não veria que já estavam cobertos.
-  await mandarTelefonesAoVantoro().catch(() => {});
-  await sincronizarPermissoes().catch(() => {});
+  await semDerrubarARodada('telefones para o Vantoro', mandarTelefonesAoVantoro);
+  await semDerrubarARodada('permissões', sincronizarPermissoes);
 }
 setTimeout(() => { rodada().catch(() => {}); }, 20 * 1000).unref();
 setInterval(() => { rodada().catch(() => {}); }, PERMISSOES_INTERVALO_MS).unref();
