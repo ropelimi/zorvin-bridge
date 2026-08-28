@@ -3766,5 +3766,59 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  QUANDO NÃO HÁ RESPOSTA NENHUMA, A TELA TEM DE SABER POR QUÊ
+// ==================================================================
+//
+// Relato do escritório, com a tela do celular: a ficha do cliente mostrava
+// "Não foi possível falar com o Vantoro agora." e nada mais.
+//
+// Essa frase era a MESMA para três coisas diferentes: o serviço do Vantoro
+// dormindo, o endereço dele escrito errado, e a internet do celular oscilando.
+// Três causas, três consertos, uma frase só — e quem atende não tem acesso ao
+// log da hospedagem para desempatar.
+//
+// A ponte já sabia explicar o que o Vantoro RESPONDE (página HTML, 401, 404…).
+// O que faltava era o caso em que não houve resposta nenhuma: a exceção era
+// engolida e virava a frase genérica.
+//
+// AQUI A CONEXÃO É RECUSADA, que é o caso de serviço parado ou suspenso — e é
+// rápido de provar. Um endereço que aceita e nunca responde já tem prova
+// própria mais acima (a da entrada que não fica pendurada).
+{
+  console.log("\nO Vantoro sem resposta explica o que houve");
+
+  // Uma porta onde ninguém atende. Sobe e desce um servidor só para pegar um
+  // número de porta que com certeza está livre.
+  const efemero = http.createServer(() => {});
+  await new Promise((r) => efemero.listen(0, "127.0.0.1", r));
+  const portaMorta = efemero.address().port;
+  await new Promise((r) => efemero.close(r));
+  const urlMorta = `http://127.0.0.1:${portaMorta}`;
+
+  const t = await subirTudo({ VANTORO_API_URL: urlMorta, VANTORO_API_TOKEN: "tok" });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+    { headers: { Authorization: "Bearer jwt-bom" } });
+  const corpo = await r.json().catch(() => ({}));
+  console.log(`     veio ${r.status}: ${JSON.stringify(corpo.erro || corpo).slice(0, 120)}`);
+
+  ok("responde, em vez de ficar pendurada", r.status >= 400 && r.status < 600,
+     `veio ${r.status}`);
+  // A CONFERÊNCIA QUE PEGA O DEFEITO: a frase não pode ser a genérica.
+  ok("e a frase NÃO é a genérica de sempre",
+     !/^Não foi possível falar com o Vantoro agora\.$/.test(corpo.erro || ""),
+     `veio "${corpo.erro}" — a mesma frase para toda causa não ajuda ninguém`);
+  ok("ela diz que a conexão foi recusada, que é serviço parado",
+     /recusou a conexão|parado|suspenso/i.test(corpo.erro || ""),
+     `veio "${corpo.erro}"`);
+  // E NÃO PODE VAZAR O TOKEN. A frase vai para a tela de quem atende, e a tela
+  // é do lado de lá — qualquer um que abra o inspecionar lê o que estiver ali.
+  ok("e não deixa escapar o token do Vantoro",
+     !/tok\b|Bearer/i.test(JSON.stringify(corpo)),
+     JSON.stringify(corpo).slice(0, 200));
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

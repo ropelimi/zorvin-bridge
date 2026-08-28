@@ -3011,6 +3011,43 @@ function explicarRespostaNaoJson(status, cru) {
        + `"${texto.slice(0, 160)}${texto.length > 160 ? '…' : ''}"`;
 }
 
+// A CHAMADA QUE NEM CHEGOU A TER RESPOSTA — dita em português.
+//
+// `explicarRespostaNaoJson`, acima, traduz o que o Vantoro RESPONDEU. Mas há o
+// caso em que não houve resposta nenhuma: o tempo estourou, o endereço não
+// resolveu, a conexão caiu no meio. Aí a exceção era engolida e o painel
+// mostrava sempre a mesma frase — "Não foi possível falar com o Vantoro agora."
+//
+// Relato do escritório, com a tela na mão: era isso que aparecia, e não havia
+// como saber se o serviço estava dormindo, se o endereço estava errado ou se a
+// internet do celular tinha oscilado. Três causas, três consertos, uma frase só.
+//
+// O motivo fica NA TELA, e não só no log da hospedagem: quem atende não tem
+// acesso ao log, e é ele quem precisa decidir se insiste ou se chama alguém.
+function explicarFalhaDaChamada(e) {
+  const msg = String((e && e.message) || e || '');
+  const nome = String((e && e.name) || '');
+  const causa = String((e && e.cause && e.cause.code) || '');
+
+  // O tempo estourou. No plano gratuito da Render o serviço hiberna e a
+  // primeira chamada pode levar quase um minuto para acordá-lo.
+  if (nome === 'AbortError' || /abort|timeout|timed out/i.test(msg)) {
+    return 'O Vantoro não respondeu a tempo. Costuma ser o serviço dele acordando '
+         + 'depois de um tempo parado — espere uns segundos e tente de novo.';
+  }
+  // O endereço não existe ou não resolve.
+  if (causa === 'ENOTFOUND' || /getaddrinfo|ENOTFOUND|dns/i.test(msg)) {
+    return 'Não achei o endereço do Vantoro na internet. O serviço pode ter mudado '
+         + 'de endereço, ou VANTORO_API_URL está escrito errado.';
+  }
+  // A conexão foi recusada ou caiu.
+  if (causa === 'ECONNREFUSED' || causa === 'ECONNRESET' || /refused|reset|socket/i.test(msg)) {
+    return 'O endereço do Vantoro existe, mas recusou a conexão. Normalmente é o '
+         + 'serviço parado ou suspenso na hospedagem.';
+  }
+  return `Não consegui falar com o Vantoro: ${msg.slice(0, 160) || 'motivo desconhecido'}.`;
+}
+
 // Envolve cada rota: CORS + login + tratamento de erro, sem repetir código.
 function rotaVantoro(handler) {
   return async (req, res) => {
@@ -3021,8 +3058,9 @@ function rotaVantoro(handler) {
       const { status, corpo } = await handler(req, usuario);
       res.status(status).json(corpo);
     } catch (e) {
-      console.error('vantoro:', (e && e.message) || e);
-      res.status(502).json({ ok: false, erro: 'Não foi possível falar com o Vantoro agora.' });
+      const erro = explicarFalhaDaChamada(e);
+      console.error('vantoro:', erro, '|', (e && e.message) || e);
+      res.status(502).json({ ok: false, erro });
     }
   };
 }
