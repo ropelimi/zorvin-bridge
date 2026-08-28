@@ -35,11 +35,27 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// UM TETO PARA O TEMPO LIMITE, E ISSO É O QUE TORNA O CAMINHO TESTÁVEL.
+//
+// O caminho do tempo esgotado nunca tinha sido provado, e não por descuido:
+// os limites vão de 8 a 45 segundos, e prová-lo custava esperar por eles. Um
+// caminho que nenhuma prova exercita é onde um defeito mora à vontade — e
+// morava: o Node anuncia o tempo esgotado como "This operation was aborted", a
+// lista de motivos procurava `aborterror` (que é o NOME DA CLASSE, não o texto
+// da mensagem), e a bolha vermelha mostrava inglês cru para quem atende.
+//
+// É um TETO, e não um padrão, de propósito: as chamadas passam o limite delas
+// explicitamente (o envio pede 45 s, o JWKS 8 s), e um padrão não alcançaria
+// nenhuma delas. Sem a variável definida — que é o caso em produção — o teto
+// não existe e nada muda.
+const UAZAPI_TETO_MS = Number(process.env.UAZAPI_TIMEOUT_MS) || 0;
+
 // fetch com timeout: evita que uma chamada à Uazapi fique pendurada e
 // segure a fila. Aborta após `ms` milissegundos.
 async function fetchComTimeout(url, opts = {}, ms = 15000) {
+  const limite = UAZAPI_TETO_MS ? Math.min(ms, UAZAPI_TETO_MS) : ms;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
+  const t = setTimeout(() => ctrl.abort(), limite);
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally {
@@ -2146,7 +2162,19 @@ function motivoDoErro(bruto) {
   }
 
   // ---- 2. conexão: também vem do nosso lado, e é certo ----
-  if (/demorou demais|aborterror|timeout|etimedout|econnaborted/.test(t)) {
+  // `abort` SOLTO, e não só `aborterror`. Foi o que faltava.
+  //
+  // Quando o nosso tempo limite estoura, quem lança é o próprio Node, e a
+  // frase dele é "This operation was aborted" — sem o "error" colado. O filtro
+  // procurava `aborterror`, que é o NOME da classe, e não o texto da mensagem;
+  // então o tempo limite do Zorvin caía no desconhecido e a bolha vermelha
+  // mostrava "This operation was aborted" em inglês para uma advogada.
+  //
+  // Achado varrendo os 238 erros do banco do escritório: das seis formas de
+  // erro que apareciam sem tradução, cinco já eram entendidas — eram registros
+  // antigos, de antes de a lista aprendê-las. Esta era a única viva, e era a
+  // mais recente de todas.
+  if (/demorou demais|abort|timeout|etimedout/.test(t)) {
     return 'O servidor do WhatsApp não respondeu a tempo. Toque em reenviar daqui a pouco.';
   }
   if (/fetch failed|enotfound|econnrefused|econnreset|network|socket hang up/.test(t)) {
