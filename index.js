@@ -169,6 +169,48 @@ async function juntarConversasDoGrupo(advId, chave, jidDigitos, nome) {
                 + 'para não misturar grupos diferentes de mesmo nome.');
     }
   }
+  // ------------------------------------------------------------
+  //  A PESSOA QUE FICOU COM O NOME DO GRUPO — ISTO SÓ AVISA
+  //
+  //  Relato do escritório, com print: quatro conversas na lista, todas
+  //  chamadas "Edifício Nova Brasília". A consulta ao banco mostrou o que
+  //  eram: UMA com a chave certa do grupo, e quatro com TELEFONE DE GENTE,
+  //  todas de 28/07 — de antes do conserto, uma por participante.
+  //
+  //  A ponte de antes escrevia o nome do CHAT no contato, e num grupo o nome do
+  //  chat é o nome do grupo. Sobraram quatro pessoas reais carregando o nome de
+  //  um prédio — e se alguma escrever no particular, a conversa dela aparece
+  //  com esse nome.
+  //
+  //  POR QUE ISTO NÃO CONSERTA SOZINHO, e são duas razões independentes:
+  //
+  //    JUNTAR AS CONVERSAS seria mover histórico. As mensagens de julho foram
+  //    gravadas pelo caminho de "uma pessoa só", então nem têm o `enviado_por`
+  //    que marca quem falou no grupo: não existe, no banco, sinal que separe
+  //    "esta era do grupo" de "esta era particular". Mover às cegas poderia pôr
+  //    a conversa privada de alguém dentro do grupo, e isso não se desfaz.
+  //
+  //    LIMPAR O NOME parece inofensivo e não é. A regra seria "contato com
+  //    telefone de gente e nome igual ao do grupo" — e um grupo chamado
+  //    "Rodrigo" apagaria o nome do Rodrigo de verdade. Aqui não há como
+  //    distinguir, e apagar nome de cadastro por regra genérica é o tipo de
+  //    conserto que se descobre tarde.
+  //
+  //  Então isto AVISA, com nome e número, e quem decide é gente. O aviso sai
+  //  uma vez por grupo, quando a mensagem chega.
+  if (nome) {
+    const { data: homonimos } = await supabase
+      .from('contatos').select('id, numero, nome')
+      .eq('nome', nome).not('numero', 'like', 'grupo:%');
+    for (const c of homonimos || []) {
+      console.log(`Grupo "${nome}": ATENÇÃO — o contato ${c.numero} é um TELEFONE DE PESSOA `
+                + 'com o nome deste grupo. Veio de uma conversa criada antes do conserto de '
+                + 'grupos. As mensagens dele NÃO foram movidas (não dá para saber quais eram '
+                + 'do grupo); o nome NÃO foi apagado (poderia ser o nome real de alguém). '
+                + 'Confira e corrija o cadastro à mão.');
+    }
+  }
+
   const antigos = candidatos.filter((c) => c.numero !== chave);
   if (!antigos.length) return;
 
