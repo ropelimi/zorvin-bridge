@@ -3894,5 +3894,48 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ---------------------------------------------------------------------------
+//  O PAPEL DO PRÉ-CADASTRO CHEGA INTEIRO AO VANTORO
+//
+//  Pedido do escritório: "ao fazer o pré-cadastro do Lead pelo Zorvin, precisa
+//  ter a opção de cliente ou réu". A escolha é feita no painel e decide, do
+//  outro lado, se nasce uma ORDEM DE SERVIÇO — trabalho de gente.
+//
+//  A ponte é a única coisa entre os dois. Hoje ela repassa o corpo inteiro, o
+//  que é a coisa certa a fazer: uma lista de campos permitidos aqui dentro
+//  significaria que todo campo novo do cadastro precisa ser lembrado em DOIS
+//  repositórios, e o esquecimento não dá erro nenhum — o campo simplesmente
+//  some no caminho, e o cadastro nasce errado sem ninguém saber.
+//
+//  Esta conferência existe para que esse dia não chegue calado.
+{
+  console.log("\nO pré-cadastro leva o papel (cliente ou réu) até o Vantoro");
+
+  for (const papel of ["cliente", "contraria"]) {
+    const t = await subirTudo({}, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente`, {
+      method: "POST",
+      headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify({ nome: "Fulano de Tal", telefone: "5511999998888",
+                             cpf: "", papel }),
+    });
+    // TODOS os POSTs que o Vantoro recebeu: a ponte chama "/clientes" lá
+    // dentro, e filtrar pelo endereço DELA daria zero — uma conferência que
+    // passa sem olhar nada.
+    const posts = t.van.recebidas.filter((x) => x.metodo === "POST");
+    const corpo = (posts[0] && posts[0].corpo) || {};
+    ok(`o cadastro chegou ao Vantoro (papel=${papel})`, posts.length === 1,
+       `recebeu ${posts.length} POSTs`);
+    ok(`e com papel="${papel}" dentro`, corpo.papel === papel,
+       `chegou papel=${JSON.stringify(corpo.papel)} — corpo: ${JSON.stringify(corpo).slice(0, 200)}`);
+    // O RESTO DO CORPO TAMBÉM. Um repasse que perde o nome no caminho cria um
+    // cadastro "Sem nome", que é um cliente que ninguém acha na busca.
+    ok("e sem perder o nome nem o telefone",
+       corpo.nome === "Fulano de Tal" && String(corpo.telefone) === "5511999998888",
+       JSON.stringify(corpo).slice(0, 200));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
