@@ -464,6 +464,71 @@ function previaMidiaHist(tipo) {
   if (tipo === 'documento') return '📄 Documento';
   return '';
 }
+// ------------------------------------------------------------
+//  O HORÁRIO DA BOLHA É O DE QUEM ENVIOU — E NÃO O DE QUANDO GRAVAMOS
+//
+//  Relato de 02/09, com dois prints: no grupo com dois telefones nossos, a
+//  mesma discussão aparecia com horários DIFERENTES em cada telefone.
+//
+//  A causa: o caminho do webhook nunca preenchia `criado_em`. A coluna tem
+//  `now()` por padrão, então o que a equipe lia como "a hora da mensagem" era
+//  na verdade A HORA EM QUE O NOSSO SERVIDOR GRAVOU. Dois telefones no mesmo
+//  grupo recebem o mesmo texto em dois instantes ligeiramente diferentes — daí
+//  o minuto de diferença.
+//
+//  E O GRUPO É SÓ ONDE ISSO FICOU VISÍVEL. A ponte roda no plano free do
+//  Render, que DORME. Quando ela acorda, a fila de webhooks entra toda de uma
+//  vez — e uma mensagem enviada às 09h12 pode ser gravada, e mostrada, às
+//  09h30. Numa conversa de prazo, a hora errada não é enfeite.
+//
+//  A importação de histórico JÁ gravava o horário certo. Ou seja: a mesma
+//  conversa misturava dois significados de "hora" conforme a mensagem tivesse
+//  vindo pelo webhook ou pela releitura — e a ordem das bolhas saía trocada.
+//  Por isso os dois caminhos passam a usar ESTA função, e não duas cópias.
+//
+//  OS LIMITES DE SANIDADE existem porque o horário vem do RELÓGIO DO APARELHO
+//  de quem enviou, e relógio de celular erra. Um ano à frente fixaria a
+//  mensagem no topo da conversa para sempre; um de 1970, no fundo. Fora da
+//  faixa, o horário é descartado e vale o `now()` de antes — que é impreciso,
+//  mas nunca absurdo.
+// ------------------------------------------------------------
+const HORARIO_MINIMO = Date.UTC(2020, 0, 1);       // antes disto, o Zorvin não existia
+const FOLGA_DE_RELOGIO = 5 * 60 * 1000;            // 5 min adiantado ainda passa
+
+function horarioDeQuemEnviou(m) {
+  if (!m) return null;
+  const cru = m.messageTimestamp || m.timestamp || m.momment || m.t || null;
+  if (!cru) return null;
+  let ts = Number(cru);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  if (ts < 1e12) ts = ts * 1000;                   // veio em segundos
+  if (ts < HORARIO_MINIMO) return null;
+  if (ts > Date.now() + FOLGA_DE_RELOGIO) return null;
+  return new Date(ts).toISOString();
+}
+
+// SE O WEBHOOK NÃO TROUXER HORÁRIO, O LOG DIZ — UMA VEZ POR HORA.
+//
+// O corpo do webhook da Uazapi não está documentado campo a campo, e eu não
+// tenho uma captura de tráfego real para afirmar que `messageTimestamp` vem
+// sempre. Se não vier, o comportamento é EXATAMENTE o de antes (o `now()` do
+// banco) — nada quebra, e nada melhora. O que não pode é isso acontecer em
+// silêncio, porque aí a suposição vira verdade sem ninguém ter medido.
+//
+// Uma vez por hora, e com os nomes das chaves do corpo: é o suficiente para
+// saber COMO o horário se chama de verdade, sem encher o log do Render (que no
+// plano free é o único lugar onde se enxerga o que a ponte faz).
+let ultimoAvisoDeHorario = 0;
+function avisarQueOWebhookNaoTrazHorario(m) {
+  const agora = Date.now();
+  if (agora - ultimoAvisoDeHorario < 60 * 60 * 1000) return;
+  ultimoAvisoDeHorario = agora;
+  const chaves = m && typeof m === 'object' ? Object.keys(m).join(', ') : '(sem corpo)';
+  console.log(
+    'O webhook veio SEM horário de envio, então a mensagem fica com a hora em que gravamos. '
+    + `Campos que a Uazapi mandou: ${chaves}`);
+}
+
 // Converte uma mensagem do /message/find no formato da nossa tabela "mensagens".
 function mapearMensagemHistorico(m, conversaId) {
   const idUazapi = m.messageid || m.id || (m.key && m.key.id) || null;
@@ -478,8 +543,6 @@ function mapearMensagemHistorico(m, conversaId) {
   const texto = m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
   const midiaUrl = m.fileURL || m.mediaUrl || m.url || null;
   const midiaMime = m.mimetype || (m.content && m.content.mimetype) || null;
-  // Horário original: pode vir em segundos ou milissegundos.
-  let ts = m.messageTimestamp || m.timestamp || m.momment || m.t || null;
   const linha = {
     conversa_id: conversaId,
     origem: fromMe ? 'advogado' : 'contato',
@@ -490,13 +553,8 @@ function mapearMensagemHistorico(m, conversaId) {
     id_uazapi: idUazapi,
     status: fromMe ? 'enviada' : 'recebida',
   };
-  if (ts) {
-    ts = Number(ts);
-    if (ts > 0) {
-      if (ts < 1e12) ts = ts * 1000; // segundos -> ms
-      linha.criado_em = new Date(ts).toISOString();
-    }
-  }
+  const quando = horarioDeQuemEnviou(m);
+  if (quando) linha.criado_em = quando;
   return linha;
 }
 
@@ -1324,6 +1382,11 @@ app.post('/webhook', async (req, res) => {
       id_uazapi: m.messageid,
       status: origem === 'contato' ? 'recebida' : 'enviada'
     };
+    // O HORÁRIO DE QUEM ENVIOU, quando ele vem. Sem isto a coluna cai no
+    // `now()` do banco — a hora em que NÓS gravamos, que é outra coisa.
+    const quandoFoiEnviada = horarioDeQuemEnviou(m);
+    if (quandoFoiEnviada) base.criado_em = quandoFoiEnviada;
+    else avisarQueOWebhookNaoTrazHorario(m);
     // Mensagem "fromMe" que chega pelo webhook (e não é eco de envio pela API,
     // que já foi ignorado acima) = foi enviada DIRETO pelo WhatsApp (app do
     // celular ou desktop), fora do Zorvin. Não sabemos qual atendente foi, então

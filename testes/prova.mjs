@@ -4026,5 +4026,175 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  35. O HORÁRIO DA BOLHA É O DE QUEM ENVIOU
+// ==================================================================
+//
+// O segundo defeito dos mesmos dois prints de 02/09: no grupo com dois
+// telefones nossos, a mesma discussão aparecia com HORÁRIOS DIFERENTES em cada
+// telefone.
+//
+// A causa: o caminho do webhook nunca preenchia `criado_em`, e a coluna tem
+// `now()` por padrão — então a "hora da mensagem" era a hora em que NÓS
+// gravamos. Dois telefones recebem o mesmo texto em dois instantes
+// ligeiramente diferentes: daí o minuto de diferença.
+//
+// E O GRUPO FOI SÓ ONDE ISSO FICOU VISÍVEL. A ponte roda no plano free do
+// Render, que DORME: quando acorda, a fila de webhooks entra toda de uma vez, e
+// uma mensagem enviada às 09h12 é carimbada 09h30. Num escritório que trabalha
+// com prazo, a hora errada não é enfeite.
+//
+// O FALSO SUPABASE NÃO PREENCHE PADRÃO DE COLUNA, e é isso que torna esta
+// prova legível: linha COM `criado_em` = a ponte gravou o horário de quem
+// enviou; linha SEM = ela deixou para o `now()` do banco, que é o defeito.
+{
+  console.log("\n35. O horário da bolha é o de quem enviou");
+
+  const QUARENTA_MIN = 40 * 60 * 1000;
+  const chegando = (id, ts) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageType: "conversation", type: "text", text: "chegou atrasada",
+      wasSentByApi: false, senderName: "Cliente Teste",
+      ...(ts === undefined ? {} : { messageTimestamp: ts }),
+    },
+  });
+
+  const t = await subirTudo();
+  const mandar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const achar = (id) => t.sb.dados.mensagens.find((m) => m.id_uazapi === id);
+
+  // 1) O CASO DE TODO DIA: o WhatsApp conta o tempo EM SEGUNDOS, e a ponte tem
+  //    de multiplicar antes de gravar. Sem isso o horário viraria 1970 e a
+  //    mensagem afundaria no começo da conversa.
+  const enviadaEm = Date.now() - QUARENTA_MIN;
+  await mandar(chegando("ts-1", Math.floor(enviadaEm / 1000)));
+  await espera(600);
+  const comHora = achar("ts-1");
+  ok("a mensagem guarda o horário que veio no webhook",
+     !!(comHora && comHora.criado_em), JSON.stringify(comHora));
+  // A FOLGA É DE UM SEGUNDO, e é só o arredondamento dos segundos. Uma folga
+  // larga aqui deixaria passar justamente o defeito: o `now()` está a QUARENTA
+  // MINUTOS de distância, não a um segundo.
+  const distancia = comHora && comHora.criado_em
+    ? Math.abs(new Date(comHora.criado_em).getTime() - enviadaEm) : Infinity;
+  ok("e é o de QUEM ENVIOU, não o de quando gravamos",
+     distancia < 1000, `ficou a ${Math.round(distancia / 1000)}s do horário enviado`);
+
+  // 2) EM MILISSEGUNDOS TAMBÉM. Os dois formatos chegam no mesmo campo, e
+  //    tratar só um deles erra por um fator de mil — isto é, por décadas.
+  const outroEnvio = Date.now() - QUARENTA_MIN;
+  await mandar(chegando("ts-2", outroEnvio));
+  await espera(600);
+  const emMili = achar("ts-2");
+  const distMili = emMili && emMili.criado_em
+    ? Math.abs(new Date(emMili.criado_em).getTime() - outroEnvio) : Infinity;
+  ok("o horário em milissegundos vale igual", distMili < 1000, JSON.stringify(emMili));
+
+  // 3) RELÓGIO DE CELULAR ERRA, e horário absurdo é pior que horário nenhum: um
+  //    ano à frente prega a mensagem no topo da conversa PARA SEMPRE. Fora da
+  //    faixa, a ponte desiste dele e deixa valer o `now()` do banco — impreciso,
+  //    mas nunca absurdo.
+  await mandar(chegando("ts-3", Math.floor(Date.UTC(2999, 0, 1) / 1000)));
+  await mandar(chegando("ts-4", 1));
+  await espera(700);
+  ok("um horário no ano 2999 é descartado (senão a mensagem gruda no topo)",
+     !!achar("ts-3") && achar("ts-3").criado_em === undefined,
+     JSON.stringify(achar("ts-3")));
+  ok("e um de 1970 também (senão ela afunda no começo)",
+     !!achar("ts-4") && achar("ts-4").criado_em === undefined,
+     JSON.stringify(achar("ts-4")));
+
+  // 4) SEM HORÁRIO, NADA QUEBRA — E O LOG DIZ.
+  //
+  //    O corpo do webhook da Uazapi não está documentado campo a campo, e não
+  //    tenho captura de tráfego real que prove que `messageTimestamp` vem
+  //    sempre. Se não vier, o comportamento é exatamente o de antes. O que não
+  //    pode é isso valer em silêncio — aí a minha suposição viraria verdade sem
+  //    ninguém ter medido. Então o log conta QUAIS campos a Uazapi mandou.
+  await mandar(chegando("ts-5", undefined));
+  await espera(600);
+  ok("sem horário no webhook, a mensagem entra do mesmo jeito",
+     !!achar("ts-5"), JSON.stringify(t.sb.dados.mensagens.map((m) => m.id_uazapi)));
+  ok("e o log diz que ficou com a hora da gravação, e com os campos que chegaram",
+     t.registro.join("").includes("SEM horário de envio")
+     && t.registro.join("").includes("messageid"),
+     t.registro.join("").slice(-400));
+
+  await t.parar();
+}
+
+// ==================================================================
+//  36. O MESMO MINUTO NOS DOIS TELEFONES DO GRUPO
+// ==================================================================
+//
+// A junção das duas correções: a mensagem de grupo agora existe nas duas
+// caixas (34), e as duas mostram O MESMO HORÁRIO (35). É literalmente o print
+// que o escritório mandou — a mesma frase, dois relógios diferentes.
+//
+// A pausa entre uma entrega e outra é DE PROPÓSITO, e larga: é ela que fabrica
+// o defeito. Com `now()`, um segundo de diferença entre os dois webhooks vira
+// um segundo de diferença na tela; a espera aqui garante que a conferência
+// falharia se a correção saísse.
+{
+  console.log("\n36. O mesmo minuto nos dois telefones do grupo");
+
+  const SEGUNDO = { id: "adv-2", nome: "Estratégico", numero: "5511976299371",
+                    token: "tok-2", servidor: null, ativo: true, departamento_id: 1 };
+  const GRUPO = "120363000000000001@g.us";
+  const ENVIADA_EM = Date.now() - 10 * 60 * 1000;
+
+  const doGrupo = (dono) => ({
+    EventType: "messages",
+    owner: dono,
+    chat: { id: GRUPO, name: "Suporte Legal Mail", isGroup: true },
+    message: {
+      id: "grp-hora", messageid: "grp-hora", chatid: GRUPO, isGroup: true,
+      sender: "5511988887777@s.whatsapp.net", fromMe: false,
+      messageType: "conversation", text: "podemos excluir essa regra?",
+      content: "podemos excluir essa regra?",
+      messageTimestamp: Math.floor(ENVIADA_EM / 1000),
+      wasSentByApi: false, senderName: "Eduarda Chirov",
+    },
+  });
+
+  const t = await subirTudo({}, { tabelas: { advogados: [{ ...TELEFONE }, { ...SEGUNDO }] } });
+  SEGUNDO.servidor = TELEFONE.servidor;
+  const mandar = (dono) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doGrupo(dono)),
+  });
+
+  await mandar(TELEFONE.numero);
+  await espera(1200);            // o intervalo que produzia relógios diferentes
+  await mandar(SEGUNDO.numero);
+  await espera(900);
+
+  const copias = t.sb.dados.mensagens.filter((m) => m.id_uazapi === "grp-hora");
+  ok("a mensagem está nas duas caixas", copias.length === 2, `ficaram ${copias.length}`);
+  // O `criado_em` TEM DE EXISTIR, e não só ser igual dos dois lados. Sem esta
+  // metade a conferência PASSAVA com o conserto desligado — as duas linhas
+  // ficavam sem a coluna, e `undefined === undefined` é igual. Foi a sabotagem
+  // que mostrou isso: no banco de verdade o `now()` daria dois valores
+  // diferentes, mas a bancada não preenche padrão, e a prova lia o vazio como
+  // acerto.
+  ok("e as duas marcam o MESMO horário",
+     copias.length === 2 && !!copias[0].criado_em
+     && copias[0].criado_em === copias[1].criado_em,
+     JSON.stringify(copias.map((m) => m.criado_em)));
+  ok("que é o horário em que a pessoa escreveu",
+     copias.length === 2
+     && Math.abs(new Date(copias[0].criado_em).getTime() - ENVIADA_EM) < 1000,
+     JSON.stringify(copias.map((m) => m.criado_em)));
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
