@@ -4196,5 +4196,188 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  37. O RESGATE: RELER O HISTÓRICO DE UM GRUPO
+// ==================================================================
+//
+// Consertar a gravação (#126) impede o buraco novo; não devolve o antigo. As
+// mensagens descartadas nunca foram gravadas — não há de onde tirá-las no
+// banco. Elas continuam no WhatsApp, e a releitura pela Uazapi é o caminho.
+//
+// Só que a releitura foi escrita para conversa de UMA PESSOA SÓ, e num grupo
+// batia em três paredes:
+//
+//   1. `replace(/\D/g, '')` no que se digita. "120363...@g.us" virava
+//      "120363...", que parece telefone — e a rotina criava um CONTATO NOVO,
+//      uma CONVERSA NOVA, e despejava lá o histórico do grupo. O resgate
+//      produziria a bagunça que `juntarConversasDoGrupo` existe para limpar.
+//   2. O endereço `@s.whatsapp.net` num grupo devolve VAZIO. A rotina
+//      anunciaria "0 mensagens" para um grupo cheio delas.
+//   3. Sem `enviado_por`, o histórico entrava como monólogo de balões sem
+//      autor — diferente das mensagens que o webhook grava na mesma conversa.
+{
+  console.log("\n37. O resgate: reler o histórico de um grupo");
+
+  const SEGUNDO = { id: "adv-2", nome: "Estratégico", numero: "5511976299371",
+                    token: "tok-2", servidor: null, ativo: true, departamento_id: 1 };
+  const JID = "120363000000000001";
+  const CHAVE = `grupo:${JID}`;
+  const ONTEM = Date.now() - 24 * 60 * 60 * 1000;
+
+  // A discussão inteira, como a Uazapi devolve para QUALQUER telefone do grupo.
+  const historico = [
+    { messageid: "g-1", fromMe: false, text: "esse processo foi excluído hoje",
+      messageTimestamp: Math.floor(ONTEM / 1000), messageType: "conversation",
+      senderName: "Eduarda Chirov" },
+    { messageid: "g-2", fromMe: false, text: "podemos excluir essa regra?",
+      messageTimestamp: Math.floor((ONTEM + 60000) / 1000), messageType: "conversation",
+      senderName: "Max Canaverde" },
+    { messageid: "g-3", fromMe: false, text: "pode excluir",
+      messageTimestamp: Math.floor((ONTEM + 120000) / 1000), messageType: "conversation",
+      senderName: "Eduarda Chirov" },
+  ];
+
+  // O ESTADO DO ESCRITÓRIO, tal como os prints mostraram: o mesmo grupo em duas
+  // conversas, cada telefone com um PEDAÇO da discussão e nenhum com ela toda.
+  const comoEstavaNoEscritorio = {
+    uazapi: { historico, sufixo: "@g.us" },
+    tabelas: {
+      advogados: [{ ...TELEFONE }, { ...SEGUNDO }],
+      contatos: [{ id: 900, numero: CHAVE, nome: "Suporte Legal Mail" }],
+      conversas: [{ id: 901, advogado_id: "adv-1", contato_id: 900 },
+                  { id: 902, advogado_id: "adv-2", contato_id: 900 }],
+      mensagens: [
+        { id: 910, conversa_id: 901, id_uazapi: "g-1", origem: "contato",
+          tipo: "texto", texto: "esse processo foi excluído hoje" },
+        { id: 911, conversa_id: 902, id_uazapi: "g-2", origem: "contato",
+          tipo: "texto", texto: "podemos excluir essa regra?" },
+      ],
+    },
+  };
+
+  const t = await subirTudo({ IMPORT_TOKEN: "senha-do-escritorio" }, comoEstavaNoEscritorio);
+  // O ENDEREÇO DA UAZAPI DE MENTIRA SÓ EXISTE DEPOIS QUE ELA SOBE, e a tabela
+  // acima foi montada ANTES — as linhas ficaram com o endereço de um servidor
+  // já derrubado por outra seção, e o resgate morria em "fetch failed". Quem
+  // sobrescreve `advogados` na bancada precisa corrigir as linhas aqui.
+  for (const a of t.sb.dados.advogados) a.servidor = TELEFONE.servidor;
+  const resgatar = (advogado, contato) =>
+    fetch(`http://127.0.0.1:${t.porta}/importar-historico?token=senha-do-escritorio`
+          + `&advogado=${advogado}&contato=${encodeURIComponent(contato)}`);
+
+  const r = await resgatar(TELEFONE.numero, `${JID}@g.us`);
+  const frase = await r.text();
+  ok("o resgate de um grupo responde 200", r.status === 200,
+     `veio ${r.status}: ${frase.slice(0, 200)}`);
+
+  // A CONFERÊNCIA QUE DESCREVE A PAREDE 1, e a mais importante das três: um
+  // contato a mais aqui significa que o resgate INVENTOU um telefone com os
+  // dígitos do grupo, e escreveu a discussão numa conversa que ninguém abre.
+  ok("e NÃO inventa um contato com os dígitos do grupo",
+     t.sb.dados.contatos.length === 1,
+     JSON.stringify(t.sb.dados.contatos.map((c) => c.numero)));
+  ok("nem uma terceira conversa",
+     t.sb.dados.conversas.length === 2,
+     JSON.stringify(t.sb.dados.conversas.map((c) => c.advogado_id)));
+
+  const doMax = t.sb.dados.mensagens.filter((m) => String(m.conversa_id) === "901");
+  ok("a caixa do primeiro telefone passa a ter a discussão INTEIRA",
+     doMax.length === 3, `ficaram ${doMax.length}: `
+     + JSON.stringify(doMax.map((m) => m.id_uazapi)));
+  ok("sem duplicar a que já estava lá",
+     doMax.filter((m) => m.id_uazapi === "g-1").length === 1,
+     JSON.stringify(doMax.map((m) => m.id_uazapi)));
+
+  // PAREDE 3: quem escreveu cada linha. Num grupo isto não é enfeite — é a
+  // diferença entre ler uma discussão e ler um monólogo.
+  const resgatadas = doMax.filter((m) => m.id_uazapi !== "g-1");
+  ok("e cada bolha resgatada diz QUEM escreveu",
+     resgatadas.length === 2 && resgatadas.every((m) => !!m.enviado_por),
+     JSON.stringify(doMax.map((m) => [m.id_uazapi, m.enviado_por])));
+  ok("com o nome da pessoa, e não o número dela",
+     doMax.find((m) => m.id_uazapi === "g-3")?.enviado_por === "Eduarda Chirov",
+     JSON.stringify(doMax.map((m) => [m.id_uazapi, m.enviado_por])));
+
+  // O OUTRO TELEFONE CONTINUA INTOCADO até ser resgatado também. É o que torna
+  // o resgate uma operação por telefone, e não uma que mexe onde não foi pedida.
+  ok("o segundo telefone ainda não foi mexido",
+     t.sb.dados.mensagens.filter((m) => String(m.conversa_id) === "902").length === 1,
+     `ficaram ${t.sb.dados.mensagens.filter((m) => String(m.conversa_id) === "902").length}`);
+
+  // E ENTÃO ELE TAMBÉM. Aqui está o coração do resgate: `g-1` e `g-3` JÁ
+  // EXISTEM no banco — na caixa do outro telefone. Se a pergunta "já conheço
+  // esta mensagem?" fosse feita ao banco inteiro, as duas seriam puladas, o
+  // resgate diria "0 novas" e deixaria o buraco exatamente onde estava.
+  const r2 = await resgatar(SEGUNDO.numero, `${JID}@g.us`);
+  await r2.text();
+  const doEstrategico = t.sb.dados.mensagens.filter((m) => String(m.conversa_id) === "902");
+  ok("e o segundo telefone também recebe a discussão inteira",
+     doEstrategico.length === 3, `ficaram ${doEstrategico.length}: `
+     + JSON.stringify(doEstrategico.map((m) => m.id_uazapi)));
+
+  // RODAR DE NOVO NÃO MEXE EM NADA. Quem opera isto é uma pessoa num navegador,
+  // e a dúvida "será que já rodei?" tem de custar nada.
+  const antes = t.sb.dados.mensagens.length;
+  const r3 = await resgatar(TELEFONE.numero, `${JID}@g.us`);
+  const frase3 = await r3.text();
+  ok("rodar o resgate de novo não duplica nada",
+     t.sb.dados.mensagens.length === antes,
+     `eram ${antes}, ficaram ${t.sb.dados.mensagens.length}`);
+  ok("e a frase final não diz que importou o que já estava lá",
+     /Importei 0 /.test(frase3) || /nenhuma mensagem nova/i.test(frase3),
+     `disse: "${frase3.trim().slice(0, 160)}"`);
+
+  await t.parar();
+}
+
+// ==================================================================
+//  38. O RESGATE DE UMA PESSOA CONTINUA COMO ERA
+// ==================================================================
+//
+// A mudança acima mexeu no caminho que TODO resgate usa. A conferência que
+// importa aqui não é a do grupo — é a de que a conversa de uma pessoa só, que
+// funcionava, continua funcionando igual.
+{
+  console.log("\n38. O resgate de uma pessoa continua como era");
+
+  const historico = [
+    { messageid: "p-1", fromMe: false, text: "Bom dia, doutor",
+      messageTimestamp: Math.floor((Date.now() - 3600000) / 1000),
+      messageType: "conversation", senderName: "Cliente Teste" },
+  ];
+
+  const t = await subirTudo({ IMPORT_TOKEN: "senha-do-escritorio" }, {
+    uazapi: { historico },   // sufixo padrão: @s.whatsapp.net
+    tabelas: { contatos: [], conversas: [], mensagens: [] },
+  });
+  const r = await fetch(`http://127.0.0.1:${t.porta}/importar-historico`
+    + `?token=senha-do-escritorio&advogado=${TELEFONE.numero}&contato=5511999998888`);
+  await r.text();
+
+  ok("só com os dígitos, a conversa de uma pessoa é resgatada como sempre",
+     t.sb.dados.mensagens.length === 1, `vieram ${t.sb.dados.mensagens.length}`);
+  ok("e o contato é o telefone, sem prefixo de grupo",
+     t.sb.dados.contatos.length === 1 && t.sb.dados.contatos[0].numero === "5511999998888",
+     JSON.stringify(t.sb.dados.contatos.map((c) => c.numero)));
+  // O AUTOR NÃO ENTRA NUMA CONVERSA DE DUAS PESSOAS. Numa conversa de um para
+  // um a bolha já diz quem falou pela posição — carimbar o nome do cliente em
+  // cada linha seria repetir na tela o que a tela já mostra, e ficaria
+  // diferente do que o webhook grava na mesma conversa.
+  ok("e a bolha NÃO ganha o carimbo de autor (isso é coisa de grupo)",
+     t.sb.dados.mensagens[0] && !t.sb.dados.mensagens[0].enviado_por,
+     JSON.stringify(t.sb.dados.mensagens[0]));
+
+  // A FRASE QUE ENSINA. Quem abre este endereço é uma pessoa num navegador:
+  // "informe advogado e contato" não conta que um grupo se escreve de outro
+  // jeito, e ela tentaria com os dígitos — que é o caminho da parede 1.
+  const vazia = await fetch(`http://127.0.0.1:${t.porta}/importar-historico`
+    + `?token=senha-do-escritorio&advogado=${TELEFONE.numero}&contato=`);
+  const recado = await vazia.text();
+  ok("sem contato, a resposta ENSINA como se escreve um grupo",
+     vazia.status === 400 && /@g\.us/.test(recado), `disse: "${recado.trim()}"`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
