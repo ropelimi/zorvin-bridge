@@ -529,8 +529,60 @@ function avisarQueOWebhookNaoTrazHorario(m) {
     + `Campos que a Uazapi mandou: ${chaves}`);
 }
 
+// ------------------------------------------------------------
+//  QUEM É A CONVERSA QUE SE VAI RELER — PESSOA OU GRUPO
+//
+//  A releitura de histórico foi escrita para conversa de uma pessoa só, e num
+//  grupo ela batia em três paredes. A primeira era esta: o endereço fazia
+//  `replace(/\D/g, '')` no que a pessoa digitava, e um grupo NÃO é um número.
+//
+//    "120363000000000001@g.us"  ->  "120363000000000001"
+//
+//  O que sobra parece um telefone e é tratado como um: a rotina criava um
+//  CONTATO NOVO com esses dígitos, uma CONVERSA NOVA para ele, e despejava lá
+//  dentro o histórico do grupo. O resgate produziria exatamente a bagunça que
+//  `juntarConversasDoGrupo` existe para limpar — um grupo espalhado em duas
+//  conversas —, e ainda por cima sem resgatar nada na conversa certa.
+//
+//  A chave de um grupo no banco é `grupo:<jid sem o @g.us>`, e o endereço que a
+//  Uazapi entende é `<jid>@g.us`. São duas formas do mesmo grupo, e as duas
+//  precisam sair daqui certas.
+//
+//  NÃO SE ADIVINHA PELO TAMANHO DO NÚMERO. Um JID de grupo tem 18 dígitos e um
+//  telefone tem 12 ou 13, e seria fácil (e errado) decidir por aí: no dia em
+//  que a WhatsApp mudar o formato, a regra passa a mandar o histórico de um
+//  grupo para a conversa de uma pessoa, calada. Quem chama DIZ o que quer —
+//  colando o `@g.us` ou o prefixo `grupo:` —, e sem isso vale o de sempre.
+// ------------------------------------------------------------
+function alvoDoHistorico(entrada) {
+  const cru = String(entrada || '').trim();
+  const ehGrupo = /@g\.us/i.test(cru) || /^grupo:/i.test(cru);
+  const digitos = cru.replace(/^grupo:/i, '').split('@')[0].replace(/\D/g, '');
+  if (!digitos) return null;
+  if (ehGrupo) {
+    return {
+      ehGrupo: true,
+      chave: 'grupo:' + digitos,
+      // Um só: no grupo a Uazapi não tem os dois formatos de sufixo que as
+      // conversas de uma pessoa têm.
+      enderecos: [`${digitos}@g.us`],
+    };
+  }
+  return {
+    ehGrupo: false,
+    chave: digitos,
+    enderecos: [`${digitos}@s.whatsapp.net`, `${digitos}@c.us`],
+  };
+}
+
 // Converte uma mensagem do /message/find no formato da nossa tabela "mensagens".
-function mapearMensagemHistorico(m, conversaId) {
+//
+// `ehGrupo` decide se a bolha ganha o nome de QUEM ESCREVEU. Era a segunda
+// parede do resgate: sem ele, o histórico do grupo entrava como um monólogo de
+// balões sem autor — cinco pessoas discutindo e nenhuma identificada —, e ficava
+// diferente das mensagens que o webhook grava, que têm o autor desde sempre.
+// Duas metades da mesma conversa escritas de dois jeitos é a próxima confusão.
+function mapearMensagemHistorico(m, conversaId, ehGrupo = false) {
   const idUazapi = m.messageid || m.id || (m.key && m.key.id) || null;
   if (!idUazapi) return null;
   // O AVISO DE ÁLBUM TAMBÉM NÃO ENTRA POR AQUI. É a mesma mensagem lida por
@@ -555,6 +607,11 @@ function mapearMensagemHistorico(m, conversaId) {
   };
   const quando = horarioDeQuemEnviou(m);
   if (quando) linha.criado_em = quando;
+  // O MESMO `autorNoGrupo` DO WEBHOOK, e não uma segunda leitura dos mesmos
+  // campos: duas cópias combinariam hoje e divergiriam na primeira vez que uma
+  // delas fosse corrigida. O `{}` no lugar do corpo é de propósito — no
+  // histórico não há `body.chat`, e a função já sabe passar sem ele.
+  if (ehGrupo) linha.enviado_por = autorNoGrupo({}, m);
   return linha;
 }
 
@@ -565,11 +622,19 @@ app.get('/importar-historico', async (req, res) => {
       return res.status(403).send('Acesso negado. Configure IMPORT_TOKEN e informe ?token= correto.');
     }
     const advogadoNumero = String(req.query.advogado || '').replace(/\D/g, '');
-    const contatoNumero = String(req.query.contato || '').replace(/\D/g, '');
+    const alvo = alvoDoHistorico(req.query.contato);
     const limiteTotal = Math.min(parseInt(req.query.limite || '500', 10) || 500, 5000);
-    if (!advogadoNumero || !contatoNumero) {
-      return res.status(400).send('Informe advogado e contato (só números).');
+    if (!advogadoNumero || !alvo) {
+      // A MENSAGEM DIZ O QUE DIGITAR. Quem abre este endereço é uma pessoa num
+      // navegador: "informe advogado e contato" não ensina que um grupo se
+      // escreve de outro jeito, e ela tentaria com os dígitos — que é
+      // justamente o caminho que criava conversa duplicada.
+      return res.status(400).send(
+        'Informe advogado e contato.\n\n'
+        + 'Pessoa: contato=5511999998888 (só números).\n'
+        + 'Grupo:  contato=120363000000000001@g.us (com o @g.us).');
     }
+    const contatoNumero = alvo.chave;
 
     const { data: adv } = await supabase.from('advogados')
       .select('id, token, servidor').eq('numero', advogadoNumero).maybeSingle();
@@ -616,11 +681,13 @@ app.get('/importar-historico', async (req, res) => {
       return dados.messages || dados.data || dados.results || [];
     }
 
-    // Descobre qual sufixo de chatid a Uazapi aceita (varia por versão).
-    let chatid = `${contatoNumero}@s.whatsapp.net`;
+    // Descobre qual sufixo de chatid a Uazapi aceita (varia por versão). Num
+    // grupo há um só, e é o `@g.us` — tentar `@s.whatsapp.net` ali devolveria
+    // vazio e a rotina anunciaria "0 mensagens" para um grupo cheio delas.
+    let chatid = alvo.enderecos[0];
     let primeira = await buscarPagina(chatid, 0);
-    if (!primeira || primeira.length === 0) {
-      const alt = `${contatoNumero}@c.us`;
+    for (const alt of alvo.enderecos.slice(1)) {
+      if (primeira && primeira.length) break;
       const tent = await buscarPagina(alt, 0);
       if (tent && tent.length) { chatid = alt; primeira = tent; }
     }
@@ -637,7 +704,7 @@ app.get('/importar-historico', async (req, res) => {
       //
       // Saber de antemão o que já existe serve para duas coisas: contar a
       // verdade, e não baixar de novo as fotos que já estão guardadas.
-      const linhas = pagina.map((m) => ({ m, linha: mapearMensagemHistorico(m, conv.id) }))
+      const linhas = pagina.map((m) => ({ m, linha: mapearMensagemHistorico(m, conv.id, alvo.ehGrupo) }))
                            .filter((x) => x.linha);
       //
       // O QUE JÁ ESTÁ **NESTA CONVERSA**, e não no banco inteiro.
