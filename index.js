@@ -617,9 +617,39 @@ function mapearMensagemHistorico(m, conversaId, ehGrupo = false) {
 
 app.get('/importar-historico', async (req, res) => {
   try {
+    // ------------------------------------------------------------
+    //  A PORTA DIZ QUAL DOS DOIS PROBLEMAS É
+    //
+    //  Era uma frase só para duas situações opostas: "Acesso negado. Configure
+    //  IMPORT_TOKEN e informe ?token= correto."
+    //
+    //  Quem a recebe não tem como saber se a variável NÃO EXISTE no Render ou
+    //  se ela existe e o token digitado não confere — e os consertos são
+    //  diferentes: criar uma variável, ou reconferir o que se colou. Aconteceu
+    //  em 02/09, no resgate do histórico do grupo: a resposta mandou procurar
+    //  um erro de digitação num token que estava certo, porque a variável
+    //  nunca tinha sido criada (ela nem estava na lista do CLAUDE.md).
+    //
+    //  DIZER "NÃO ESTÁ CONFIGURADA" NÃO ABRE BRECHA. Sem a variável esta porta
+    //  recusa TUDO, então não há nada a explorar do outro lado da frase — e o
+    //  silêncio custa uma tarde de quem tem a senha certa na mão. O valor em
+    //  si, esse nunca aparece: nem no acerto, nem no erro, nem no log.
+    // ------------------------------------------------------------
     const senha = process.env.IMPORT_TOKEN;
-    if (!senha || req.query.token !== senha) {
-      return res.status(403).send('Acesso negado. Configure IMPORT_TOKEN e informe ?token= correto.');
+    if (!senha) {
+      console.log('Histórico: recusado porque IMPORT_TOKEN não está configurada no ambiente.');
+      return res.status(403).send(
+        'Esta porta está fechada para todo mundo: a variável IMPORT_TOKEN não existe '
+        + 'neste servidor.\n\n'
+        + 'Para abri-la: Render → o serviço da ponte → Environment → Add Environment '
+        + 'Variable, com o nome IMPORT_TOKEN e uma senha forte que você escolher. '
+        + 'Salvar reinicia o serviço; depois use esse MESMO valor no ?token=.');
+    }
+    if (req.query.token !== senha) {
+      return res.status(403).send(
+        'O ?token= não confere com o IMPORT_TOKEN deste servidor.\n\n'
+        + 'A variável existe — o que não bate é o valor. O engano mais comum é um '
+        + 'espaço em branco colado junto no começo ou no fim.');
     }
     const advogadoNumero = String(req.query.advogado || '').replace(/\D/g, '');
     const alvo = alvoDoHistorico(req.query.contato);
