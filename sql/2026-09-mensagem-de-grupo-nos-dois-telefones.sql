@@ -71,7 +71,15 @@ select indexname as indice, indexdef as definicao
    and indexdef ilike '%id_uazapi%';
 
 -- Quantas mensagens existem hoje, para conferir depois que nenhuma sumiu.
-select count(*) as mensagens, count(distinct id_uazapi) as identificadores
+--
+-- MEDIDO NO ESCRITÓRIO: 20.844 mensagens e 20.842 identificadores. A diferença
+-- NÃO é mensagem repetida — é mensagem SEM identificador: `count(distinct)`
+-- ignora nulo, e um índice único aceita vários nulos. São duas linhas gravadas
+-- sem `id_uazapi` (mensagem nossa cujo id ainda não tinha voltado da Uazapi).
+-- Isso não muda com este arquivo: o índice novo continua aceitando várias
+-- linhas sem identificador na mesma conversa, e foi conferido num Postgres 16.
+select count(*) as mensagens, count(distinct id_uazapi) as identificadores,
+       count(*) filter (where id_uazapi is null) as sem_identificador
   from public.mensagens;
 
 
@@ -87,7 +95,33 @@ select count(*) as mensagens, count(distinct id_uazapi) as identificadores
 create unique index if not exists mensagens_conversa_id_uazapi_key
   on public.mensagens (conversa_id, id_uazapi);
 
-drop index if exists public.mensagens_id_uazapi_key;
+-- E SÓ ENTÃO O ANTIGO SAI.
+--
+-- ELE PODE ESTAR NO BANCO DE DUAS FORMAS, e cada uma sai por um comando
+-- diferente: como RESTRIÇÃO (`unique` na definição da coluna — que é o caso do
+-- escritório) ou como índice solto. O `pg_indexes` mostra as duas exatamente
+-- igual, e foi isso que me fez escrever o comando errado na primeira versão
+-- deste arquivo. O banco respondeu:
+--
+--     ERROR: cannot drop index mensagens_id_uazapi_key because constraint
+--     mensagens_id_uazapi_key on table mensagens requires it
+--
+-- E como o editor do Supabase roda tudo numa transação só, o erro no segundo
+-- comando desfez o primeiro junto: nada tinha sido alterado.
+do $$
+begin
+  if exists (select 1 from pg_constraint
+              where conrelid = 'public.mensagens'::regclass
+                and conname = 'mensagens_id_uazapi_key') then
+    alter table public.mensagens drop constraint mensagens_id_uazapi_key;
+    raise notice 'Restrição mensagens_id_uazapi_key removida.';
+  elsif to_regclass('public.mensagens_id_uazapi_key') is not null then
+    execute 'drop index public.mensagens_id_uazapi_key';
+    raise notice 'Índice mensagens_id_uazapi_key removido.';
+  else
+    raise notice 'Já não existia — nada a fazer.';
+  end if;
+end $$;
 
 
 -- ------------------------------------------------------------
@@ -118,6 +152,16 @@ select count(*) as mensagens, count(distinct id_uazapi) as identificadores
 --       group by id_uazapi having count(*) > 1) x;
 --
 --  Se der zero:
---    create unique index mensagens_id_uazapi_key on public.mensagens (id_uazapi);
+--    alter table public.mensagens add constraint mensagens_id_uazapi_key
+--      unique (id_uazapi);
 --    drop index public.mensagens_conversa_id_uazapi_key;
+--
+--  ------------------------------------------------------------
+--  TESTADO NUM POSTGRES 16, numa réplica com a RESTRIÇÃO igual à do
+--  escritório e com linhas sem identificador. Depois da troca:
+--
+--    a mesma mensagem em DUAS conversas          gravou
+--    a mesma mensagem na MESMA conversa          recusada (é o reenvio)
+--    várias linhas SEM identificador             continuam cabendo
+--    rodar o arquivo de novo                     "já não existia — nada a fazer"
 -- ------------------------------------------------------------
