@@ -37,6 +37,11 @@ Variáveis de ambiente (no Render):
   **Opcional.** Sem ela a entrada funciona como sempre funcionou; com ela, a ponte
   consegue assinar a sessão sozinha quando o Auth do Supabase está fora do ar, e
   confere as sessões sem sair da máquina. Ver "A entrada" abaixo.
+- `IMPORT_TOKEN` — a senha da porta `/importar-historico`, que relê pela Uazapi o
+  passado de uma conversa ou de um grupo. **Sem ela a porta recusa TUDO**, inclusive
+  quem tem direito de usá-la. Ela faltava nesta lista, e foi por isso que nunca foi
+  criada no Render: em 02/09 o resgate do histórico de um grupo esbarrou aqui, e a
+  resposta da época mandava procurar erro de digitação num token que estava certo.
 
 ## A entrada (login) — e por que ela tem dois caminhos
 

@@ -333,6 +333,42 @@ const mensagemDaUazapi = (texto, id) => ({
   const semToken = await fetch(`http://127.0.0.1:${t.porta}/importar-historico?advogado=1&contato=2`);
   ok("importar histórico sem senha recusa", semToken.status === 403, `veio ${semToken.status}`);
   await t.parar();
+
+  // ------------------------------------------------------------
+  //  A RECUSA DIZ QUAL DOS DOIS PROBLEMAS É
+  //
+  //  Era uma frase só para duas situações opostas — a variável não existe no
+  //  servidor, ou existe e o token não confere. Quem a recebe não tem como
+  //  saber qual é, e os consertos são diferentes: criar uma variável, ou
+  //  reconferir o que se colou.
+  //
+  //  Aconteceu em 02/09, no resgate do histórico do grupo: a resposta mandou
+  //  procurar erro de digitação num token que estava certo, porque a variável
+  //  nunca tinha sido criada — ela nem constava da lista do CLAUDE.md.
+  // ------------------------------------------------------------
+  {
+    const semVariavel = await subirTudo();   // sem IMPORT_TOKEN no ambiente
+    const r1 = await fetch(`http://127.0.0.1:${semVariavel.porta}`
+      + `/importar-historico?token=qualquer&advogado=1&contato=2`);
+    const f1 = await r1.text();
+    ok("sem a variável no servidor, a recusa DIZ que ela não existe",
+       r1.status === 403 && /IMPORT_TOKEN não existe/.test(f1), `disse: "${f1.slice(0, 160)}"`);
+    ok("e ensina onde criá-la, em vez de mandar procurar erro de digitação",
+       /Environment/.test(f1), `disse: "${f1.slice(0, 200)}"`);
+    await semVariavel.parar();
+
+    const comVariavel = await subirTudo({ IMPORT_TOKEN: "a-senha-certa" });
+    const r2 = await fetch(`http://127.0.0.1:${comVariavel.porta}`
+      + `/importar-historico?token=a-senha-errada&advogado=1&contato=2`);
+    const f2 = await r2.text();
+    ok("com a variável posta, o token errado dá OUTRA frase",
+       r2.status === 403 && /não confere/.test(f2), `disse: "${f2.slice(0, 160)}"`);
+    // O VALOR NUNCA APARECE. Uma frase que ajuda demais devolve a senha a quem
+    // não a tem — e aí a porta deixou de ser porta.
+    ok("e a frase NÃO devolve a senha para quem não a tem",
+       !f2.includes("a-senha-certa"), `disse: "${f2}"`);
+    await comVariavel.parar();
+  }
 }
 
 // ==================================================================
