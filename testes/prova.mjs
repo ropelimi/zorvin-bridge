@@ -3937,5 +3937,94 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   }
 }
 
+// ==================================================================
+//  A MESMA MENSAGEM DE GRUPO, NOS DOIS TELEFONES NOSSOS QUE ESTÃO NELE
+// ==================================================================
+//
+// RELATO DE 02/09, com dois prints. O grupo "Suporte Legal Mail" tem dois
+// telefones nossos dentro. Abrindo a MESMA conversa por um e por outro, as
+// mensagens são diferentes — e não se repetem: cada lado tem um pedaço da
+// discussão, e nenhum tem ela inteira. Até a última mensagem da lista é outra
+// em cada telefone.
+//
+// A CAUSA, medida no banco do escritório:
+//
+//     CREATE UNIQUE INDEX mensagens_id_uazapi_key ON mensagens (id_uazapi)
+//
+// `id_uazapi` é o identificador que o WhatsApp dá à mensagem, e ele era único
+// no banco INTEIRO. Num grupo com dois dos nossos, a MESMA mensagem chega DUAS
+// vezes — uma por telefone — com o mesmo identificador. A primeira entrava; a
+// segunda batia no índice e era descartada.
+//
+// EM SILÊNCIO, e é o que fez isso durar: existe na ponte um aviso para "duas
+// mensagens diferentes com a mesma chave", e ele se cala justamente quando o
+// texto é igual — que é o caso de uma mensagem de grupo chegando duas vezes.
+//
+// A pergunta certa não é "esta mensagem já existe no Zorvin?" e sim "esta
+// mensagem já existe NESTA conversa?": cada telefone nosso tem a sua caixa.
+{
+  console.log("\n34. A mensagem de grupo chega aos DOIS telefones nossos");
+
+  const SEGUNDO = { id: "adv-2", nome: "Estratégico", numero: "5511976299371",
+                    token: "tok-2", servidor: null, ativo: true, departamento_id: 1 };
+  const GRUPO = "120363000000000001@g.us";
+
+  // A mesma mensagem, com o MESMO messageid, entregue por cada um dos dois
+  // telefones — que é o que a Uazapi faz quando os dois estão no grupo.
+  const doGrupo = (dono, texto, id) => ({
+    EventType: "messages",
+    owner: dono,
+    chat: { id: GRUPO, name: "Suporte Legal Mail", isGroup: true },
+    message: {
+      id, messageid: id, chatid: GRUPO, isGroup: true,
+      sender: "5511988887777@s.whatsapp.net", fromMe: false,
+      messageType: "conversation", text: texto, content: texto,
+      messageTimestamp: Date.now(), wasSentByApi: false,
+      senderName: "Eduarda Chirov",
+    },
+  });
+
+  const t = await subirTudo({}, { tabelas: { advogados: [{ ...TELEFONE }, { ...SEGUNDO }] } });
+  SEGUNDO.servidor = TELEFONE.servidor;
+
+  const mandar = (dono, texto, id) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doGrupo(dono, texto, id)),
+  });
+
+  await mandar(TELEFONE.numero, "esse processo foi excluído hoje às 05h41", "grp-1");
+  await espera(700);
+  await mandar(SEGUNDO.numero, "esse processo foi excluído hoje às 05h41", "grp-1");
+  await espera(900);
+
+  const conversas = t.sb.dados.conversas;
+  ok("o grupo vira uma conversa para CADA telefone nosso", conversas.length === 2,
+     `ficaram ${conversas.length}: ${JSON.stringify(conversas.map((c) => c.advogado_id))}`);
+
+  // ESTA É A CONFERÊNCIA QUE DESCREVE O DEFEITO. Com a chave global, a segunda
+  // gravação era descartada e este número era 1 — a mensagem existia só na
+  // caixa de quem chegou primeiro.
+  ok("e a mensagem existe nas DUAS caixas", t.sb.dados.mensagens.length === 2,
+     `ficaram ${t.sb.dados.mensagens.length}`);
+
+  const porAdv = {};
+  for (const m of t.sb.dados.mensagens) {
+    const conv = conversas.find((c) => String(c.id) === String(m.conversa_id));
+    porAdv[conv && conv.advogado_id] = (porAdv[conv && conv.advogado_id] || 0) + 1;
+  }
+  ok("uma em cada, e não duas numa só",
+     porAdv["adv-1"] === 1 && porAdv["adv-2"] === 1, JSON.stringify(porAdv));
+
+  // A METADE QUE PROTEGE: o reenvio de verdade continua sendo descartado.
+  // Sem ela, o conserto viraria o defeito oposto — a Uazapi reenvia quando
+  // desconfia que não entregou, e cada reenvio viraria uma bolha repetida.
+  await mandar(TELEFONE.numero, "esse processo foi excluído hoje às 05h41", "grp-1");
+  await espera(700);
+  ok("e o REENVIO no mesmo telefone continua não duplicando",
+     t.sb.dados.mensagens.length === 2, `ficaram ${t.sb.dados.mensagens.length}`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

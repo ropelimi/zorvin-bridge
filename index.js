@@ -581,11 +581,21 @@ app.get('/importar-historico', async (req, res) => {
       // verdade, e não baixar de novo as fotos que já estão guardadas.
       const linhas = pagina.map((m) => ({ m, linha: mapearMensagemHistorico(m, conv.id) }))
                            .filter((x) => x.linha);
+      //
+      // O QUE JÁ ESTÁ **NESTA CONVERSA**, e não no banco inteiro.
+      //
+      // É a diferença que faz esta importação servir de resgate. Num grupo com
+      // dois telefones nossos, a mensagem que falta aqui EXISTE lá — na conversa
+      // do outro telefone. Perguntando ao banco inteiro, ela seria dada como
+      // "já conhecida" e pulada: a importação rodaria, diria "0 novas", e
+      // deixaria o buraco exatamente onde estava.
       const idsDaPagina = linhas.map((x) => x.linha.id_uazapi);
       const conhecidas = new Set();
       if (idsDaPagina.length) {
         const { data: jaTem } = await supabase.from('mensagens')
-          .select('id_uazapi').in('id_uazapi', idsDaPagina);
+          .select('id_uazapi')
+          .eq('conversa_id', conv.id)
+          .in('id_uazapi', idsDaPagina);
         for (const x of jaTem || []) conhecidas.add(x.id_uazapi);
       }
 
@@ -1676,13 +1686,17 @@ const ehSoMiniatura = (v) => !v || String(v).startsWith('data:');
  */
 async function trocarMiniaturaPeloArquivo(idUazapi, url, mime) {
   if (!idUazapi || !url) return;
-  const { data: alvo, error } = await supabase
-    .from('mensagens').select('id, midia_url').eq('id_uazapi', idUazapi).maybeSingle();
+  // TODAS AS CÓPIAS, e não uma. Num grupo com dois telefones nossos a mesma
+  // mensagem existe em duas conversas: trocar a miniatura só na primeira
+  // deixaria a outra com a imagem borrada para sempre. E `maybeSingle()` aqui
+  // devolveria ERRO — "mais de uma linha" —, derrubando a troca nas duas.
+  const { data: copias, error } = await supabase
+    .from('mensagens').select('id, midia_url').eq('id_uazapi', idUazapi);
   if (error) { console.log(`Não consegui achar a mensagem ${idUazapi}: ${error.message}`); return; }
-  if (!alvo) return;
+  for (const alvo of copias || []) {
   // Já tem arquivo de verdade: nada a fazer. `data:` é miniatura, e miniatura
   // é justamente o que veio para ser substituído.
-  if (!ehSoMiniatura(alvo.midia_url)) return;
+  if (!ehSoMiniatura(alvo.midia_url)) continue;
 
   const remendo = { midia_url: url };
   if (mime) remendo.midia_mime = mime;
@@ -1692,6 +1706,7 @@ async function trocarMiniaturaPeloArquivo(idUazapi, url, mime) {
     : escrita.eq('midia_url', alvo.midia_url);
   const { error: erroEscrita } = await escrita;
   if (erroEscrita) console.log(`Não consegui pôr o arquivo em ${idUazapi}: ${erroEscrita.message}`);
+  }
 }
 
 // ============================================================
@@ -1791,21 +1806,31 @@ async function guardarArquivoDoEndereco(messageid, url) {
  *  falhar, que é o outro caminho. */
 async function resgatarAnexoVazio(id, url) {
   try {
-    const { data: alvo } = await supabase.from('mensagens')
-      .select('id, midia_url').eq('id_uazapi', id).maybeSingle();
-    if (!alvo || !ehSoMiniatura(alvo.midia_url)) return;  // não existe, ou já tem arquivo
+    // TODAS AS CÓPIAS. Num grupo com dois telefones nossos a mesma mensagem
+    // existe em duas conversas, e resgatar o anexo só de uma deixaria a outra
+    // com o balão vazio — o defeito que este resgate existe para não ter.
+    // (`maybeSingle()` aqui devolveria ERRO com duas cópias, e o resgate
+    // deixaria de funcionar para as duas.)
+    const { data: copias } = await supabase.from('mensagens')
+      .select('id, midia_url').eq('id_uazapi', id);
+    const vazias = (copias || []).filter((c) => ehSoMiniatura(c.midia_url));
+    if (!vazias.length) return;   // não existe, ou já tem arquivo
 
+    // O ARQUIVO É BAIXADO UMA VEZ SÓ, e não uma por cópia: é o mesmo arquivo, e
+    // baixá-lo duas vezes gastaria a rede e o Storage por nada.
     const guardado = await guardarArquivoDoEndereco(id, url);
     if (!guardado.url) return;
-    let escrita = supabase.from('mensagens')
-      .update({ midia_url: guardado.url, midia_mime: guardado.mime })
-      .eq('id', alvo.id);
-    escrita = alvo.midia_url === null || alvo.midia_url === undefined
-      ? escrita.is('midia_url', null)
-      : escrita.eq('midia_url', alvo.midia_url);
-    const { error } = await escrita;
-    if (error) { console.error(`resgate do anexo ${id}: o banco recusou —`, error.message); return; }
-    console.log(`Anexo resgatado: a mensagem ${id} estava sem arquivo e recebeu o que a Uazapi mandou depois.`);
+    for (const alvo of vazias) {
+      let escrita = supabase.from('mensagens')
+        .update({ midia_url: guardado.url, midia_mime: guardado.mime })
+        .eq('id', alvo.id);
+      escrita = alvo.midia_url === null || alvo.midia_url === undefined
+        ? escrita.is('midia_url', null)
+        : escrita.eq('midia_url', alvo.midia_url);
+      const { error } = await escrita;
+      if (error) { console.error(`resgate do anexo ${id}: o banco recusou —`, error.message); continue; }
+    }
+    console.log(`Anexo resgatado: a mensagem ${id} estava sem arquivo em ${vazias.length} conversa(s) e recebeu o que a Uazapi mandou depois.`);
   } catch (e) {
     console.log(`Não consegui resgatar o anexo de ${id}: ${(e && e.message) || e}`);
   }
@@ -1830,6 +1855,27 @@ function caminhoDoStorage(url) {
 //  não existam no banco (ex.: as de citação). Se o upsert falhar
 //  com os campos extras, tenta de novo só com o básico.
 // ------------------------------------------------------------
+// A CHAVE É (conversa, id_uazapi) — E NÃO O id_uazapi SOZINHO.
+//
+// Relato de 02/09, com dois prints: o grupo "Suporte Legal Mail" tem DOIS
+// telefones nossos dentro, e cada um mostrava um PEDAÇO da discussão. Nenhuma
+// mensagem aparecia nos dois.
+//
+// A causa era esta linha. `id_uazapi` é o identificador que o WhatsApp dá à
+// mensagem, e o índice do banco o exigia único no banco INTEIRO. Isso está
+// certo enquanto cada mensagem chega a um telefone nosso só; num grupo com dois
+// dos nossos, a MESMA mensagem chega DUAS vezes — uma por telefone — com o
+// mesmo identificador. A primeira entrava; a segunda batia no índice e era
+// descartada.
+//
+// EM SILÊNCIO, e é o que fez isso durar: o aviso logo abaixo existe para "duas
+// mensagens diferentes com a mesma chave", e ele se cala justamente quando o
+// texto é igual — que é o caso de uma mensagem de grupo chegando duas vezes.
+//
+// A pergunta certa não é "esta mensagem já existe no Zorvin?" e sim "esta
+// mensagem já existe NESTA conversa?". Cada telefone nosso tem a sua caixa.
+const CHAVE_DA_MENSAGEM = 'conversa_id,id_uazapi';
+
 async function salvarMensagem(base, extras) {
   const temExtras = extras && Object.keys(extras).length > 0;
   const payload = temExtras ? { ...base, ...extras } : base;
@@ -1838,14 +1884,14 @@ async function salvarMensagem(base, extras) {
   // desfechos são indistinguíveis — e um deles é uma mensagem sumindo.
   let { data, error } = await supabase
     .from('mensagens')
-    .upsert(payload, { onConflict: 'id_uazapi', ignoreDuplicates: true })
+    .upsert(payload, { onConflict: CHAVE_DA_MENSAGEM, ignoreDuplicates: true })
     .select('id');
   if (error && temExtras) {
     // Provável coluna inexistente: grava sem os campos de citação.
     console.log('Regravando mensagem sem campos de citação:', error.message);
     ({ data, error } = await supabase
       .from('mensagens')
-      .upsert(base, { onConflict: 'id_uazapi', ignoreDuplicates: true })
+      .upsert(base, { onConflict: CHAVE_DA_MENSAGEM, ignoreDuplicates: true })
       .select('id'));
   }
   if (!error && Array.isArray(data) && data.length === 0) {
@@ -1875,8 +1921,14 @@ async function salvarMensagem(base, extras) {
 // esse dado ainda não foi lido. Isto faz o dado aparecer.
 async function avisarSeForOutraMensagem(base) {
   try {
+    // NA MESMA CONVERSA, e não no banco inteiro. Depois que a chave passou a
+    // ser (conversa, id_uazapi), o mesmo identificador existe legitimamente em
+    // duas conversas — e um `maybeSingle()` global passaria a devolver ERRO
+    // ("mais de uma linha") justamente na mensagem de grupo, que é o caso que
+    // este conserto veio atender.
     const { data: atual } = await supabase.from('mensagens')
       .select('tipo, texto, midia_url')
+      .eq('conversa_id', base.conversa_id)
       .eq('id_uazapi', base.id_uazapi).maybeSingle();
     // Sumiu entre uma consulta e outra: não há o que comparar, e inventar uma
     // conclusão aqui seria pior do que ficar calado.
@@ -2099,36 +2151,49 @@ function extrairReacao(m) {
 // Prende a reação na mensagem. Devolve `true` quando conseguiu — e é esse
 // `true` que faz o webhook parar ali e não gravar uma mensagem nova.
 async function aplicarReacao(reacao, de) {
-  const { data: alvo, error: erroBusca } = await supabase
-    .from('mensagens').select('id, reacoes').eq('id_uazapi', reacao.alvo).maybeSingle();
+  // TODAS AS CÓPIAS DA MENSAGEM. Num grupo com dois telefones nossos ela existe
+  // em duas conversas, e a reação é a MESMA reação: quem reage no WhatsApp
+  // reage à mensagem, não à caixa de entrada de alguém. Aplicá-la só na
+  // primeira faria o emoji aparecer para metade da equipe.
+  //
+  // (E `maybeSingle()` aqui devolveria ERRO com duas cópias — "mais de uma
+  // linha" —, e a reação deixaria de aparecer para as duas.)
+  const { data: copias, error: erroBusca } = await supabase
+    .from('mensagens').select('id, reacoes').eq('id_uazapi', reacao.alvo);
   if (erroBusca) {
     console.log('Reação: não consegui procurar a mensagem alvo:', erroBusca.message);
     return false;
   }
-  if (!alvo) {
+  if (!copias || !copias.length) {
     console.log(`Reação a uma mensagem que não está no Zorvin (${reacao.alvo}).`);
     return false;
   }
 
-  // UMA REAÇÃO POR PESSOA: a nova substitui a anterior e o emoji vazio a
-  // retira. É como o WhatsApp se comporta, e é o que evita a mesma pessoa
-  // acumular cinco emojis na mesma bolha por ter mudado de ideia.
-  // Trava dupla: nada que não pareça emoji entra na bolha, venha de onde vier.
-  // Isto também limpa o que a versão anterior gravou errado — na primeira
-  // reação da conversa, o id que estava lá é descartado junto.
-  const atuais = (Array.isArray(alvo.reacoes) ? alvo.reacoes : [])
-    .filter((r) => r && r.de !== de && pareceEmoji(r.emoji));
-  if (reacao.emoji && pareceEmoji(reacao.emoji)) {
-    atuais.push({ emoji: reacao.emoji, de, em: new Date().toISOString() });
-  }
+  let gravou = false;
+  for (const alvo of copias) {
+    // UMA REAÇÃO POR PESSOA: a nova substitui a anterior e o emoji vazio a
+    // retira. É como o WhatsApp se comporta, e é o que evita a mesma pessoa
+    // acumular cinco emojis na mesma bolha por ter mudado de ideia.
+    // Trava dupla: nada que não pareça emoji entra na bolha, venha de onde vier.
+    // Isto também limpa o que a versão anterior gravou errado — na primeira
+    // reação da conversa, o id que estava lá é descartado junto.
+    const atuais = (Array.isArray(alvo.reacoes) ? alvo.reacoes : [])
+      .filter((r) => r && r.de !== de && pareceEmoji(r.emoji));
+    if (reacao.emoji && pareceEmoji(reacao.emoji)) {
+      atuais.push({ emoji: reacao.emoji, de, em: new Date().toISOString() });
+    }
 
-  const { error } = await supabase.from('mensagens').update({ reacoes: atuais }).eq('id', alvo.id);
-  if (error) {
-    console.log('Reação: não consegui gravar. Falta a coluna "reacoes"? '
-              + 'Rode sql/2026-08-reacoes.sql no Supabase. Erro:', error.message);
-    return false;
+    const { error } = await supabase.from('mensagens').update({ reacoes: atuais }).eq('id', alvo.id);
+    if (error) {
+      console.log('Reação: não consegui gravar. Falta a coluna "reacoes"? '
+                + 'Rode sql/2026-08-reacoes.sql no Supabase. Erro:', error.message);
+      continue;
+    }
+    gravou = true;
   }
-  console.log(`Reação ${reacao.emoji || '(retirada)'} de ${de} na mensagem ${reacao.alvo}.`);
+  if (!gravou) return false;
+  console.log(`Reação ${reacao.emoji || '(retirada)'} de ${de} na mensagem ${reacao.alvo}`
+            + (copias.length > 1 ? ` (em ${copias.length} conversas).` : '.'));
   return true;
 }
 
