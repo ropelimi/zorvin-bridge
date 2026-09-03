@@ -1,0 +1,79 @@
+# ============================================================
+#  AS PROVAS RODAM SOZINHAS, EM TODA PR
+#
+#  A prova da ponte existe há meses, é séria — sobe o `index.js` de verdade
+#  contra um Supabase e uma Uazapi de mentira — e só rodava quando alguém
+#  lembrava de rodar. Uma prova que depende de memória humana é uma prova que
+#  um dia não roda, e o dia em que ela não roda é justamente o dia corrido.
+#
+#  O que isto muda na prática: a PR que quebrar a fila de envio, a entrada, o
+#  webhook ou a mídia aparece VERMELHA no GitHub antes de o Rodrigo mesclar,
+#  em vez de aparecer como cliente sem resposta na segunda de manhã.
+#
+#  NÃO TOCA EM NADA QUE RODA EM PRODUÇÃO. Este arquivo não é lido pela Render,
+#  não é lido pela ponte, e não muda uma linha do `index.js`. Ele só manda o
+#  GitHub rodar `npm test` — o mesmo comando que já existe no `package.json`.
+# ============================================================
+name: Provas
+
+on:
+  # Toda PR, antes do merge: é aqui que o defeito é barato.
+  pull_request:
+  # E também no que já entrou na `main`. Duas PRs verdes separadas podem se
+  # somar numa `main` vermelha, e sem isto ninguém ficaria sabendo.
+  push:
+    branches: [main]
+
+# Empurrou de novo antes de a rodada anterior terminar? A velha é cancelada.
+# Sem isto, três correções seguidas numa PR viram três rodadas na fila, e a
+# resposta que interessa (a do último commit) é a que chega por último.
+concurrency:
+  group: provas-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ponte:
+    name: Prova da ponte
+    runs-on: ubuntu-latest
+    # A suíte leva cerca de dois minutos (uma seção espera de propósito os 20s
+    # da rodada de sincronismo). Dez minutos é folga para uma máquina lenta, e
+    # é curto o bastante para uma prova pendurada não ficar horas de pé.
+    timeout-minutes: 10
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Preparar o Node
+        uses: actions/setup-node@v4
+        with:
+          # NODE 22, E A DESCOBERTA É DESTA PRÓPRIA RODADA.
+          #
+          # A primeira execução deste arquivo pedia a 20, e reprovou em 22
+          # segundos — não por causa das provas, mas porque A PONTE NÃO SOBE
+          # nessa versão:
+          #
+          #   uncaughtException: Node.js 20 detected without native WebSocket
+          #   support.
+          #
+          # O `@supabase/supabase-js` de hoje exige WebSocket nativo, que só
+          # existe solto a partir da 22. Ou seja: a integração contínua achou,
+          # na estreia, exatamente o tipo de coisa que ela existe para achar —
+          # e que de outro jeito apareceria na Render, no dia de um deploy.
+          #
+          # 22 é também a versão em que as 396 conferências foram rodadas à
+          # mão antes desta entrega. A rodada confere o que a gente conferiu.
+          node-version: '22'
+
+      # `npm install`, e não `npm ci`: o `package-lock.json` está no
+      # `.gitignore` deste repositório, e `npm ci` exige um.
+      #
+      # Isso deixa esta rodada igual ao que a Render faz ao publicar — e é a
+      # parte boa: se uma versão nova do `@supabase/supabase-js` quebrar
+      # alguma coisa, quem descobre é esta rodada, e não o escritório depois
+      # do deploy.
+      - name: Instalar as dependências
+        run: npm install --no-audit --no-fund
+
+      - name: Rodar as provas
+        run: npm test
