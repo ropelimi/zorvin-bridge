@@ -4514,5 +4514,144 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
 }
 
 
+// ==================================================================
+//  40. O VANTORO SAI DA FRENTE DA MENSAGEM
+// ==================================================================
+//
+//  A frente (cliente, parte contrária, lead) sai de uma pergunta ao Vantoro, e
+//  ela era feita ANTES de a mensagem ser gravada. O Vantoro roda no plano
+//  gratuito da Render e dorme; acordá-lo leva de trinta segundos a um minuto.
+//
+//  Ou seja: a mensagem do cliente ficava esperando um serviço que nem precisa
+//  estar de pé para ela existir. Fora do expediente e nos fins de semana, isso
+//  era a REGRA — o Vantoro dorme de propósito nesses horários.
+{
+  console.log("\n40. O Vantoro sai da frente da mensagem");
+
+  // ---- a mensagem não espera pela classificação ----
+  {
+    // 1,5s é bem menos do que a Render leva para acordar de verdade, e já é
+    // muito mais do que uma gravação no banco. Se a mensagem esperar por isto,
+    // a conferência vê.
+    const t = await subirTudo({}, { vantoro: { demora: 1500, usuarios: [] } });
+    const comecou = Date.now();
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("chegou agora", "SEM-ESPERA-1")),
+    });
+
+    // Espera a LINHA aparecer, e não um tempo fixo: é o instante em que a bolha
+    // nasce na tela de quem atende.
+    let apareceuEm = null;
+    for (let i = 0; i < 60; i++) {
+      if (t.sb.dados.mensagens.length) { apareceuEm = Date.now() - comecou; break; }
+      await espera(50);
+    }
+    ok("a mensagem é gravada", apareceuEm !== null, "não apareceu em 3s");
+    ok("e sem esperar o Vantoro acordar", apareceuEm !== null && apareceuEm < 1200,
+       `demorou ${apareceuEm}ms — o Vantoro leva 1500ms nesta bancada`);
+
+    // A ETIQUETA CHEGA DEPOIS, e chegar depois é o combinado — não some.
+    let frente = null;
+    for (let i = 0; i < 60; i++) {
+      frente = t.sb.dados.conversas[0]?.frente || null;
+      if (frente) break;
+      await espera(100);
+    }
+    ok("a frente é gravada assim mesmo, logo em seguida", Boolean(frente),
+       `a conversa ficou com frente="${frente}"`);
+    ok("e o Vantoro chegou a ser perguntado",
+       t.van.recebidas.some((c) => c.caminho === "/contatos/classificar"),
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
+    await t.parar();
+  }
+
+  // ---- o Vantoro mudo não é perguntado a cada mensagem ----
+  {
+    // `naoJson` é o Vantoro respondendo uma página de erro com 503 — o retrato
+    // do serviço fora do ar ou suspenso na hospedagem.
+    const t = await subirTudo({}, { vantoro: { naoJson: { status: 503 }, usuarios: [] } });
+
+    // Contatos DIFERENTES em cada mensagem: com o mesmo, a segunda não
+    // perguntaria de qualquer jeito (a classificação vale por uma semana), e a
+    // prova mediria a validade em vez do freio.
+    const mandar = async (numero, id) => {
+      const corpo = mensagemDaUazapi(`mensagem de ${numero}`, id);
+      corpo.message.sender = `${numero}@s.whatsapp.net`;
+      corpo.message.sender_pn = `${numero}@s.whatsapp.net`;
+      corpo.message.chatid = `${numero}@s.whatsapp.net`;
+      corpo.chat = { phone: numero, wa_name: `Cliente ${numero.slice(-4)}` };
+      await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(corpo),
+      });
+    };
+    const perguntasAte = () =>
+      t.van.recebidas.filter((c) => c.caminho === "/contatos/classificar").length;
+
+    // A RAJADA: três mensagens enquanto a primeira pergunta ainda nem voltou.
+    // Contra um serviço fora do ar ela leva 26 segundos (20 do tempo limite,
+    // mais 6 da espera com segunda tentativa), então o freio ainda não existe —
+    // quem segura as outras duas é a trava de "uma pergunta de cada vez".
+    await mandar("5511900000001", "MUDO-1");
+    await espera(300);
+    await mandar("5511900000002", "MUDO-2");
+    await espera(300);
+    await mandar("5511900000003", "MUDO-3");
+    await espera(600);
+
+    ok("as três mensagens entraram, com o Vantoro fora do ar",
+       t.sb.dados.mensagens.length === 3, `entraram ${t.sb.dados.mensagens.length}`);
+    ok("e o Vantoro foi perguntado UMA vez, e não três", perguntasAte() === 1,
+       `perguntou ${perguntasAte()} vez(es) — cada uma custa o tempo limite inteiro`);
+
+    // AGORA O FREIO. Esperamos aquela primeira pergunta terminar de falhar; é
+    // quando a ponte conclui que o Vantoro está mudo e passa a pular.
+    let calou = false;
+    for (let i = 0; i < 100; i++) {
+      if (/Frente: o Vantoro não respondeu/.test(t.registro.join(""))) { calou = true; break; }
+      await espera(200);
+    }
+    ok("quando a pergunta falha, o log diz que ele foi calado e por quanto tempo",
+       calou, t.registro.join("").slice(-300));
+
+    // Com o Vantoro calado, uma mensagem nova NÃO pergunta — e é isso que
+    // impede a rajada de sábado de virar uma fila de esperas de meio minuto.
+    const antes = perguntasAte();
+    await mandar("5511900000004", "MUDO-4");
+    await espera(800);
+    ok("e a mensagem seguinte não pergunta mais nada", perguntasAte() === antes,
+       `perguntou de novo (${antes} → ${perguntasAte()})`);
+    ok("mas ela entra na conversa do mesmo jeito",
+       t.sb.dados.mensagens.length === 4, `entraram ${t.sb.dados.mensagens.length}`);
+    await t.parar();
+  }
+
+  // ---- e uma RESPOSTA de erro não cala ninguém ----
+  {
+    // 404 é o Vantoro DE PÉ dizendo alguma coisa. Calar por causa dele
+    // esconderia um erro de endereço atrás de cinco minutos de silêncio.
+    const t = await subirTudo({}, { vantoro: { naoJson: { status: 404 }, usuarios: [] } });
+    for (const [i, numero] of ["5511900000011", "5511900000012"].entries()) {
+      const corpo = mensagemDaUazapi(`mensagem ${i}`, `RESPOSTA-${i}`);
+      corpo.message.sender = `${numero}@s.whatsapp.net`;
+      corpo.message.sender_pn = `${numero}@s.whatsapp.net`;
+      corpo.message.chatid = `${numero}@s.whatsapp.net`;
+      corpo.chat = { phone: numero, wa_name: `Cliente ${i}` };
+      await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(corpo),
+      });
+      await espera(400);
+    }
+    await espera(500);
+    const perguntas = t.van.recebidas.filter((c) => c.caminho === "/contatos/classificar").length;
+    ok("um 404 do Vantoro NÃO o cala — ele está de pé e respondeu", perguntas === 2,
+       `perguntou ${perguntas} vez(es); esperava 2`);
+    await t.parar();
+  }
+}
+
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
