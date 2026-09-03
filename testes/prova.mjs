@@ -4513,6 +4513,137 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+// ==================================================================
+//  40. A ETIQUETA É DO CLIENTE, E NÃO DA CAIXA EM QUE ELE FALOU
+// ==================================================================
+//
+// Relato de quem usa: "a etiqueta que é incluída no contato deve aparecer nas
+// conversas com o contato em todos os telefones".
+//
+// `conversa_tags` tem uma linha por (conversa, etiqueta). Como cada telefone
+// nosso tem a SUA conversa com o mesmo cliente, etiquetar "Urgente" no
+// telefone do Dr. Max não mudava nada no do Estratégico — e etiqueta serve
+// para achar e para priorizar. Uma que só metade do escritório enxerga faz o
+// filtro devolver metade, sem dizer que devolveu metade.
+//
+// ESPALHAR, E NÃO LER A CAIXA DO OUTRO: a alternativa era o painel ler as
+// etiquetas das conversas dos outros telefones, o que abriria exceção na regra
+// de acesso que o #124 fechou. Aqui cada conversa ganha a SUA linha.
+//
+// E PELA PONTE porque o navegador NÃO ALCANÇA as conversas dos outros
+// telefones: um espalhamento feito lá cobriria só as que a pessoa já vê —
+// deixando a etiqueta pela metade, que é o defeito de origem com outra roupa.
+{
+  console.log("\n40. A etiqueta é do cliente, e não da caixa em que ele falou");
+
+  const SEGUNDO = { id: "adv-2", nome: "Estratégico", numero: "5511976299371",
+                    token: "tok-2", servidor: null, ativo: true, departamento_id: 1 };
+  const t = await subirTudo({}, { tabelas: {
+    advogados: [{ ...TELEFONE }, { ...SEGUNDO }],
+    contatos: [{ id: 700, numero: "5511999998888", nome: "Cliente de Dois" }],
+    // O MESMO CLIENTE, nas caixas dos DOIS telefones.
+    conversas: [{ id: 701, advogado_id: "adv-1", contato_id: 700 },
+                { id: 702, advogado_id: "adv-2", contato_id: 700 }],
+    // E uma conversa de OUTRO contato, para provar que o espalhamento não
+    // transborda: etiquetar um cliente não pode etiquetar o escritório.
+    conversa_tags: [],
+  } });
+
+  const etiquetar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/etiqueta/contato`, {
+    method: "POST",
+    headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const daTag = () => t.sb.dados.conversa_tags.filter((x) => String(x.tag_id) === "9");
+
+  const r = await etiquetar({ contato_id: 700, tag_id: 9 });
+  const corpo = await r.json();
+  ok("etiquetar o contato responde 200", r.status === 200, `veio ${r.status}: ${JSON.stringify(corpo)}`);
+
+  // A CONFERÊNCIA QUE DESCREVE O PEDIDO: uma linha por conversa, nos dois
+  // telefones. Com a etiqueta presa a uma conversa só, este número era 1.
+  const postas = daTag();
+  ok("a etiqueta cai nas conversas dos DOIS telefones", postas.length === 2,
+     `ficaram ${postas.length}: ${JSON.stringify(postas.map((x) => x.conversa_id))}`);
+  ok("uma em cada, e não duas numa só",
+     new Set(postas.map((x) => String(x.conversa_id))).size === 2,
+     JSON.stringify(postas.map((x) => x.conversa_id)));
+
+  // APLICAR DE NOVO NÃO DUPLICA. Quem etiqueta pelo segundo telefone (sem
+  // saber que já está etiquetado no primeiro) cai exatamente aqui.
+  const r2 = await etiquetar({ contato_id: 700, tag_id: 9 });
+  const corpo2 = await r2.json();
+  ok("aplicar de novo não duplica nada", daTag().length === 2, `ficaram ${daTag().length}`);
+  ok("e a resposta diz que nada de novo entrou", corpo2 && corpo2.novas === 0,
+     JSON.stringify(corpo2));
+
+  // TIRAR TIRA DOS DOIS. A metade que faltaria: uma etiqueta que se aplica em
+  // todos e sai de um só é pior do que a de antes — some da sua tela e continua
+  // no filtro de quem procura.
+  const r3 = await etiquetar({ contato_id: 700, tag_id: 9, aplicar: false });
+  ok("tirar a etiqueta tira dos DOIS telefones",
+     r3.status === 200 && daTag().length === 0, `ficaram ${daTag().length}`);
+
+  // CONTATO SEM CONVERSA NENHUMA É ERRO, e não sucesso calado: o painel já
+  // pintou a etiqueta na tela, e um "ok" deixaria a marca no ecrã e nada no
+  // banco.
+  const r4 = await etiquetar({ contato_id: 999, tag_id: 9 });
+  ok("contato sem conversa nenhuma é recusado, e não aceito em silêncio",
+     r4.status === 404, `veio ${r4.status}`);
+
+  // SEM LOGIN NÃO ENTRA. A rota escreve no banco do escritório inteiro.
+  const r5 = await fetch(`http://127.0.0.1:${t.porta}/etiqueta/contato`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contato_id: 700, tag_id: 9 }),
+  });
+  ok("sem login, a rota recusa", r5.status === 401, `veio ${r5.status}`);
+
+  await t.parar();
+}
+
+// ==================================================================
+//  41. O ÍCONE DE HISTÓRICO DIZ QUANTAS CONVERSAS EXISTEM
+// ==================================================================
+//
+// Relato: "na conversa, no ícone de histórico, quero que indique de alguma
+// forma quantas conversas existem com aquele contato em outros telefones".
+//
+// O ícone era mudo: só clicando dava para saber que o mesmo cliente estava
+// sendo atendido por outro telefone nosso — e ninguém clica num ícone para
+// descobrir que não há nada lá. A informação existia e não era vista: duas
+// pessoas atendendo o mesmo cliente sem saber uma da outra.
+{
+  console.log("\n41. O ícone de histórico diz quantas conversas existem");
+
+  const SEGUNDO = { id: "adv-2", nome: "Estratégico", numero: "5511976299371",
+                    token: "tok-2", servidor: null, ativo: true, departamento_id: 1 };
+  const t = await subirTudo({}, { tabelas: {
+    advogados: [{ ...TELEFONE }, { ...SEGUNDO }],
+    contatos: [{ id: 700, numero: "5511999998888", nome: "Cliente de Dois" },
+               { id: 701, numero: "5511999997777", nome: "Cliente de Um" }],
+    conversas: [{ id: 801, advogado_id: "adv-1", contato_id: 700 },
+                { id: 802, advogado_id: "adv-2", contato_id: 700 },
+                { id: 803, advogado_id: "adv-1", contato_id: 701 }],
+  } });
+
+  const contar = (id) => fetch(`http://127.0.0.1:${t.porta}/historico/contato/${id}/quantas`,
+    { headers: { Authorization: "Bearer jwt-bom" } }).then((r) => r.json());
+
+  const dois = await contar(700);
+  ok("o contato de dois telefones conta 2", dois && dois.conversas === 2, JSON.stringify(dois));
+  ok("e diz que são 2 telefones nossos", dois && dois.telefones === 2, JSON.stringify(dois));
+
+  // O CLIENTE DE UM TELEFONE SÓ TAMBÉM RESPONDE, e responde 1. É o caso comum,
+  // e é ele que decide quando o painel NÃO desenha número nenhum — um "1"
+  // pendurado em toda conversa seria ruído em cima da tela inteira.
+  const um = await contar(701);
+  ok("o contato de um telefone só conta 1", um && um.conversas === 1, JSON.stringify(um));
+
+  const semLogin = await fetch(`http://127.0.0.1:${t.porta}/historico/contato/700/quantas`);
+  ok("sem login, a contagem recusa", semLogin.status === 401, `veio ${semLogin.status}`);
+
+  await t.parar();
+}
 
 // ==================================================================
 //  40. O VANTORO SAI DA FRENTE DA MENSAGEM

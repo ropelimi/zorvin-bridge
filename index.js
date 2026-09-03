@@ -5049,6 +5049,127 @@ app.post('/conversas/juntar', soAdmin(juntarConversas));
 //  Basta estar logado no Zorvin: a informação é de organização do trabalho, e
 //  guardá-la por permissão é justamente o que criava a resposta errada.
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+//  A ETIQUETA É DO CLIENTE, E NÃO DA CAIXA EM QUE ELE FALOU
+//
+//  Relato de quem usa: "a etiqueta que é incluída no contato deve aparecer nas
+//  conversas com o contato em todos os telefones".
+//
+//  A tabela é `conversa_tags` — uma linha por (conversa, etiqueta). Como cada
+//  telefone nosso tem a SUA conversa com o mesmo cliente, etiquetar "Urgente"
+//  no telefone do Dr. Max não mudava nada no do Estratégico. E etiqueta serve
+//  para achar e para priorizar: uma que só metade do escritório enxerga faz o
+//  filtro devolver metade, sem dizer que devolveu metade.
+//
+//  ESPALHAR, E NÃO LER A CAIXA DO OUTRO. A outra saída era o painel ler as
+//  etiquetas das conversas dos outros telefones — o que abriria exceção na
+//  regra de acesso que o #124 acabou de fechar. Aqui cada conversa ganha a SUA
+//  linha, e o painel continua lendo só o que já lia. É a mesma escolha do
+//  #130, e pelo mesmo motivo.
+//
+//  PELA PONTE porque o navegador não alcança: as conversas dos outros
+//  telefones são invisíveis para ele, e um espalhamento feito lá cobriria só
+//  as que a pessoa já vê — deixando a etiqueta pela metade, que é o defeito de
+//  origem com outra roupa.
+//
+//  O QUE ATRAVESSA É UM ID DE ETIQUETA. Nenhum texto de conversa sai daqui, e
+//  quem chama precisa estar logado no Zorvin (`rotaVantoro` exige).
+// ------------------------------------------------------------
+app.options('/etiqueta/contato', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.post('/etiqueta/contato', rotaVantoro(async (req) => {
+  const contatoId = String((req.body && req.body.contato_id) || '').trim();
+  const tagId = String((req.body && req.body.tag_id) || '').trim();
+  const aplicar = (req.body && req.body.aplicar) !== false;
+  if (!contatoId || !tagId) {
+    return { status: 400, corpo: { ok: false, erro: 'Informe contato_id e tag_id.' } };
+  }
+
+  const { data: convs, error } = await supabase
+    .from('conversas').select('id').eq('contato_id', contatoId);
+  if (error) return { status: 502, corpo: { ok: false, erro: 'Não consegui achar as conversas do contato.' } };
+  const ids = (convs || []).map((c) => c.id);
+  // NENHUMA CONVERSA É UM ERRO, e não um sucesso silencioso: o painel acabou de
+  // pintar a etiqueta na tela, e responder "ok, 0 conversas" deixaria a marca
+  // no ecrã e nada no banco.
+  if (!ids.length) {
+    return { status: 404, corpo: { ok: false, erro: 'Este contato não tem conversa nenhuma.' } };
+  }
+
+  if (!aplicar) {
+    const { error: erroApagar } = await supabase.from('conversa_tags')
+      .delete().in('conversa_id', ids).eq('tag_id', tagId);
+    if (erroApagar) return { status: 502, corpo: { ok: false, erro: 'Não consegui tirar a etiqueta.' } };
+    return { status: 200, corpo: { ok: true, conversas: ids.length } };
+  }
+
+  // LÊ O QUE JÁ EXISTE E INSERE SÓ O QUE FALTA — e não um `upsert` com
+  // `onConflict: 'conversa_id,tag_id'`.
+  //
+  // O upsert seria mais curto e depende de uma coisa que eu NÃO conferi: um
+  // índice único nessas duas colunas. Se `conversa_tags` não o tiver, o
+  // PostgREST recusa o pedido inteiro — e a etiqueta que a pessoa acabou de
+  // ver acender na tela não teria sido gravada em lugar nenhum. Ler antes
+  // custa uma consulta e funciona com ou sem o índice.
+  const { data: jaTem, error: erroLer } = await supabase.from('conversa_tags')
+    .select('conversa_id').eq('tag_id', tagId).in('conversa_id', ids);
+  if (erroLer) return { status: 502, corpo: { ok: false, erro: 'Não consegui ler as etiquetas do contato.' } };
+  const postas = new Set((jaTem || []).map((r) => String(r.conversa_id)));
+  const faltando = ids.filter((id) => !postas.has(String(id)));
+  if (!faltando.length) return { status: 200, corpo: { ok: true, conversas: ids.length, novas: 0 } };
+
+  const { error: erroPor } = await supabase.from('conversa_tags')
+    .insert(faltando.map((id) => ({ conversa_id: id, tag_id: tagId })));
+  // CHAVE REPETIDA NÃO É FALHA. Duas pessoas etiquetando o mesmo cliente ao
+  // mesmo tempo caem aqui, e o desfecho é o que as duas queriam: a etiqueta
+  // está posta. Recusar seria inventar um erro para quem não errou.
+  if (erroPor && erroPor.code !== '23505') {
+    return { status: 502, corpo: { ok: false, erro: 'Não consegui aplicar a etiqueta.' } };
+  }
+  return { status: 200, corpo: { ok: true, conversas: ids.length, novas: faltando.length } };
+}));
+
+
+// ------------------------------------------------------------
+//  QUANTAS CONVERSAS ESTE CONTATO TEM, E EM QUANTOS TELEFONES
+//
+//  O ícone de histórico no topo da conversa era mudo: só clicando dava para
+//  saber que o mesmo cliente estava sendo atendido por outro telefone nosso —
+//  e ninguém clica num ícone para descobrir que não há nada lá. O resultado é
+//  que a informação existia e não era vista: duas pessoas do escritório
+//  atendendo o mesmo cliente sem saber uma da outra.
+//
+//  Agora o ícone traz o número, e ele vem daqui.
+//
+//  POR QUE UMA ROTA SÓ PARA CONTAR, tendo `/historico/contato/:id` logo
+//  abaixo: aquela faz DUAS consultas por conversa (a primeira e a última
+//  mensagem de cada uma) para desenhar o painel inteiro. Chamá-la a cada
+//  conversa ABERTA, só para pôr um número num ícone, seria pagar o painel
+//  todo — em toda troca de conversa, o dia inteiro, num serviço que hiberna.
+//  Esta faz uma consulta e devolve um número.
+//
+//  E PELA PONTE, e não do navegador, pelo mesmo motivo da outra: a regra de
+//  linha do Supabase recorta as conversas pelos telefones que a PESSOA
+//  alcança, e aí a resposta seria sempre "só esta" — que é justamente a
+//  resposta errada que a tela existe para corrigir. Só o RESUMO atravessa:
+//  quantas conversas e de quais telefones. Texto de mensagem nenhum.
+// ------------------------------------------------------------
+app.options('/historico/contato/:id/quantas', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.get('/historico/contato/:id/quantas', rotaVantoro(async (req) => {
+  const contatoId = String(req.params.id || '').trim();
+  if (!contatoId) return { status: 400, corpo: { ok: false, erro: 'Informe o contato.' } };
+
+  const { data: convs, error } = await supabase
+    .from('conversas').select('id, advogado_id').eq('contato_id', contatoId);
+  if (error) return { status: 502, corpo: { ok: false, erro: 'Não consegui contar as conversas.' } };
+
+  // OS TELEFONES DISTINTOS, e não as conversas. São a mesma coisa hoje (uma
+  // conversa por telefone e contato) e podem deixar de ser; contar o que a
+  // frase promete é o que impede o número de mentir depois.
+  const telefones = [...new Set((convs || []).map((c) => String(c.advogado_id)))];
+  return { status: 200, corpo: { ok: true, conversas: (convs || []).length,
+                                 telefones: telefones.length } };
+}));
+
 app.options('/historico/contato/:id', (req, res) => { liberarCors(res); res.sendStatus(204); });
 app.get('/historico/contato/:id', rotaVantoro(async (req) => {
   const contatoId = String(req.params.id || '').trim();
