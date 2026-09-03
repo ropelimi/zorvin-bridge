@@ -47,10 +47,23 @@ jobs:
       - name: Preparar o Node
         uses: actions/setup-node@v4
         with:
-          # A ponte usa `fetch` e `AbortController` sem importar nada, que só
-          # existem soltos a partir do Node 18. A 20 é a versão de apoio longo,
-          # e é a faixa em que a Render roda hoje.
-          node-version: '20'
+          # NODE 22, E A DESCOBERTA É DESTA PRÓPRIA RODADA.
+          #
+          # A primeira execução deste arquivo pedia a 20, e reprovou em 22
+          # segundos — não por causa das provas, mas porque A PONTE NÃO SOBE
+          # nessa versão:
+          #
+          #   uncaughtException: Node.js 20 detected without native WebSocket
+          #   support.
+          #
+          # O `@supabase/supabase-js` de hoje exige WebSocket nativo, que só
+          # existe solto a partir da 22. Ou seja: a integração contínua achou,
+          # na estreia, exatamente o tipo de coisa que ela existe para achar —
+          # e que de outro jeito apareceria na Render, no dia de um deploy.
+          #
+          # 22 é também a versão em que as 396 conferências foram rodadas à
+          # mão antes desta entrega. A rodada confere o que a gente conferiu.
+          node-version: '22'
 
       # `npm install`, e não `npm ci`: o `package-lock.json` está no
       # `.gitignore` deste repositório, e `npm ci` exige um.
