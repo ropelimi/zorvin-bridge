@@ -92,7 +92,17 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
     throw new Error(`a ponte não subiu na porta ${porta} em 7s. Log dela:\n`
                     + registro.join("").slice(-2000));
   }
-  return { sb, uaz, van, porta, registro,
+  // `filho` VAI JUNTO, e não é detalhe de encanamento: o desligamento com calma
+  // só se prova mandando o sinal de verdade (SIGTERM) e esperando o processo
+  // sair. Sem o processo em mãos, a única forma seria chamar uma função
+  // exportada só para o teste — que provaria a função, e não o sistema.
+  return { sb, uaz, van, porta, registro, filho,
+           /** Espera o processo sair e devolve o código. `null` se demorar. */
+           esperarSair: (ms = 30000) => new Promise((resolve) => {
+             if (filho.exitCode !== null) return resolve(filho.exitCode);
+             const relogio = setTimeout(() => resolve(null), ms);
+             filho.on('exit', (codigo) => { clearTimeout(relogio); resolve(codigo ?? 0); });
+           }),
            parar: async () => {
              filho.kill(); await sb.parar(); await uaz.parar();
              if (van) await van.parar();
@@ -4414,6 +4424,95 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
 
   await t.parar();
 }
+
+// ==================================================================
+//  39. SAIR COM CALMA — o que está no meio termina antes
+// ==================================================================
+//
+//  Toda publicação derruba este processo, e são várias por semana. Sem
+//  tratamento do SIGTERM, o Node morre no mesmo instante em que o recebe — com
+//  o que estivesse fazendo.
+//
+//  Esta seção exercita os dois estragos que isso causava, pela porta por onde
+//  eles acontecem em produção:
+//
+//    - um ENVIO no meio: a Uazapi já aceitou, a marca de "enviada" ainda não
+//      chegou ao banco. Morrendo ali, o item fica preso em "enviando" e cinco
+//      minutos depois é reenviado — o cliente recebe duas vezes;
+//    - um WEBHOOK novo chegando durante a saída: responder "OK" seria dizer à
+//      Uazapi que a mensagem está guardada, segundos antes de morrer com ela
+//      pela metade.
+//
+//  `DESLIGAR_PRAZO_MS` encurta o teto de 25 segundos: provar a espera com o
+//  valor de produção seria uma prova que ninguém roda.
+{
+  console.log("\n39. Sair com calma");
+  // O envio demora 1,5s: é a janela em que o SIGTERM chega com a Uazapi já
+  // tendo aceitado a mensagem e o banco ainda sem saber disso.
+  const t = await subirTudo({ DESLIGAR_PRAZO_MS: "8000" }, { uazapi: { demoraDoEnvio: 1500 } });
+  t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente Teste" });
+  t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+  t.sb.dados.fila_envio.push({
+    id: 1, conversa_id: 1, tipo: "texto", texto: "No meio do envio", status: "pendente",
+    tentativas: 0, criado_em: new Date().toISOString(),
+  });
+
+  // Toca a campainha e espera só o bastante para o envio estar EM VOO.
+  await fetch(`http://127.0.0.1:${t.porta}/ping`);
+  await espera(400);
+  ok("o envio está mesmo no meio quando o sinal chega",
+     t.sb.dados.fila_envio[0]?.status === "enviando",
+     `estava "${t.sb.dados.fila_envio[0]?.status}" — a prova não pegou a janela`);
+
+  const antesDoSinal = Date.now();
+  t.filho.kill("SIGTERM");
+
+  // A porta para de aceitar quem chega, e o webhook que chegar não recebe um
+  // "OK" que a ponte não vai honrar. Recusa explícita (503) ou conexão
+  // recusada: as duas dizem "não guardei", que é a verdade.
+  await espera(150);
+  let respostaDurante = null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("chegou durante a saída", "DURANTE-1")),
+    });
+    respostaDurante = r.status;
+  } catch (_e) {
+    respostaDurante = "conexão recusada";
+  }
+  ok("webhook que chega durante a saída NÃO recebe um 'OK' falso",
+     respostaDurante === 503 || respostaDurante === "conexão recusada",
+     `respondeu ${respostaDurante}`);
+
+  const codigo = await t.esperarSair(12000);
+  const demorou = Date.now() - antesDoSinal;
+
+  ok("a ponte sai sozinha, e sem erro", codigo === 0, `saiu com ${codigo}`);
+  // Esperou pelo envio: ele levava 1,5s e o sinal chegou aos 0,4s.
+  ok("e só depois de o envio em andamento terminar", demorou >= 800,
+     `saiu em ${demorou}ms — cedo demais para ter esperado o envio`);
+  ok("sem ficar pendurada até o prazo", demorou < 7000, `demorou ${demorou}ms`);
+
+  ok("o item NÃO ficou preso em 'enviando'",
+     t.sb.dados.fila_envio[0]?.status === "enviada",
+     `ficou "${t.sb.dados.fila_envio[0]?.status}" — em produção seria reenviado, `
+     + "e o cliente receberia a mesma mensagem duas vezes");
+  ok("e a mensagem que a Uazapi aceitou entrou no histórico",
+     t.sb.dados.mensagens.some((m) => m.texto === "No meio do envio"),
+     JSON.stringify(t.sb.dados.mensagens.map((m) => m.texto)));
+  ok("a mensagem recusada durante a saída não entrou pela metade",
+     !t.sb.dados.mensagens.some((m) => m.texto === "chegou durante a saída"),
+     "uma mensagem recusada não pode ter deixado rastro");
+
+  const log = t.registro.join("");
+  ok("o log diz que a saída foi tratada, e não que o processo sumiu",
+     /SIGTERM recebido/.test(log) && /Desligamento:/.test(log),
+     log.slice(-400));
+
+  await t.parar();
+}
+
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

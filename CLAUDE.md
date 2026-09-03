@@ -78,6 +78,24 @@ Rotas:
 
 Envio: `setInterval` a cada 3s lê `fila_envio` (status `pendente`), envia e marca como `enviada`/`erro`.
 
+## A saída (publicação) — a ponte termina o que está no meio
+
+Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
+a ponte **não morre na hora**: para de começar coisa nova (ciclo de fila, rodada de
+permissões, avisos de audiência), fecha a porta para conexões novas, espera o que já
+estava em voo — os webhooks sendo gravados e o ciclo da fila aberto — e só então sai.
+
+Isso existe porque o webhook responde "OK" à Uazapi **antes** de gravar: morrer nesse
+intervalo é a mensagem do cliente sumindo sem rastro. E um envio já aceito pela Uazapi
+cuja marca de "enviada" não chegou ao banco ficaria preso em `enviando`, para ser
+reenviado cinco minutos depois — o cliente recebendo duas vezes.
+
+O teto de espera é de 25 segundos (a Render dá 30 antes de matar à força) e sai de
+`DESLIGAR_PRAZO_MS`, **opcional**, que existe para a bancada poder encurtá-lo. Estourando
+o prazo, a ponte sai assim mesmo e **diz no log** o que ficou pela metade.
+
+Webhook que chega durante a saída recebe `503`, e não um "OK" que não será honrado.
+
 ## Uazapi — formato real (confirmado em teste)
 
 Servidor do usuário: `https://novaera.uazapi.com`. Uma instância por advogado.
