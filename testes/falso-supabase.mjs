@@ -464,7 +464,16 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
 // "Resposta inválida do Vantoro" e emendava com "confira o token".
 //   naoJson: { status: 503, corpo: "<html>…</html>" }
 export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJson = null,
-                                    dormeAsPrimeiras = 0 } = {}) {
+                                    dormeAsPrimeiras = 0,
+                                    // O QUE ELE RESPONDE NA CLASSIFICAÇÃO.
+                                    //
+                                    // Isto faltava, e o falso respondia `{ok:true}` seco — sem
+                                    // `frente`. A ponte lia `resposta.frente` como indefinida e não
+                                    // gravava etiqueta nenhuma, então a conversa terminava com
+                                    // `frente = null` e NENHUMA prova reclamava. Um falso que não
+                                    // responde como o de verdade esconde exatamente o que ele
+                                    // deveria expor.
+                                    classificar = { frente: "DESCONHECIDA", cliente: null } } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -517,6 +526,13 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
       atividades += 1;
       return res.end(JSON.stringify({ ok: true, criada: true,
                                       atividade: { id: atividades, processo_id: null } }));
+    }
+
+    // QUEM É A PESSOA DO OUTRO LADO — cliente, parte contrária, lead.
+    // O formato é o que a ponte lê em `definirFrente`: `frente` e, quando há
+    // cadastro, o `cliente` com id e nome.
+    if (url.pathname === "/contatos/classificar") {
+      return res.end(JSON.stringify({ ok: true, ...classificar }));
     }
 
     res.end(JSON.stringify({ ok: true }));

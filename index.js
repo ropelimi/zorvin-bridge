@@ -1360,14 +1360,36 @@ async function tratarWebhook(req, res) {
       .single();
     if (convErro) { console.error('Erro na conversa:', convErro.message); return; }
 
-    // De quem é esta conversa: cliente, advogado da parte contrária, lead…
-    // Não bloqueia nada — se falhar, a mensagem entra igual e a etiqueta sai
-    // na próxima que chegar.
-    // A FRENTE continua sendo gravada na conversa (`conversas.frente`): é o dado
-    // que diz de que natureza é aquele atendimento, e o Vantoro o usa. O que
-    // saiu foi o GRUPO — a etiqueta colorida que o painel carimbava a partir
-    // dela. Ver o bloco "o grupo saiu" mais abaixo.
-    await definirFrente(contato, adv, conversa.id, body);
+    // ------------------------------------------------------------
+    //  DE QUEM É ESTA CONVERSA — E POR QUE ISTO NÃO É ESPERADO
+    //
+    //  A frente (cliente, advogado da parte contrária, lead) sai de uma
+    //  pergunta ao Vantoro. O comentário aqui sempre disse "não bloqueia nada",
+    //  e havia um `await` na linha de baixo: bloqueava tudo.
+    //
+    //  O Vantoro roda no plano gratuito da Render e DORME. Acordá-lo leva de
+    //  trinta segundos a um minuto, e é isso que esta linha esperava — ANTES de
+    //  a mensagem do cliente ser gravada. Do lado de quem atende, a mensagem
+    //  simplesmente não aparecia por meio minuto; e se uma publicação caísse
+    //  nessa janela, ela não aparecia nunca (o webhook já tinha respondido "OK"
+    //  à Uazapi).
+    //
+    //  Fora do expediente e nos fins de semana o Vantoro está dormindo de
+    //  propósito — ou seja, a espera era a regra, e não a exceção.
+    //
+    //  Agora a classificação corre POR FORA. A mensagem é gravada logo abaixo,
+    //  no tempo do banco, e a etiqueta chega quando chegar — o painel a recebe
+    //  pelo tempo real, sem ninguém recarregar nada.
+    //
+    //  O QUE SE ACEITA COM ISSO, dito para ninguém descobrir depois: se a ponte
+    //  for desligada nos segundos seguintes, esta classificação é cortada pela
+    //  metade. Ela não é esperada pelo desligamento, de propósito — segurar a
+    //  saída por uma etiqueta seria pagar com o que importa (mensagem e envio)
+    //  por um extra que se refaz sozinho na próxima mensagem daquele contato.
+    // ------------------------------------------------------------
+    definirFrente(contato, adv, conversa.id, body).catch((e) => {
+      console.log('Frente: não consegui classificar agora —', (e && e.message) || e);
+    });
 
     // REAÇÃO, e não mensagem. Vem antes de tudo o que monta a linha porque uma
     // reação não é uma linha: ela pertence à mensagem que já está na conversa.
@@ -5617,11 +5639,87 @@ async function gravarTolerante(tabela, campos, filtro, rotulo) {
   return false;
 }
 
+// ------------------------------------------------------------
+//  O VANTORO MUDO NÃO É PERGUNTADO A CADA MENSAGEM
+//
+//  A classificação pergunta ao Vantoro quem é a pessoa do outro lado. Ele roda
+//  no plano gratuito da Render e DORME; fora do horário de trabalho, e nos fins
+//  de semana, está dormindo de propósito.
+//
+//  Cada pergunta a um serviço que não responde custa o tempo limite inteiro —
+//  20 segundos, e mais 6 de espera com outra tentativa quando a resposta tem
+//  cara de serviço acordando. Numa rajada de mensagens de sábado, isso é uma
+//  fila de esperas de meio minuto, todas destinadas a falhar, todas contra o
+//  mesmo serviço que já se sabe fora do ar.
+//
+//  Então a primeira falha cala o Vantoro por alguns minutos: nesse tempo a
+//  classificação é simplesmente pulada, e a mensagem entra na conversa como
+//  entra hoje. A etiqueta sai na próxima mensagem daquele contato, que é
+//  exatamente o que já acontecia quando a chamada falhava.
+//
+//  CINCO MINUTOS porque é o bastante para uma rajada inteira passar sem
+//  perguntar, e pouco para o serviço voltar a ser tentado no mesmo expediente.
+//
+//  E SÓ CALA QUEM NÃO RESPONDEU. Um 404 ou um 400 são respostas — o Vantoro
+//  está de pé e disse alguma coisa. Calar por causa deles esconderia um erro de
+//  configuração atrás de um silêncio de cinco minutos.
+// ------------------------------------------------------------
+const VANTORO_MUDO_MS = 5 * 60 * 1000;
+let vantoroMudoAte = 0;
+let avisadoVantoroMudo = 0;
+
+// UMA PERGUNTA DE CADA VEZ — e é isto que faz o freio valer numa RAJADA.
+//
+// O freio acima só age depois que a primeira chamada VOLTA. Contra um serviço
+// dormindo, ela demora 26 segundos (20 do tempo limite, mais 6 da espera com
+// segunda tentativa) — e como a classificação agora corre por fora, as
+// mensagens que chegarem nesse meio-tempo disparam a delas antes de o freio
+// existir. Medido na bancada: três mensagens, três perguntas, com o Vantoro
+// fora do ar desde a primeira.
+//
+// Com esta trava, a segunda mensagem da rajada não pergunta: ela vê que já há
+// uma pergunta em voo e passa. A etiqueta dela sai na próxima mensagem daquele
+// contato, que é o mesmo destino que ela teria se a chamada falhasse.
+//
+// O QUE ISSO CUSTA NO DIA NORMAL é quase nada: com o Vantoro de pé a resposta
+// vem em milissegundos, e a janela em que duas mensagens se cruzam é dessa
+// ordem. O que se ganha é a ponte deixando de martelar um serviço gratuito que
+// já está no chão.
+let classificacaoEmVoo = false;
+
+function vantoroEstaMudo() { return Date.now() < vantoroMudoAte; }
+
+function calarOVantoro(motivo) {
+  vantoroMudoAte = Date.now() + VANTORO_MUDO_MS;
+  // Uma linha por janela: repetir a cada mensagem afogaria o log justamente
+  // quando ele é o único lugar onde dá para ver o que está acontecendo.
+  if (Date.now() - avisadoVantoroMudo < VANTORO_MUDO_MS) return;
+  avisadoVantoroMudo = Date.now();
+  console.warn(`Frente: o Vantoro não respondeu (${motivo || 'sem detalhe'}). `
+    + `Não vou perguntar a ele por ${Math.round(VANTORO_MUDO_MS / 60000)} minutos. `
+    + 'As mensagens continuam entrando normalmente; o que fica sem etiqueta agora '
+    + 'ganha a dela na próxima mensagem daquele contato.');
+}
+
+/** Pergunta a frente ao Vantoro.
+ *
+ *  Devolve `{ corpo }` quando ele respondeu, e `{ mudo: true }` quando não
+ *  houve resposta — que são coisas diferentes e pedem reações diferentes. Antes
+ *  as duas viravam `null`, e por isso não havia como saber se valia a pena
+ *  perguntar de novo na mensagem seguinte. */
 async function perguntarFrenteAoVantoro(numero) {
-  const { status, corpo } = await chamarVantoro(
-    `/contatos/classificar?telefone=${encodeURIComponent(numero)}`);
-  if (status !== 200 || !corpo || !corpo.ok) return null;
-  return corpo;
+  try {
+    const { status, corpo } = await chamarVantoro(
+      `/contatos/classificar?telefone=${encodeURIComponent(numero)}`);
+    if (status === 200 && corpo && corpo.ok) return { corpo };
+    // 5xx é serviço com problema; 503 é também o que a própria ponte devolve
+    // quando a integração não está configurada — nos dois casos, insistir a
+    // cada mensagem não leva a lugar nenhum.
+    return { corpo: null, mudo: status >= 500, motivo: `respondeu ${status}` };
+  } catch (e) {
+    // Tempo esgotado, conexão recusada, endereço que não resolve.
+    return { corpo: null, mudo: true, motivo: (e && e.message) || String(e) };
+  }
 }
 
 /**
@@ -5645,8 +5743,11 @@ async function definirFrente(contato, advogado, conversaId, body) {
       (Date.now() - new Date(contato.frente_em).getTime()) < FRENTE_VALIDADE_MS;
     let frente = contato.frente || null;
 
-    if (!recente) {
-      const resposta = await perguntarFrenteAoVantoro(contato.numero);
+    if (!recente && !vantoroEstaMudo() && !classificacaoEmVoo) {
+      classificacaoEmVoo = true;
+      const { corpo: resposta, mudo, motivo } =
+        await perguntarFrenteAoVantoro(contato.numero).finally(() => { classificacaoEmVoo = false; });
+      if (mudo) calarOVantoro(motivo);
       if (resposta) {
         frente = resposta.frente;
         if (frente === 'DESCONHECIDA' && veioDeAnuncio(body)) frente = 'LEAD';
