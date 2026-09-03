@@ -30,6 +30,30 @@ process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', (err && err.message) || err);
 });
 
+// ============================================================
+//  A PONTE ESTÁ SAINDO DO AR — E ISSO PRECISA SER SABIDO AQUI DENTRO
+//
+//  Toda publicação derruba este processo. A Render manda um pedido de
+//  encerramento (SIGTERM) e, se ninguém o trata, o Node MORRE NA HORA — no meio
+//  do que estivesse fazendo.
+//
+//  O que estivesse fazendo, num escritório em expediente, é isto:
+//
+//    - um webhook que já foi respondido com "OK" para a Uazapi e ainda está
+//      sendo gravado. A Uazapi considera entregue; aqui a mensagem do cliente
+//      some, sem erro e sem log. Não há como saber depois qual foi;
+//    - um envio que a Uazapi já aceitou e cuja marca de "enviada" ainda não
+//      chegou ao banco. O item fica preso em "enviando" e é reenviado cinco
+//      minutos depois — o cliente recebe duas vezes.
+//
+//  Estas duas contas são o que permite esperar por eles antes de sair. Ficam
+//  aqui no alto, e não junto do desligamento lá embaixo, porque é aqui que a
+//  ponte declara as suas redes de segurança — e porque quem for mexer no
+//  webhook precisa esbarrar nelas.
+// ============================================================
+let desligando = false;
+let webhooksEmVoo = 0;
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -1104,7 +1128,15 @@ app.get('/webhook/telefones', async (req, res) => {
   });
 });
 
-app.post('/webhook', async (req, res) => {
+// O CORPO DO WEBHOOK É UMA FUNÇÃO COM NOME, e não uma anônima dentro do
+// `app.post`. A diferença é o que permite CONTAR quantos estão em voo: quem
+// registra a rota, logo abaixo, envolve a chamada e sabe quando ela termina.
+//
+// A alternativa seria costurar um `finally` neste corpo — que tem vinte pontos
+// de saída, cada um deles um `return` no meio de um `if`. Bastaria esquecer um
+// para a conta nunca voltar a zero, e aí o desligamento esperaria o prazo
+// inteiro toda vez, para nada.
+async function tratarWebhook(req, res) {
   if (!webhookAutorizado(req)) {
     contarRecusa(req);
     return res.status(403).send('nao autorizado');
@@ -1539,6 +1571,26 @@ app.post('/webhook', async (req, res) => {
   } catch (e) {
     console.error('Erro inesperado no webhook:', e.message);
   }
+}
+
+app.post('/webhook', (req, res) => {
+  // JÁ ESTAMOS SAINDO: é melhor recusar do que aceitar e não terminar.
+  //
+  // Responder "OK" aqui seria dizer à Uazapi que a mensagem está guardada,
+  // segundos antes de o processo morrer com ela pela metade. Um 503 é o
+  // contrário: diz que não deu, fica no log dela, e a mensagem continua sendo
+  // dela para reentregar.
+  //
+  // A janela é curta — o tempo de a Render trocar um processo pelo outro — e
+  // nela a ponte nova já está subindo para atender.
+  if (desligando) {
+    console.warn('Webhook recusado: a ponte está sendo desligada (publicação ou reinício).');
+    return res.status(503).send('reiniciando, tente de novo');
+  }
+  webhooksEmVoo += 1;
+  tratarWebhook(req, res)
+    .catch((e) => console.error('Erro inesperado no webhook:', (e && e.message) || e))
+    .finally(() => { webhooksEmVoo -= 1; });
 });
 
 // ------------------------------------------------------------
@@ -2532,6 +2584,9 @@ function avisarQueALinhaCaiu(bruto, numero, nome) {
 }
 
 async function processarFilaDeEnvio() {
+  // SAINDO DO AR: não COMEÇA ciclo novo. O que já está correndo termina — é
+  // justamente por ele que o desligamento espera.
+  if (desligando) return;
   if (filaRodando) { filaPedidaDeNovo = true; return; } // fica anotado para o fim deste ciclo
   filaRodando = true;
   try {
@@ -4748,6 +4803,7 @@ async function garantirDepartamentoDosTelefones() {
 let rodadaRodando = false;
 
 async function rodada() {
+  if (desligando) return;   // saindo do ar: a próxima ponte faz esta rodada
   if (rodadaRodando) {
     console.log('Rodada: a anterior ainda está correndo — esta fica para o próximo intervalo.');
     return;
@@ -5697,6 +5753,7 @@ function numeroComPais(digitos) {
 
 let avisosRodando = false;
 async function buscarAvisosDeAudiencia() {
+  if (desligando) return;   // saindo do ar: os avisos continuam pendentes no Vantoro
   if (avisosRodando) return;
   avisosRodando = true;
   try {
@@ -5926,8 +5983,87 @@ function comoMeChamo() {
     : 'não sei dizer (sem RENDER_GIT_COMMIT e sem data de arquivo)';
 }
 
-app.listen(port, () => {
+const servidor = app.listen(port, () => {
   console.log('Ponte do Zorvin rodando na porta', port);
   console.log(`versão no ar: ${comoMeChamo()}`);
   contarComoEstaAEntrada().catch(() => {});
 });
+
+// ============================================================
+//  SAIR COM CALMA — O QUE ESTÁ NO MEIO TERMINA ANTES
+//
+//  Toda publicação passa por aqui, e são várias por semana. Até agora a saída
+//  era um tiro: a Render manda SIGTERM, o Node não trata, e o processo morre no
+//  mesmo instante — com o que estivesse em andamento.
+//
+//  O QUE SE PERDIA, e não é hipótese: o webhook responde "OK" à Uazapi ANTES de
+//  gravar (para ela não reenviar). Entre o "OK" e a linha no banco há algumas
+//  idas à rede: achar o telefone, o contato, a conversa, classificar, gravar.
+//  Morrer nesse intervalo é a mensagem do cliente sumindo — a Uazapi a
+//  considera entregue, e aqui não fica rastro nenhum de que ela existiu.
+//
+//  Do outro lado, um envio que a Uazapi já aceitou e cuja marca de "enviada"
+//  ainda não chegou ao banco fica preso em "enviando"; cinco minutos depois a
+//  recuperação o devolve para a fila e o cliente recebe a mesma mensagem duas
+//  vezes.
+//
+//  A ORDEM AQUI IMPORTA, e é ela que faz isto funcionar:
+//
+//    1. `desligando = true` — a partir daqui nenhum ciclo de fila, nenhuma
+//       rodada de permissões e nenhum aviso de audiência COMEÇA. Só termina o
+//       que já estava correndo;
+//    2. a porta fecha para conexões novas. A ponte nova já está subindo, e é
+//       ela que atende quem chegar agora;
+//    3. espera-se o que está em voo: os webhooks sendo gravados e o ciclo da
+//       fila. É a espera inteira do valor deste trecho;
+//    4. sai com 0. Sair sozinho, e não esperar o SIGKILL, é o que faz a
+//       publicação seguinte não levar nove segundos de carência à toa.
+//
+//  O PRAZO É UM TETO, não uma promessa: se algo estiver mesmo pendurado, a
+//  ponte sai assim mesmo, dizendo no log o que ficou pela metade. Ficar
+//  esperando para sempre daria no mesmo tiro, só que mais tarde e com a Render
+//  puxando o gatilho.
+//
+//  25 segundos porque a Render dá 30 antes de matar à força. Sai da variável
+//  para a bancada poder encurtá-lo: provar isto esperando 25 segundos de
+//  verdade seria uma prova que ninguém roda — e prova que ninguém roda é o
+//  defeito que a integração contínua acabou de vir resolver.
+// ============================================================
+const PRAZO_PARA_SAIR_MS = Number(process.env.DESLIGAR_PRAZO_MS) || 25000;
+
+async function desligarComCalma(sinal) {
+  // Dois sinais seguidos (a Render insiste) não podem reiniciar a contagem.
+  if (desligando) return;
+  desligando = true;
+  const comecou = Date.now();
+  console.log(`${sinal} recebido: a ponte vai sair. `
+    + `Não começo nada novo; termino o que está no meio (até ${Math.round(PRAZO_PARA_SAIR_MS / 1000)}s).`);
+
+  // Fecha a porta para conexões novas. As que já estão abertas seguem até o
+  // fim — é o que `close` faz, e é o que se quer: recusar quem chega, sem
+  // cortar quem está sendo atendido.
+  try { servidor.close(); } catch (_e) { /* já fechada: segue */ }
+
+  const limite = comecou + PRAZO_PARA_SAIR_MS;
+  while ((webhooksEmVoo > 0 || filaRodando) && Date.now() < limite) {
+    await new Promise((ok) => setTimeout(ok, 50));
+  }
+
+  const demorou = Date.now() - comecou;
+  if (webhooksEmVoo > 0 || filaRodando) {
+    // O QUE FICOU PELA METADE VAI DITO. Um desligamento que estoura o prazo em
+    // silêncio é indistinguível de um que terminou tudo — e os dois pedem
+    // coisas opostas de quem for investigar uma mensagem que sumiu.
+    console.error(`Desligamento: o prazo de ${Math.round(PRAZO_PARA_SAIR_MS / 1000)}s acabou e ainda havia `
+      + `${webhooksEmVoo} webhook(s) sendo gravado(s)${filaRodando ? ' e um ciclo da fila aberto' : ''}. `
+      + 'Saindo assim mesmo. Se alguma mensagem faltar, foi aqui.');
+  } else {
+    console.log(`Desligamento: nada ficou no meio (${demorou}ms). Saindo.`);
+  }
+  process.exit(0);
+}
+
+// SIGTERM é o que a Render manda ao publicar; SIGINT é o Ctrl+C de quem roda a
+// ponte na própria máquina. Os dois merecem o mesmo cuidado.
+process.on('SIGTERM', () => { desligarComCalma('SIGTERM').catch(() => process.exit(0)); });
+process.on('SIGINT', () => { desligarComCalma('SIGINT').catch(() => process.exit(0)); });
