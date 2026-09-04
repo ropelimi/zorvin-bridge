@@ -137,8 +137,49 @@ select grantee, privilege_type, column_name
 revoke all on table public.advogados from authenticated;
 revoke all on table public.advogados from anon;
 
--- O que a tela precisa LER.
-grant select (id, nome, numero, foto_url, departamento_id, ativo)
+-- ------------------------------------------------------------
+--  `setor` ENTRA AQUI, E FOI ELE QUE ME PEGOU
+--
+--  A primeira versão deste arquivo não liberava `setor`. Rodado no banco do
+--  escritório, ele fez SUMIR TODAS AS ETIQUETAS das conversas — e, em silêncio,
+--  as notas internas junto.
+--
+--  A CAUSA, e ela vale como regra geral: existem no banco duas políticas
+--  RESTRITIVAS que ninguém versionou aqui —
+--
+--      zorvin_setor_conversa_tags   em `conversa_tags`
+--      zorvin_setor_notas           em `notas`
+--
+--  As duas, antes de deixar alguém ler uma linha, vão conferir o `setor` do
+--  telefone daquela conversa:
+--
+--      exists (select 1 from conversas c join advogados a on a.id = c.advogado_id
+--               where c.id = ... and (coalesce(a.setor,'acordos') <> 'gestao'
+--                                     or is_gestor()))
+--
+--  UMA POLÍTICA RESTRITIVA É OBRIGATÓRIA: ela não se soma às outras por "ou",
+--  ela se soma por "e". Então ela SEMPRE é avaliada — e quando ela lê uma
+--  coluna que quem chamou não pode ler, o pedido inteiro morre com
+--  "permission denied for table advogados". Não é a etiqueta que fica de fora:
+--  é a leitura de `conversa_tags` que deixa de existir.
+--
+--  E O PAINEL ENGOLE ESSE ERRO. A tela não mostra nada, não avisa nada — as
+--  pastilhas simplesmente não aparecem, como se ninguém tivesse etiquetado
+--  nada. Foi assim que isto chegou: "sumiram todas as tags".
+--
+--  ISTO FOI MEDIDO, e a primeira medição me enganou: reproduzi a política como
+--  PERMISSIVA e ela nem chegou a ser avaliada — tudo passou, e eu quase
+--  descartei a causa certa. Refeita como RESTRITIVA, o erro apareceu na hora.
+--  A pergunta que faltava era "permissiva ou restritiva?", e ela não estava na
+--  primeira conferência deste arquivo. Agora está, na parte 3.
+--
+--  `setor` não é credencial: é o rótulo do telefone, o mesmo que já aparece na
+--  tela de departamentos. Liberá-lo não reabre nada do que este arquivo veio
+--  fechar — `token`, `servidor` e `instancia` continuam fora de alcance.
+-- ------------------------------------------------------------
+
+-- O que a tela precisa LER — e o que as políticas restritivas precisam ler.
+grant select (id, nome, numero, foto_url, departamento_id, ativo, setor)
   on public.advogados to authenticated;
 
 -- O que a tela precisa MUDAR: só o departamento do telefone.
@@ -180,6 +221,35 @@ select grantee, privilege_type, column_name
  where table_schema = 'public' and table_name = 'advogados'
    and grantee in ('authenticated', 'anon')
  order by grantee, column_name, privilege_type;
+
+
+-- ------------------------------------------------------------
+--  3b) AS REGRAS QUE LEEM `advogados` POR DENTRO — a conferência que faltava
+--
+--      Uma política RESTRITIVA que lê outra tabela exige que quem chamou tenha
+--      permissão nas colunas que ELA lê, mesmo sem pedir essas colunas. Foi o
+--      que fez as etiquetas e as notas sumirem na primeira versão deste
+--      arquivo.
+--
+--      A primeira consulta lista todas as regras que mencionam `advogados`. Se
+--      aparecer alguma RESTRICTIVE lendo uma coluna que não está liberada
+--      acima, ela vai quebrar a leitura da tabela dela INTEIRA — e em silêncio.
+--
+--      A segunda é a prova de fogo: ler as duas tabelas como uma pessoa logada.
+--      O que importa é NÃO DAR ERRO. O número pode vir 0, e isso é normal:
+--      aqui não há sessão de verdade, e as regras dependem dela.
+-- ------------------------------------------------------------
+select tablename, policyname, permissive, cmd, qual
+  from pg_policies
+ where schemaname = 'public'
+   and (qual ilike '%advogados%' or with_check ilike '%advogados%')
+ order by permissive desc, tablename, policyname;
+
+set role authenticated;
+select 'etiquetas das conversas' as leitura, count(*) as sem_erro from public.conversa_tags
+union all
+select 'notas internas', count(*) from public.notas;
+reset role;
 
 
 -- ------------------------------------------------------------
