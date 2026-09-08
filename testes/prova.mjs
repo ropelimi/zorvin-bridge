@@ -4935,5 +4935,93 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
 }
 
 
+// ==================================================================
+//  42. OS TELEFONES DO CLIENTE PASSAM PELA PONTE
+// ==================================================================
+//
+// Três pedidos do escritório, em 04/09: o mesmo número em dois CPF tem de
+// ficar dito na tela e com dono escolhível; o cadastro precisa de mais de dois
+// números; e a troca do WhatsApp passa a poder ser feita pelo Zorvin.
+//
+// A REGRA TODA MORA NO VANTORO — quem é o principal, o que acontece com o
+// número velho na troca, o que não pode ser apagado. A ponte só repassa.
+// Duplicar a regra aqui daria duas respostas para a mesma pergunta, e a que o
+// escritório veria dependeria de por onde ela passou.
+//
+// O QUE ESTA SEÇÃO PROVA, então, é o que é responsabilidade DELA: que os
+// quatro gestos chegam ao Vantoro no caminho certo, com o método certo e o
+// corpo intacto — e que nenhum deles responde sem sessão do Zorvin. O token do
+// Vantoro dá acesso à base inteira do escritório; é por isso que estas rotas
+// existem, em vez de o painel falar direto com ele.
+{
+  console.log("\n42. Os telefones do cliente passam pela ponte");
+
+  const t = await subirTudo({}, { vantoro: {} });
+  const comLogin = (caminho, opcoes = {}) =>
+    fetch(`http://127.0.0.1:${t.porta}${caminho}`, {
+      headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      ...opcoes,
+    });
+  const noVantoro = (metodo, pedaco) => t.van.recebidas.filter(
+    (x) => x.metodo === metodo && x.caminho.includes(pedaco));
+
+  // 1) LISTAR
+  await comLogin("/vantoro/cliente/77/telefones");
+  ok("listar os telefones chega ao Vantoro no caminho certo",
+     noVantoro("GET", "/clientes/77/telefones").length === 1,
+     JSON.stringify(t.van.recebidas.map((x) => `${x.metodo} ${x.caminho}`)));
+
+  // 2) ACRESCENTAR — e o corpo tem de chegar INTEIRO. É nele que vai o "o
+  //    aparelho é do filho", que é o pedido 1; perder um campo no caminho
+  //    gravaria o número sem dono e ninguém veria falta.
+  await comLogin("/vantoro/cliente/77/telefones", {
+    method: "POST",
+    body: JSON.stringify({ numero: "11988882222", proprio: false,
+                           dono: "do filho, JOAO", principal: true }),
+  });
+  const posto = noVantoro("POST", "/clientes/77/telefones")[0];
+  ok("acrescentar um número chega ao Vantoro", !!posto,
+     JSON.stringify(t.van.recebidas.map((x) => `${x.metodo} ${x.caminho}`)));
+  ok("e o corpo chega inteiro, com o dono do aparelho",
+     posto && posto.corpo && posto.corpo.numero === "11988882222"
+     && posto.corpo.proprio === false && posto.corpo.dono === "do filho, JOAO"
+     && posto.corpo.principal === true,
+     JSON.stringify(posto && posto.corpo));
+
+  // 3) EDITAR
+  await comLogin("/vantoro/cliente/77/telefones/5", {
+    method: "PATCH", body: JSON.stringify({ proprio: true }),
+  });
+  const editado = noVantoro("PATCH", "/clientes/77/telefones/5")[0];
+  ok("editar um telefone chega ao Vantoro, com o id da linha",
+     !!editado && editado.corpo && editado.corpo.proprio === true,
+     JSON.stringify(t.van.recebidas.map((x) => `${x.metodo} ${x.caminho}`)));
+
+  // 4) REMOVER
+  await comLogin("/vantoro/cliente/77/telefones/5", { method: "DELETE" });
+  ok("remover um telefone chega ao Vantoro",
+     noVantoro("DELETE", "/clientes/77/telefones/5").length === 1,
+     JSON.stringify(t.van.recebidas.map((x) => `${x.metodo} ${x.caminho}`)));
+
+  // SEM SESSÃO, NENHUMA DAS QUATRO RESPONDE. O token do Vantoro dá acesso à
+  // base inteira; uma rota aberta aqui é a base do escritório aberta.
+  const antes = t.van.recebidas.length;
+  const sem = [
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77/telefones`),
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77/telefones`, { method: "POST" }),
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77/telefones/5`, { method: "PATCH" }),
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77/telefones/5`, { method: "DELETE" }),
+  ];
+  ok("sem sessão do Zorvin, as quatro recusam",
+     sem.every((r) => r.status === 401), JSON.stringify(sem.map((r) => r.status)));
+  // E NÃO CHEGAM AO VANTORO. Recusar depois de já ter perguntado seria vazar a
+  // existência do cadastro para quem não pode vê-lo.
+  ok("e nenhuma delas chega a tocar o Vantoro",
+     t.van.recebidas.length === antes,
+     `chegaram ${t.van.recebidas.length - antes} a mais`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

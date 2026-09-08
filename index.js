@@ -3768,6 +3768,39 @@ app.patch('/vantoro/cliente/:id', rotaVantoro(async (req, usuario) => {
   return r;
 }));
 
+// ------------------------------------------------------------
+//  OS TELEFONES DO CLIENTE
+//
+//  Três pedidos do escritório, em 04/09: o mesmo número em dois CPF tem de
+//  ficar DITO na tela e com dono escolhível; o cadastro precisa de mais de
+//  dois números; e a troca do WhatsApp passa a poder ser feita pelo Zorvin.
+//
+//  A ponte só repassa. A regra toda — quem é o principal, o que acontece com o
+//  número velho na troca, o que não pode ser apagado — mora no Vantoro, que é
+//  quem tem o cadastro. Duplicá-la aqui daria duas respostas para a mesma
+//  pergunta, e a que o escritório veria dependeria de por onde ela passou.
+//
+//  O TOKEN NÃO ATRAVESSA. É o motivo de estas rotas existirem em vez de o
+//  painel falar direto com o Vantoro: o `VANTORO_API_TOKEN` é de servidor e dá
+//  acesso à base inteira. `rotaVantoro` exige a sessão do Zorvin.
+// ------------------------------------------------------------
+app.get('/vantoro/cliente/:id/telefones', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/telefones`)));
+
+app.post('/vantoro/cliente/:id/telefones', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/telefones`,
+    { method: 'POST', body: JSON.stringify(req.body || {}) })));
+
+app.patch('/vantoro/cliente/:id/telefones/:tel', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}`
+                + `/telefones/${encodeURIComponent(req.params.tel)}`,
+    { method: 'PATCH', body: JSON.stringify(req.body || {}) })));
+
+app.delete('/vantoro/cliente/:id/telefones/:tel', rotaVantoro(async (req) =>
+  chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}`
+                + `/telefones/${encodeURIComponent(req.params.tel)}`,
+    { method: 'DELETE' })));
+
 // Manda para o cadastro um arquivo recebido no WhatsApp.
 app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
   chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/documentos`,
