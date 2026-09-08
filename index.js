@@ -1136,22 +1136,204 @@ app.get('/webhook/telefones', async (req, res) => {
 // de saída, cada um deles um `return` no meio de um `if`. Bastaria esquecer um
 // para a conta nunca voltar a zero, e aí o desligamento esperaria o prazo
 // inteiro toda vez, para nada.
-async function tratarWebhook(req, res) {
-  if (!webhookAutorizado(req)) {
-    contarRecusa(req);
-    return res.status(403).send('nao autorizado');
-  }
-  res.status(200).send('OK'); // responde rápido para a Uazapi não reenviar
+// ============================================================
+//  A CAIXA DE ENTRADA — o evento existe antes de ser entendido
+//
+//  Este é o conserto do achado mais grave do diagnóstico. O webhook prometia
+//  "OK" à Uazapi e só depois ia gravar; morrer nesse intervalo era a mensagem
+//  do cliente sumindo, com a Uazapi achando que tinha entregue.
+//
+//  As etapas anteriores encolheram a janela (o Vantoro saiu do caminho, e a
+//  saída passou a esperar o que está em voo), mas ela continuava existindo — e
+//  janela pequena é a que morde no dia movimentado, que é o dia em que a
+//  mensagem perdida custa caro.
+//
+//  A CAIXA NÃO É UMA FILA DE PROCESSAMENTO. O evento continua sendo tratado na
+//  hora, no mesmo instante de sempre; o que ela acrescenta é um LUGAR onde ele
+//  existe enquanto isso. Se o tratamento terminar, a linha é marcada e pronto.
+//  Se não terminar — o processo morreu, o banco recusou, deu erro no meio —, a
+//  rodada de recuperação a encontra e termina o serviço.
+//
+//  SEM A TABELA, TUDO FUNCIONA COMO ANTES. `eventos_recebidos` nasce de um SQL
+//  que alguém precisa rodar, e é assim que este projeto aplica esquema. Fazer o
+//  webhook depender dela sem ela existir seria trocar uma perda rara por uma
+//  parada total: TODA mensagem passaria a receber 503. Então a primeira recusa
+//  por "tabela não existe" desliga a caixa, avisa no log, e a ponte volta a se
+//  comportar exatamente como se comportava — que é o pior caso aceitável, e é o
+//  caso de hoje.
+// ============================================================
+const CAIXA = 'eventos_recebidos';
+let caixaDesligada = false;   // a tabela não existe: segue como antes
 
+/** A tabela não existe? É diferente de "o banco recusou agora". */
+const semATabela = (erro) => Boolean(erro) && (
+  ['42P01', 'PGRST205', 'PGRST106'].includes(String(erro.code))
+  || /relation .* does not exist|could not find the table/i.test(String(erro.message || '')));
+
+/**
+ * Guarda o evento cru e devolve `{ id }`.
+ *
+ * `{ recusar: true }` quer dizer "não prometa nada à Uazapi": o banco está
+ * fora, e responder OK seria mentir. `{ id: null }` é a caixa desligada — a
+ * ponte segue como antes, e o evento é tratado sem rede.
+ */
+async function guardarNaCaixaDeEntrada(corpo) {
+  if (caixaDesligada) return { id: null };
+  try {
+    const { data, error } = await supabase
+      .from(CAIXA).insert({ corpo }).select('id').single();
+    if (!error) return { id: data.id };
+
+    if (semATabela(error)) {
+      caixaDesligada = true;
+      console.warn(
+        `ATENÇÃO: a tabela "${CAIXA}" não existe, então a caixa de entrada está `
+        + 'DESLIGADA e a ponte volta a se comportar como antes: o webhook responde '
+        + '"OK" antes de gravar, e uma queda no meio do tratamento perde a mensagem. '
+        + 'Rode sql/2026-09-a-caixa-de-entrada-do-webhook.sql no Supabase para ligá-la.');
+      return { id: null };
+    }
+    return { recusar: true, erro: error.message };
+  } catch (e) {
+    return { recusar: true, erro: (e && e.message) || String(e) };
+  }
+}
+
+/** Marca o evento como resolvido — ou guarda o motivo de não ter sido. */
+async function fecharEvento(id, erro) {
+  if (!id) return;
+  const campos = erro
+    ? { erro: String(erro).slice(0, 500) }
+    : { processado_em: new Date().toISOString(), erro: null };
+  const { error } = await supabase.from(CAIXA).update(campos).eq('id', id);
+  // Falhar AQUI não perde nada: sem a marca, o evento continua pendente e a
+  // rodada de recuperação o pega de novo. O `id_uazapi` único é o que impede
+  // isso de virar mensagem repetida.
+  if (error) console.log(`Caixa de entrada: não consegui marcar o evento ${id} (${error.message}).`);
+}
+
+/** Trata o evento e fecha a linha dele. Nunca levanta: é chamada sem `await`. */
+async function concluirEvento(id, corpo) {
+  try {
+    await processarEventoDoWebhook(corpo);
+    await fecharEvento(id, null);
+  } catch (e) {
+    console.error('Erro inesperado no webhook:', (e && e.message) || e);
+    await fecharEvento(id, (e && e.message) || e);
+  }
+}
+
+// ------------------------------------------------------------
+//  A RODADA QUE TERMINA O QUE FICOU PELA METADE
+//
+//  Pega os eventos que nunca foram fechados e os trata de novo. É ela que
+//  transforma a caixa numa rede de verdade: sem ela, a linha pendente seria
+//  só um registro de que algo se perdeu.
+//
+//  SÓ OS PARADOS HÁ MAIS DE UM MINUTO. O evento que chegou agora está sendo
+//  tratado neste instante pelo caminho normal — pegá-lo aqui seria tratar duas
+//  vezes o que não precisa.
+//
+//  E REPETIR É SEGURO, que é o que torna isto possível: a mensagem tem
+//  `id_uazapi` único, o contato e a conversa são `upsert`, e a fila de envio
+//  não é tocada por este caminho. O pior caso de um evento tratado duas vezes é
+//  a segunda não fazer nada.
+//
+//  O TETO DE TENTATIVAS existe porque nem toda falha passa: um evento que a
+//  ponte não sabe tratar falharia para sempre, cinco vezes por minuto, enchendo
+//  o log e batendo no banco à toa. Cinco vezes e ele para de ser tentado — mas
+//  NÃO é apagado, e o log diz que ele existe. Um evento que ninguém consegue
+//  tratar é uma mensagem de cliente parada: alguém precisa saber.
+// ------------------------------------------------------------
+const CAIXA_ESPERA_MS = 60 * 1000;
+const CAIXA_MAX_TENTATIVAS = 5;
+let caixaRodando = false;
+let caixaLimpaEm = 0;
+
+async function terminarOsPendentes() {
+  if (desligando || caixaDesligada || caixaRodando) return;
+  caixaRodando = true;
+  try {
+    const limite = new Date(Date.now() - CAIXA_ESPERA_MS).toISOString();
+    const { data: pendentes, error } = await supabase
+      .from(CAIXA).select('id, corpo, tentativas')
+      .is('processado_em', null)
+      .lt('recebido_em', limite)
+      .lt('tentativas', CAIXA_MAX_TENTATIVAS)
+      .order('recebido_em', { ascending: true })
+      .limit(20);
+    if (error) {
+      if (semATabela(error)) { caixaDesligada = true; return; }
+      console.log(`Caixa de entrada: não consegui ler os pendentes (${error.message}).`);
+      return;
+    }
+    if (!pendentes || !pendentes.length) return;
+
+    console.log(`Caixa de entrada: ${pendentes.length} evento(s) ficaram pela metade; terminando agora.`);
+    for (const ev of pendentes) {
+      if (desligando) break;   // a saída manda: o resto fica para a próxima ponte
+      // A TENTATIVA É CONTADA ANTES, e não depois. Contar no fim faz o evento
+      // que derruba o processo nunca somar nada — e ele voltaria para sempre,
+      // derrubando a ponte a cada rodada.
+      const { error: erroClaim } = await supabase.from(CAIXA)
+        .update({ tentativas: (ev.tentativas || 0) + 1, processando_em: new Date().toISOString() })
+        .eq('id', ev.id);
+      if (erroClaim) { console.log(`Caixa: não consegui marcar a tentativa (${erroClaim.message}).`); continue; }
+      await concluirEvento(ev.id, ev.corpo);
+    }
+
+    // A LIMPEZA, UMA VEZ POR HORA. A caixa só cresce, e uma tabela que só
+    // cresce é um problema adiado — o valor de uma linha acaba no minuto em que
+    // ela é processada. Os PENDENTES nunca são apagados: um evento que não
+    // entrou é a única pista de uma mensagem que talvez tenha faltado.
+    if (Date.now() - caixaLimpaEm > 60 * 60 * 1000) {
+      caixaLimpaEm = Date.now();
+      const { data: apagados, error: erroLimpeza } = await supabase.rpc('limpar_eventos_recebidos');
+      if (erroLimpeza) console.log(`Caixa de entrada: não consegui limpar (${erroLimpeza.message}).`);
+      else if (apagados) console.log(`Caixa de entrada: ${apagados} evento(s) antigo(s) apagado(s).`);
+    }
+
+    // OS QUE DESISTIRAM PRECISAM SER DITOS. Um evento que falhou cinco vezes é
+    // uma mensagem de cliente que não entrou, e ela não pode ficar só numa
+    // linha de tabela que ninguém abre.
+    const { data: desistidos } = await supabase
+      .from(CAIXA).select('id, erro')
+      .is('processado_em', null)
+      .gte('tentativas', CAIXA_MAX_TENTATIVAS)
+      .limit(5);
+    for (const d of desistidos || []) {
+      console.error(`CAIXA DE ENTRADA: o evento ${d.id} falhou ${CAIXA_MAX_TENTATIVAS} vezes e `
+        + `não será mais tentado. Ele NÃO virou mensagem em conversa nenhuma. `
+        + `Último erro: ${d.erro || 'sem detalhe'}`);
+    }
+  } catch (e) {
+    console.error('Caixa de entrada:', (e && e.message) || e);
+  } finally {
+    caixaRodando = false;
+  }
+}
+
+// O CORPO DO EVENTO, E NÃO O PEDIDO HTTP.
+//
+// Esta função passou a receber o `corpo` já lido, e não `req`/`res`. É o que
+// permite chamá-la DUAS VEZES pela mesma mensagem: uma quando ela chega, e
+// outra mais tarde, a partir da caixa de entrada, se a primeira não terminou.
+// Um evento reprocessado não tem pedido HTTP para responder — ele vem do banco.
+//
+// E ELA DEIXOU DE ENGOLIR O ERRO. Antes o `catch` do fim escrevia uma linha no
+// log e devolvia normalmente, então quem chamou não tinha como saber se a
+// mensagem entrou. Agora o erro sobe: é ele que faz o evento continuar
+// pendente na caixa, para ser tentado de novo, em vez de sumir.
+async function processarEventoDoWebhook(corpo) {
   // Antes de qualquer leitura: quem MANDOU já é a informação, mesmo que o
   // evento seja descartado adiante. É o que separa "não chega" de "chega e cai".
   try {
-    const b = req.body || {};
+    const b = corpo || {};
     anotarEventoDe(String(b.owner || (b.message && b.message.owner) || '').replace(/\D/g, ''));
   } catch (_e) { /* nunca pode derrubar o webhook */ }
 
-  try {
-    const body = req.body;
+  {
+    const body = corpo;
     const evento = (body.EventType || body.event || '').toLowerCase();
 
     // Eventos que NÃO são mensagens: status (entregue/lida) e presença
@@ -1347,7 +1529,18 @@ async function tratarWebhook(req, res) {
       .upsert(contatoUpsert, { onConflict: 'numero' })
       .select('*')
       .single();
-    if (contErro) { console.error('Erro no contato:', contErro.message); return; }
+    // FALHA DE BANCO SOBE, e não vira `return`.
+    //
+    // Um `return` aqui diz "terminei" para quem chamou — e quem chama é a caixa
+    // de entrada, que então marca o evento como resolvido. A mensagem do
+    // cliente não teria entrado em lugar nenhum, e o evento não seria tentado
+    // de novo: exatamente a perda que a caixa existe para impedir, agora com um
+    // registro dizendo que deu tudo certo.
+    //
+    // Subindo, o evento fica pendente e a rodada de recuperação tenta de novo.
+    // O banco fora do ar por um minuto passa a custar um minuto de atraso, e
+    // não uma mensagem.
+    if (contErro) throw new Error(`não consegui gravar o contato: ${contErro.message}`);
 
     // A CONVERSA entre este advogado e este contato.
     const { data: conversa, error: convErro } = await supabase
@@ -1358,7 +1551,7 @@ async function tratarWebhook(req, res) {
       )
       .select('id')
       .single();
-    if (convErro) { console.error('Erro na conversa:', convErro.message); return; }
+    if (convErro) throw new Error(`não consegui gravar a conversa: ${convErro.message}`);
 
     // ------------------------------------------------------------
     //  DE QUEM É ESTA CONVERSA — E POR QUE ISTO NÃO É ESPERADO
@@ -1557,7 +1750,9 @@ async function tratarWebhook(req, res) {
     if (segundos) extras.midia_segundos = segundos;
 
     const msgErro = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
-    if (msgErro) { console.error('Erro ao salvar mensagem:', msgErro.message); return; }
+    // A MESMA REGRA, e aqui ela é a mais importante das três: se a mensagem não
+    // foi gravada, o evento NÃO está resolvido.
+    if (msgErro) throw new Error(`não consegui gravar a mensagem: ${msgErro.message}`);
 
     // A BOLHA JÁ EXISTE. Agora sim vai buscar o arquivo grande.
     //
@@ -1590,12 +1785,10 @@ async function tratarWebhook(req, res) {
     // A ponte está acordada agora: aproveita para despachar qualquer mensagem
     // que estava esperando na fila (não espera o próximo ciclo do setInterval).
     processarFilaDeEnvio().catch(() => {});
-  } catch (e) {
-    console.error('Erro inesperado no webhook:', e.message);
   }
 }
 
-app.post('/webhook', (req, res) => {
+app.post('/webhook', async (req, res) => {
   // JÁ ESTAMOS SAINDO: é melhor recusar do que aceitar e não terminar.
   //
   // Responder "OK" aqui seria dizer à Uazapi que a mensagem está guardada,
@@ -1609,9 +1802,43 @@ app.post('/webhook', (req, res) => {
     console.warn('Webhook recusado: a ponte está sendo desligada (publicação ou reinício).');
     return res.status(503).send('reiniciando, tente de novo');
   }
+  if (!webhookAutorizado(req)) {
+    contarRecusa(req);
+    return res.status(403).send('nao autorizado');
+  }
+
+  // ------------------------------------------------------------
+  //  GUARDAR PRIMEIRO, PROCESSAR DEPOIS
+  //
+  //  O "OK" para a Uazapi é uma promessa: dali em diante ela considera a
+  //  mensagem entregue e não manda de novo. Até agora essa promessa era feita
+  //  ANTES de a mensagem existir em qualquer lugar — o que vinha depois (achar
+  //  o telefone, o contato, a conversa, gravar) morria junto com o processo, e
+  //  a mensagem do cliente sumia sem deixar rastro. Não havia nem como saber
+  //  qual tinha sido.
+  //
+  //  Agora o evento cru é gravado ANTES do "OK". A partir daí ele existe: se a
+  //  ponte cair no meio do processamento, a rodada de recuperação o encontra
+  //  pendente e termina o serviço.
+  //
+  //  O CUSTO É UMA IDA AO BANCO antes de responder — algumas dezenas de
+  //  milissegundos. É o preço de a promessa ser verdadeira.
+  // ------------------------------------------------------------
+  const guardado = await guardarNaCaixaDeEntrada(req.body);
+
+  if (guardado.recusar) {
+    // NÃO CONSEGUI GUARDAR, ENTÃO NÃO PROMETO. Um "OK" aqui seria dizer que a
+    // mensagem está a salvo quando ela não está em lugar nenhum. O 503 fica no
+    // log da Uazapi e a mensagem continua sendo dela para reentregar.
+    console.error('Webhook: não consegui guardar o evento; respondendo 503 para a Uazapi '
+      + `não considerar entregue. Motivo: ${guardado.erro}`);
+    return res.status(503).send('nao consegui guardar; reenvie');
+  }
+
+  res.status(200).send('OK'); // agora sim: o evento já está guardado
+
   webhooksEmVoo += 1;
-  tratarWebhook(req, res)
-    .catch((e) => console.error('Erro inesperado no webhook:', (e && e.message) || e))
+  concluirEvento(guardado.id, req.body)
     .finally(() => { webhooksEmVoo -= 1; });
 });
 
@@ -6054,6 +6281,16 @@ async function buscarAvisosDeAudiencia() {
 
 // Roda a verificação da fila a cada 3 segundos.
 setInterval(processarFilaDeEnvio, 3000);
+
+// A caixa de entrada é varrida de meio em meio minuto. Não precisa ser rápida:
+// o caminho normal trata o evento no instante em que ele chega, e esta rodada
+// só existe para o que NÃO terminou. Meio minuto depois de uma publicação, o
+// que ficou pela metade já está de volta na conversa.
+const CAIXA_INTERVALO_MS = Number(process.env.CAIXA_INTERVALO_MS) || 30 * 1000;
+setInterval(() => { terminarOsPendentes().catch(() => {}); }, CAIXA_INTERVALO_MS);
+// E uma logo depois de subir: o caso mais comum de evento pela metade é
+// exatamente a ponte ter sido derrubada no meio dele.
+setTimeout(() => { terminarOsPendentes().catch(() => {}); }, 5000).unref();
 
 // Os avisos de audiência mudam de hora em hora, não de segundo em segundo:
 // 5 minutos é de sobra e não pesa no plano free.

@@ -129,6 +129,12 @@ const COLUNAS_DO_BANCO = {
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],
+  // A CAIXA DE ENTRADA DO WEBHOOK. Declarada aqui para o falso saber recusar
+  // uma coluna inventada: sem a lista, a tabela nasce da primeira gravação e
+  // qualquer nome de coluna passaria — a prova aprovaria um campo que o banco
+  // de verdade não tem.
+  eventos_recebidos: ["id", "corpo", "recebido_em", "processado_em",
+                      "processando_em", "tentativas", "erro"],
 };
 
 // A OUTRA LIMITAÇÃO, ESCRITA PARA NÃO VIRAR SURPRESA: numa tabela que não está
@@ -187,7 +193,16 @@ export function recusarColunaInexistente(dados, tabela, pedidas, semColunas = {}
 // corta em mil.
 const TETO_POSTGREST = 1000;
 
-export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, semColunas = {}, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
+export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar, quebrar, semColunas = {}, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false,
+                                    // A TABELA QUE AINDA NÃO FOI CRIADA — o SQL que
+                                    // ninguém rodou. É o estado normal deste projeto no
+                                    // dia seguinte a uma entrega, e sem poder imitá-lo
+                                    // não há como provar que a ponte SEGUE FUNCIONANDO
+                                    // sem ela. O falso criava a tabela sozinha na
+                                    // primeira gravação, então esse caminho não existia
+                                    // aqui — e é justamente ele que roda em produção
+                                    // enquanto o SQL não é aplicado.
+                                    semTabelas = [] } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -314,6 +329,17 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       // Para provar o que acontece quando UMA escrita falha no meio de uma
       // rotina de várias. A rede cai, o banco recusa, o Supabase devolve 500 —
       // e o que importa é o estado em que a rotina deixa os dados.
+      // A TABELA QUE NÃO EXISTE responde como o PostgREST responde: 42P01, e
+      // não uma lista vazia. São coisas diferentes, e a ponte decide o que
+      // fazer justamente olhando o código.
+      if (semTabelas.includes(tabela)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({
+          code: "42P01", message: `relation "public.${tabela}" does not exist`,
+          details: null, hint: null,
+        }));
+      }
+
       if (quebrar) {
         const motivo = quebrar(req.method, tabela, url.search);
         if (motivo) {
