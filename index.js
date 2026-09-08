@@ -2832,6 +2832,123 @@ function avisarQueALinhaCaiu(bruto, numero, nome) {
     + 'As mensagens ficam na fila marcadas como erro, e podem ser reenviadas depois.');
 }
 
+// ============================================================
+//  A MENSAGEM QUE NÃO SAIU TENTA DE NOVO SOZINHA
+//
+//  Uma falha, e a mensagem morria ali. O item virava 'erro', a bolha ficava
+//  vermelha com "toque em reenviar daqui a pouco", e ninguém tentava de novo —
+//  nunca. Uma piscada de rede entre a Render e a Uazapi, ou um "mandou demais"
+//  de trinta segundos, custava uma resposta ao cliente que só sairia se alguém
+//  estivesse com aquela conversa aberta na tela para clicar. Fora do horário,
+//  ou numa conversa que a atendente já tinha fechado, não saía.
+//
+//  O CUIDADO QUE MANDA NO DESENHO: reenviar por conta própria uma mensagem que
+//  TALVEZ tenha saído é o cliente recebendo duas vezes, e isso é pior do que a
+//  bolha vermelha — a bolha alguém resolve, a duplicata não tem desfazer.
+//
+//  Por isso a régua não é "deu erro, tenta de novo". É: **só tenta sozinha
+//  quando dá para ter certeza de que nada chegou ao cliente.** Fora desses
+//  casos, tudo continua exatamente como hoje — vermelho, com o motivo em
+//  português, e a decisão nas mãos de quem atende.
+// ============================================================
+
+/** A espera antes de cada nova tentativa, pelo número de tentativas já feitas.
+ *
+ *  Cresce de propósito. As falhas que valem retentativa são justamente as que
+ *  duram um tempo (a Uazapi reiniciando, um "mandou demais"), e insistir de
+ *  três em três segundos não adiantaria nada — só gastaria as cinco tentativas
+ *  no primeiro minuto, bem quando o problema ainda está de pé. */
+// Cinco tentativas, e depois a bolha vermelha. Sai do ciclo da fila para
+// `tentarDeNovoMaisTarde` poder dizer no log de quantas é a que ele acabou de
+// agendar — um número solto ("tentativa 3") não diz se falta muito.
+const MAX_TENTATIVAS = 5;
+const ESPERA_ENTRE_TENTATIVAS_MS = [30 * 1000, 2 * 60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000];
+
+/** A coluna não existe? É diferente de "o banco recusou agora". */
+const semAColuna = (erro) => Boolean(erro) && (
+  ['42703', 'PGRST204'].includes(String(erro.code))
+  || /column .* does not exist|could not find the .* column/i.test(String(erro.message || '')));
+
+let esperaDesligada = false;  // a coluna `tentar_em` não existe: segue como antes
+
+/**
+ * Esta falha permite tentar de novo sem risco de o cliente receber duas vezes?
+ *
+ *  A resposta só é `true` quando a própria falha PROVA que a mensagem não foi
+ *  processada. Na dúvida, `false` — e aí a bolha fica vermelha como sempre
+ *  ficou, que é o comportamento que já existia e não piora nada.
+ */
+function daParaTentarDeNovoSozinho(bruto) {
+  const cru = String(bruto || '');
+  const t = cru.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const status = Number((cru.match(/respondeu (\d{3})/) || [])[1]) || 0;
+
+  // A LINHA DO ESCRITÓRIO CAIU. Aqui a certeza existe — nada saiu —, e mesmo
+  // assim a resposta é não: enquanto ninguém reconectar o aparelho, nada vai
+  // sair. Insistir gastaria as cinco tentativas em vinte minutos para terminar
+  // na mesma bolha vermelha, só que mais tarde e depois de o aviso de linha
+  // caída já ter passado. Este caso pede uma pessoa, não uma retentativa.
+  if (ehLinhaDesconectada(cru)) return false;
+
+  // 429 É A UAZAPI DIZENDO QUE NÃO PROCESSOU. "Mandou demais" é uma recusa,
+  // não um meio-caminho: a mensagem não foi para o WhatsApp. E é a falha que
+  // mais aparece no dia movimentado, que é o dia em que a resposta perdida
+  // custa caro.
+  if (status === 429) return true;
+
+  // A CONEXÃO NUNCA ABRIU. Servidor recusando conexão, nome que não resolve:
+  // não houve conversa com a Uazapi, então não houve mensagem. É o único caso
+  // de rede em que a certeza existe.
+  //
+  // Repare no que está DE FORA, e é de propósito: tempo limite estourado,
+  // conexão derrubada no meio (`econnreset`, `socket hang up`) e o 5xx do
+  // servidor. Nesses, o pedido pode ter chegado inteiro e a resposta é que se
+  // perdeu — a Uazapi teria mandado a mensagem, e nós reenviaríamos por cima.
+  // Saber quais deles são seguros depende de conhecer o comportamento da
+  // Uazapi, e é uma das perguntas ainda em aberto; até lá, ficam com a pessoa.
+  if (/enotfound|econnrefused|eai_again/.test(t)) return true;
+
+  return false;
+}
+
+/**
+ * Devolve o item para a fila com uma espera. `false` quer dizer "não deu" —
+ * e aí quem chamou marca como erro, exatamente como antes.
+ */
+async function tentarDeNovoMaisTarde(item, bruto) {
+  if (esperaDesligada) return false;
+  const espera = ESPERA_ENTRE_TENTATIVAS_MS[
+    Math.min((item.tentativas || 0), ESPERA_ENTRE_TENTATIVAS_MS.length - 1)];
+  const { error } = await supabase.from('fila_envio')
+    .update({
+      status: 'pendente',
+      tentar_em: new Date(Date.now() + espera).toISOString(),
+      // O MOTIVO FICA GRAVADO MESMO SEM A BOLHA VERMELHA. Quem for investigar
+      // "por que esta demorou" precisa da pista, e `status = 'pendente'` não
+      // conta nada sozinho. A tela não muda: ela pinta de vermelho pelo
+      // `status`, e este item voltou a ser um item pendente.
+      erro_detalhe: String(bruto || '').slice(0, 1000),
+    })
+    .eq('id', item.id);
+  if (error && semAColuna(error)) {
+    esperaDesligada = true;
+    console.warn(
+      'ATENÇÃO: a coluna "fila_envio.tentar_em" não existe, então a retentativa '
+      + 'automática está DESLIGADA e a ponte volta a se comportar como antes: uma '
+      + 'falha de rede marca a mensagem como erro e ela só sai se alguém tocar em '
+      + 'reenviar. Rode sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql.');
+    return false;
+  }
+  if (error) {
+    console.error(`Não consegui reagendar o item ${item.id}:`, error.message);
+    return false;
+  }
+  console.log(`Fila: item ${item.id} não saiu (${String(bruto || '').slice(0, 120)}); `
+    + `tentativa ${(item.tentativas || 0) + 1} de ${MAX_TENTATIVAS}, nova tentativa em `
+    + `${Math.round(espera / 1000)}s.`);
+  return true;
+}
+
 async function processarFilaDeEnvio() {
   // SAINDO DO AR: não COMEÇA ciclo novo. O que já está correndo termina — é
   // justamente por ele que o desligamento espera.
@@ -2873,17 +2990,34 @@ async function processarFilaDeEnvio() {
     if (quantas) console.log(`Fila: ${quantas} item(ns) preso(s) em 'enviando' devolvido(s) para 'pendente'.`);
 
     // Pega até 10 mensagens pendentes de cada vez.
-    const { data: pendentes, error } = await supabase
-      .from('fila_envio')
-      .select('*')
-      .eq('status', 'pendente')
-      .order('criado_em', { ascending: true })
-      .limit(10);
+    //
+    // O ITEM QUE ESTÁ ESPERANDO A PRÓXIMA TENTATIVA NÃO ENTRA. `tentar_em` é a
+    // hora a partir da qual ele pode ser tentado de novo; enquanto não chegar,
+    // ele é pendente mas não é da vez. Item que nunca falhou não tem a marca, e
+    // por isso o `is.null` faz parte da regra — sem ele, a fila normal pararia.
+    const agora = new Date().toISOString();
+    const lerPendentes = (comEspera) => {
+      let q = supabase.from('fila_envio').select('*').eq('status', 'pendente');
+      if (comEspera) q = q.or(`tentar_em.is.null,tentar_em.lte.${agora}`);
+      return q.order('criado_em', { ascending: true }).limit(10);
+    };
+
+    let { data: pendentes, error } = await lerPendentes(!esperaDesligada);
+    // BASE SEM A COLUNA: lê de novo sem o filtro, em vez de a fila inteira
+    // parar. Uma fila que não é lida é o escritório todo sem enviar nada — bem
+    // pior do que ficar sem a retentativa automática.
+    if (error && semAColuna(error)) {
+      esperaDesligada = true;
+      console.warn(
+        'ATENÇÃO: a coluna "fila_envio.tentar_em" não existe, então a retentativa '
+        + 'automática está DESLIGADA e a ponte segue como antes. '
+        + 'Rode sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql.');
+      ({ data: pendentes, error } = await lerPendentes(false));
+    }
 
     if (error) { console.error('Erro ao ler fila:', error.message); return; }
     if (!pendentes || pendentes.length === 0) return;
 
-    const MAX_TENTATIVAS = 5;
     for (const item of pendentes) {
       // Trava de segurança: se o item já tentou demais (ex.: ficou preso e foi
       // devolvido para 'pendente' várias vezes), para de reenviar e marca erro.
@@ -3182,17 +3316,49 @@ async function processarFilaDeEnvio() {
 
         console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
-        // O aviso de audiência volta a aparecer como "Falhou" no Vantoro, com o
-        // motivo — em vez de sumir e só dar as caras quando o cliente faltar.
-        await marcarErroNaFila(item.id, envioErro.message, item.aviso_vantoro_id);
+        // O CÓDIGO DA FALHA DE REDE VINHA E ERA JOGADO FORA. Quando a conexão
+        // não abre, o Node lança "fetch failed" e guarda o motivo de verdade
+        // (`ECONNREFUSED`, `ENOTFOUND`) em `cause` — que ninguém lia. Sem ele
+        // não há como separar "não consegui nem falar com o servidor" de
+        // "falei e a resposta se perdeu no meio", e essa é justamente a
+        // diferença entre poder tentar de novo sozinho e não poder.
+        const motivoCru = envioErro.cause && envioErro.cause.code
+          ? `${envioErro.message} (${envioErro.cause.code})`
+          : envioErro.message;
+
         // POR QUAL LINHA E PARA QUEM. O identificador do item é um código que
         // não diz nada a ninguém; em 19/08 o log trazia só ele, e para
         // descobrir qual telefone tinha caído era preciso ir ao banco.
         const linha = conv.advogado.numero || 'telefone desconhecido';
         const deQuem = conv.advogado.nome ? ` (${conv.advogado.nome})` : '';
         console.error(`Falha ao enviar pela linha ${linha}${deQuem} para ${numeroDestino} `
-                    + `[item ${item.id}]:`, envioErro.message);
-        avisarQueALinhaCaiu(envioErro.message, linha, conv.advogado.nome);
+                    + `[item ${item.id}]:`, motivoCru);
+        avisarQueALinhaCaiu(motivoCru, linha, conv.advogado.nome);
+
+        // A FALHA PROVA QUE NADA CHEGOU AO CLIENTE, e ainda há tentativa? Então
+        // ela volta para a fila com uma espera, em vez de virar bolha vermelha
+        // que só sai se alguém estiver olhando a tela. Na dúvida — e a régua de
+        // `daParaTentarDeNovoSozinho` é dura de propósito — segue como sempre.
+        const aindaHaTentativa = (item.tentativas || 0) + 1 < MAX_TENTATIVAS;
+        const podeInsistir =
+          daParaTentarDeNovoSozinho(motivoCru)
+          && aindaHaTentativa
+          && await tentarDeNovoMaisTarde(item, motivoCru);
+        if (podeInsistir) continue;
+
+        // ESGOTADAS AS TENTATIVAS, A BOLHA DIZ QUE JÁ TENTAMOS. Sem esta linha
+        // a tela mostrava só a última falha ("muitas mensagens de uma vez,
+        // espere um minuto e toque em reenviar") — e quem lesse tocaria em
+        // reenviar achando que era a primeira vez, sem saber que a ponte já
+        // tinha tentado cinco vezes ao longo de vinte minutos. O motivo
+        // técnico continua junto, para quem for investigar.
+        const paraGravar = !aindaHaTentativa && daParaTentarDeNovoSozinho(motivoCru)
+          ? `Falhou após ${MAX_TENTATIVAS} tentativas: ${motivoCru}`
+          : motivoCru;
+
+        // O aviso de audiência volta a aparecer como "Falhou" no Vantoro, com o
+        // motivo — em vez de sumir e só dar as caras quando o cliente faltar.
+        await marcarErroNaFila(item.id, paraGravar, item.aviso_vantoro_id);
       }
     }
   } catch (e) {

@@ -100,6 +100,38 @@ Três regras que sustentam isso, e que não podem ser desfeitas sem quebrar a ga
 SQL: `sql/2026-09-a-caixa-de-entrada-do-webhook.sql`. Variável **opcional**
 `CAIXA_INTERVALO_MS` (padrão 30s), que existe para a bancada encurtar a rodada.
 
+## A fila de envio — quando a ponte insiste sozinha, e quando não
+
+Uma falha, e a mensagem morria ali: virava bolha vermelha e só saía se alguém
+estivesse com aquela conversa aberta para tocar em reenviar. Hoje a ponte tenta
+de novo sozinha, com espera crescente (30s, 2min, 5min, 15min) e no máximo cinco
+vezes.
+
+**A régua não é "deu erro, tenta de novo"** — é *só tenta sozinha quando a falha
+prova que nada chegou ao cliente*. Reenviar uma mensagem que talvez tenha saído é
+o cliente recebendo duas vezes, e disso não há desfazer. Então:
+
+- **insiste**: 429 (a Uazapi dizendo que não processou) e a conexão que nunca
+  abriu (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`);
+- **não insiste, vira erro na tela**: número que não existe, cliente que
+  bloqueou, arquivo grande demais — insistir não mudaria nada;
+- **não insiste, de propósito**: linha do escritório caída (pede uma pessoa para
+  reconectar o aparelho, e insistir só adiaria o aviso) e **tempo limite,
+  `ECONNRESET`, 5xx** — nesses o pedido pode ter chegado inteiro e só a resposta
+  ter se perdido. Saber quais são seguros depende de medir o comportamento da
+  Uazapi, e é uma pergunta ainda em aberto.
+
+Esgotadas as cinco, a bolha diz que já tentamos várias vezes **e** guarda o
+motivo técnico — sem ele, quem investiga perde a única pista do porquê.
+
+O código da falha de rede (`cause.code`) vinha do Node e era descartado; sem ele
+não há como separar "não falei com o servidor" de "falei e a resposta se perdeu",
+que é exatamente a diferença entre poder insistir e não poder.
+
+SQL: `sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql` (coluna
+`fila_envio.tentar_em`). **Sem ela tudo funciona como antes** — a ponte descobre
+sozinha, avisa uma vez no log, e a fila continua enviando.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
