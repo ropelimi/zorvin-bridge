@@ -78,6 +78,28 @@ Rotas:
 
 Envio: `setInterval` a cada 3s lê `fila_envio` (status `pendente`), envia e marca como `enviada`/`erro`.
 
+## A entrada de mensagens — a caixa de entrada do webhook
+
+O "OK" que a ponte responde à Uazapi é uma **promessa**: dali em diante ela considera a
+mensagem entregue e não manda de novo. Por isso o evento cru é gravado em
+`eventos_recebidos` **antes** do "OK". Se o tratamento não terminar (uma publicação, o
+banco fora por um minuto), uma rodada a cada 30s encontra o evento pendente e termina o
+serviço — a mensagem entra com atraso, em vez de não entrar.
+
+Três regras que sustentam isso, e que não podem ser desfeitas sem quebrar a garantia:
+
+1. **Não guardou, não promete.** Falhando a gravação, o webhook responde `503` — a
+   mensagem continua sendo da Uazapi para reentregar.
+2. **Falha de banco no meio do tratamento SOBE** (`throw`), em vez de virar `return`.
+   Um `return` faz a caixa marcar o evento como resolvido com a mensagem fora do banco —
+   a perda, agora com um registro dizendo que deu tudo certo.
+3. **Sem a tabela, tudo funciona como antes.** A ponte descobre sozinha, avisa uma vez no
+   log e segue. Fazer o webhook depender de uma tabela que talvez não exista trocaria uma
+   perda rara por uma parada total.
+
+SQL: `sql/2026-09-a-caixa-de-entrada-do-webhook.sql`. Variável **opcional**
+`CAIXA_INTERVALO_MS` (padrão 30s), que existe para a bancada encurtar a rodada.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),

@@ -41,17 +41,17 @@ async function portaLivre() {
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar, semColunas, bilhetesQueFalham,
+    quebrar, semColunas, semTabelas, bilhetesQueFalham,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
       usuarios: [], contatos: [], conversas: [], mensagens: [], fila_envio: [],
-      permissoes: [], conversa_tags: [], notas: [],
+      permissoes: [], conversa_tags: [], notas: [], eventos_recebidos: [],
       ...tabelas,
     },
     // As contas do Auth. Separadas da tabela `usuarios` de propósito: são duas
@@ -4779,6 +4779,157 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
     const perguntas = t.van.recebidas.filter((c) => c.caminho === "/contatos/classificar").length;
     ok("um 404 do Vantoro NÃO o cala — ele está de pé e respondeu", perguntas === 2,
        `perguntou ${perguntas} vez(es); esperava 2`);
+    await t.parar();
+  }
+}
+
+
+// ==================================================================
+//  41. A CAIXA DE ENTRADA — o evento existe antes de ser entendido
+// ==================================================================
+//
+//  O "OK" que a ponte responde à Uazapi é uma promessa: dali em diante ela
+//  considera a mensagem entregue e não manda de novo. A ponte prometia ANTES de
+//  gravar — e morrer nesse intervalo (uma publicação, e são várias por semana)
+//  era a mensagem do cliente sumindo, sem rastro nenhum de que existiu.
+//
+//  Agora o evento cru é gravado antes do "OK". Estas conferências exercitam os
+//  quatro caminhos que isso cria, incluindo os dois que mais assustam: a caixa
+//  desligada (o SQL que ninguém rodou) e o banco recusando a gravação.
+{
+  console.log("\n41. A caixa de entrada do webhook");
+
+  // ---- o evento é guardado, e depois fechado ----
+  {
+    const t = await subirTudo();
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("guarde antes de prometer", "CAIXA-1")),
+    });
+    await espera(900);
+
+    const caixa = t.sb.dados.eventos_recebidos || [];
+    ok("o evento cru foi guardado", caixa.length === 1, `guardou ${caixa.length}`);
+    ok("com o corpo inteiro, e não um resumo",
+       caixa[0] && caixa[0].corpo && caixa[0].corpo.message
+         && caixa[0].corpo.message.text === "guarde antes de prometer",
+       JSON.stringify(caixa[0] && caixa[0].corpo).slice(0, 120));
+    ok("e foi marcado como resolvido depois de tratado",
+       Boolean(caixa[0] && caixa[0].processado_em), JSON.stringify(caixa[0]));
+    ok("a mensagem entrou na conversa, como sempre",
+       t.sb.dados.mensagens.length === 1, `entraram ${t.sb.dados.mensagens.length}`);
+    await t.parar();
+  }
+
+  // ---- SEM A TABELA, nada muda ----
+  //
+  // É o estado de hoje, e o de todo dia entre uma entrega e alguém rodar o SQL.
+  // Se a ponte dependesse da tabela sem ela existir, TODA mensagem passaria a
+  // ser recusada — uma perda rara viraria uma parada total.
+  {
+    const t = await subirTudo({}, { semTabelas: ["eventos_recebidos"] });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("sem a tabela ainda", "CAIXA-2")),
+    });
+    await espera(900);
+
+    ok("sem a tabela, o webhook responde 200 como sempre", r.status === 200, `respondeu ${r.status}`);
+    ok("e a mensagem entra na conversa do mesmo jeito",
+       t.sb.dados.mensagens.length === 1, `entraram ${t.sb.dados.mensagens.length}`);
+    ok("e o log DIZ que a caixa está desligada, em vez de calar",
+       /caixa de entrada está DESLIGADA/i.test(t.registro.join("")),
+       t.registro.join("").slice(-300));
+    await t.parar();
+  }
+
+  // ---- O BANCO RECUSANDO: não se promete o que não se guardou ----
+  {
+    const t = await subirTudo({}, {
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "eventos_recebidos")
+        ? "banco fora do ar" : null,
+    });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("o banco recusou", "CAIXA-3")),
+    });
+    await espera(600);
+
+    // 503 E NÃO 200: a mensagem continua sendo da Uazapi para reentregar. Um
+    // "OK" aqui seria dizer que ela está a salvo quando não está em lugar
+    // nenhum — que é o defeito de origem, agora com o banco no lugar da queda.
+    ok("não conseguindo guardar, a ponte NÃO promete (503)", r.status === 503,
+       `respondeu ${r.status} — a Uazapi consideraria entregue`);
+    ok("e diz no log por que recusou",
+       /não consegui guardar o evento/i.test(t.registro.join("")),
+       t.registro.join("").slice(-300));
+    await t.parar();
+  }
+
+  // ---- O QUE FICOU PELA METADE É TERMINADO ----
+  //
+  // O coração desta etapa. Um evento guardado e nunca fechado é exatamente o
+  // que uma publicação no meio do tratamento deixa para trás.
+  {
+    const t = await subirTudo({ CAIXA_INTERVALO_MS: "700" }, {
+      tabelas: {
+        eventos_recebidos: [{
+          id: 1,
+          corpo: mensagemDaUazapi("ficou pela metade na publicação", "CAIXA-4"),
+          // Velho o bastante para a rodada considerá-lo parado, e não "sendo
+          // tratado agora".
+          recebido_em: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          processado_em: null, processando_em: null, tentativas: 0, erro: null,
+        }],
+      },
+    });
+    // Espera a rodada de recuperação passar.
+    let entrou = false;
+    for (let i = 0; i < 40; i++) {
+      if (t.sb.dados.mensagens.some((m) => m.id_uazapi === "CAIXA-4")) { entrou = true; break; }
+      await espera(250);
+    }
+    ok("o evento que ficou pela metade vira mensagem na conversa", entrou,
+       "ele continuaria pendente para sempre, e a mensagem nunca teria entrado");
+    const linha = (t.sb.dados.eventos_recebidos || []).find((e) => String(e.id) === "1");
+    ok("e a linha dele é fechada", Boolean(linha && linha.processado_em), JSON.stringify(linha));
+    ok("tendo contado a tentativa", linha && linha.tentativas >= 1, JSON.stringify(linha));
+    await t.parar();
+  }
+
+  // ---- O QUE NUNCA DÁ CERTO PARA DE SER TENTADO, MAS É DITO ----
+  //
+  // Sem teto, um evento que a ponte não consegue tratar seria tentado para
+  // sempre, enchendo o log e batendo no banco. Com teto e sem aviso, ele
+  // viraria uma linha numa tabela que ninguém abre — e é uma mensagem de
+  // cliente que não entrou.
+  {
+    const t = await subirTudo({ CAIXA_INTERVALO_MS: "400" }, {
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "mensagens")
+        ? "o banco recusa esta mensagem" : null,
+      tabelas: {
+        eventos_recebidos: [{
+          id: 1,
+          corpo: mensagemDaUazapi("esta nunca vai entrar", "CAIXA-5"),
+          recebido_em: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          processado_em: null, processando_em: null, tentativas: 0, erro: null,
+        }],
+      },
+    });
+    let desistiu = false;
+    for (let i = 0; i < 60; i++) {
+      if (/falhou 5 vezes/i.test(t.registro.join(""))) { desistiu = true; break; }
+      await espera(250);
+    }
+    const linha = (t.sb.dados.eventos_recebidos || []).find((e) => String(e.id) === "1");
+    ok("o evento que sempre falha para de ser tentado", linha && linha.tentativas <= 5,
+       `tentou ${linha && linha.tentativas} vezes`);
+    ok("e o log GRITA que a mensagem não entrou", desistiu,
+       t.registro.join("").slice(-400));
+    ok("a linha guarda o motivo, para quem for investigar",
+       Boolean(linha && linha.erro), JSON.stringify(linha));
+    ok("e ela NÃO é dada como resolvida", !(linha && linha.processado_em),
+       "marcar como resolvida esconderia uma mensagem que não entrou");
     await t.parar();
   }
 }
