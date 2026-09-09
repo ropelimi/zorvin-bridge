@@ -516,8 +516,12 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     let corpo = "";
     for await (const p of req) corpo += p;
     const json = corpo ? (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })() : null;
+    // A CONSULTA (`?cpf=...`) ENTRA JUNTO. Ela guardava só o caminho, e havia
+    // rota cujo pedido inteiro vai na consulta — "de quem é este CPF" é uma —,
+    // então a prova não tinha como conferir o que foi perguntado. Ficava
+    // aprovando "chegou ao Vantoro" sem saber COM O QUÊ.
     recebidas.push({ metodo: req.method, caminho: url.pathname, corpo: json,
-                     autorizacao: req.headers.authorization || null });
+                     busca: url.search || "", autorizacao: req.headers.authorization || null });
     if (demora) await new Promise((r) => setTimeout(r, demora));
     if (aindaDormindo > 0) {
       aindaDormindo -= 1;
