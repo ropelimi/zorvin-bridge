@@ -198,7 +198,19 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
 1. **IPv6**: a connection string direta do Supabase resolve para IPv6 e o Render **não alcança**. Usar sempre a do **Session Pooler** (IPv4).
 2. **Duplicação de mensagens enviadas**: a ponte gravava a mensagem E o eco do webhook gravava de novo. Resolvido ignorando `wasSentByApi === true` e gravando o `id_uazapi` retornado no envio.
 3. **Plano free do Render** não tem Shell, nem Pre-Deploy Command, nem Background Worker. Qualquer solução que dependa disso não serve.
-4. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
+4. **Vista sem `security_invoker` é um buraco na regra de acesso** (09/09/2026): a
+   vista `equipe` (`select id, nome, foto_url from usuarios`) roda com os poderes
+   da dona, então a RLS de `usuarios` **não vale por dentro dela** — e ela estava
+   liberada para `anon`. Medido: 21 linhas devolvidas a quem não entrou, com a
+   chave que vai no código da página. Pior, vista simples de uma tabela só é
+   **gravável**: `anon` tinha `UPDATE`/`DELETE` nela, e escrever ali cai em
+   `usuarios` sem passar por `usuarios_admin`. Conserto em
+   `sql/2026-09-a-lista-da-equipe-nao-e-publica.sql`. **Ligar `security_invoker`
+   seria o conserto errado** — `usuarios_leitura` é `id = auth.uid() or
+   zorvin_admin()`, então cada atendente passaria a ver só a própria linha e os
+   nomes das mensagens antigas sumiriam em silêncio. Ao criar vista nova, decida
+   e ESCREVA qual das duas ela é.
+5. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos
 
