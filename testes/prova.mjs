@@ -5023,5 +5023,242 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+
+// ==================================================================
+//  43. A MENSAGEM QUE NÃO SAIU TENTA DE NOVO SOZINHA
+// ==================================================================
+//
+// Uma falha, e a mensagem morria ali: virava bolha vermelha e só saía se
+// alguém estivesse com aquela conversa aberta para clicar em reenviar. Fora do
+// horário, não saía.
+//
+// O QUE ESTA SEÇÃO GUARDA não é "tenta de novo" — é a RÉGUA de quando tentar.
+// Reenviar sozinho uma mensagem que talvez tenha saído é o cliente recebendo
+// duas vezes, e disso não há desfazer; por isso cada conferência abaixo é
+// sobre um caso ficar de um lado ou do outro da linha, e as que provam que a
+// ponte NÃO insiste valem tanto quanto as que provam que ela insiste.
+{
+  console.log("\n43. A mensagem que não saiu tenta de novo sozinha");
+
+  /** Põe uma mensagem na fila, deixa o envio falhar, e devolve a linha. */
+  async function enfileirarEFalhar(falharEnvio, { tentativas = 0, opcoes = {}, env = {},
+                                                  servidorMorto = false } = {}) {
+    const t = await subirTudo(env, { uazapi: { falharEnvio }, ...opcoes });
+    if (servidorMorto) {
+      // NINGUÉM ATENDENDO DO OUTRO LADO. É o `ECONNREFUSED` de verdade — a
+      // conexão que nunca abre —, e não uma imitação dele: para separar "não
+      // consegui nem falar com o servidor" de "falei e a resposta se perdeu",
+      // a prova precisa do erro que o Node lança de fato.
+      //
+      // UMA PORTA LIVRE, e não a porta 1. Com a 1 esta prova reprovava por um
+      // motivo que não é o assunto dela: o Node recusa as portas reservadas
+      // ANTES de tentar conectar ("bad port"), e o erro sai sem `code` nenhum —
+      // então não havia `ECONNREFUSED` para a ponte reconhecer, e o item ia
+      // para erro com razão. Medido, e não deduzido.
+      t.sb.dados.advogados[0].servidor = `http://127.0.0.1:${await portaLivre()}`;
+    }
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    const linha = t.sb.dados.fila_envio.find((f) => f.id === 1);
+    return { t, linha, registro: t.registro.join("") };
+  }
+
+  // ---- 43a. "mandou demais" volta para a fila, e não para a bolha vermelha ----
+  //
+  // 429 é a própria Uazapi dizendo que NÃO PROCESSOU. A mensagem não foi para
+  // o WhatsApp, e é a falha que mais aparece no dia movimentado — que é o dia
+  // em que a resposta perdida custa caro.
+  {
+    const { t, linha, registro } = await enfileirarEFalhar(
+      { status: 429, corpo: { error: "too many requests" } });
+    ok("o item volta a ser pendente, em vez de virar erro",
+       linha?.status === "pendente", `ficou ${linha?.status}`);
+    ok("com hora marcada para a próxima tentativa",
+       Boolean(linha?.tentar_em), JSON.stringify(linha));
+    ok("e essa hora está no futuro — ele não é da vez agora",
+       new Date(linha?.tentar_em).getTime() > Date.now(), String(linha?.tentar_em));
+    ok("a tentativa foi contada", (linha?.tentativas || 0) === 1,
+       `contou ${linha?.tentativas}`);
+    ok("o motivo fica guardado para quem for investigar",
+       /429|too many/i.test(linha?.erro_detalhe || ""), JSON.stringify(linha?.erro_detalhe));
+    ok("e o log diz de quantas é a tentativa e quando é a próxima",
+       /tentativa 1 de 5/.test(registro) && /nova tentativa em \d+s/.test(registro),
+       registro.slice(-400));
+    // A BOLHA NÃO FICA VERMELHA. O painel pinta de vermelho pelo `status`, e
+    // este item voltou a ser um item pendente: para quem atende, a mensagem
+    // ainda está indo — que é a verdade.
+    ok("e a tela NÃO recebe motivo de erro para mostrar",
+       !linha?.erro_motivo, JSON.stringify(linha?.erro_motivo));
+    await t.parar();
+  }
+
+  // ---- 43b. a espera é respeitada ----
+  //
+  // Sem isto a retentativa não seria retentativa: o ciclo roda de 3 em 3
+  // segundos e gastaria as cinco tentativas no primeiro minuto, bem quando o
+  // problema que causou a falha ainda está de pé.
+  {
+    const t = await subirTudo({}, { uazapi: { falharEnvio: { status: 429, corpo: { error: "x" } } } });
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas: 1, criado_em: new Date().toISOString(),
+      tentar_em: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    const tentou = t.uaz.recebidas.filter((c) => /\/send\//.test(c.caminho)).length;
+    ok("o item que está esperando a hora NÃO é tentado", tentou === 0,
+       `tentou ${tentou} vez(es)`);
+    ok("e continua pendente, sem gastar tentativa",
+       t.sb.dados.fila_envio[0].status === "pendente" && t.sb.dados.fila_envio[0].tentativas === 1,
+       JSON.stringify(t.sb.dados.fila_envio[0]));
+    await t.parar();
+  }
+
+  // ---- 43c. chegada a hora, ela sai ----
+  //
+  // A conferência que fecha o círculo: sem ela, "voltou para pendente" poderia
+  // ser só um jeito mais bonito de a mensagem nunca sair.
+  {
+    const t = await subirTudo({});
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas: 1, criado_em: new Date().toISOString(),
+      tentar_em: new Date(Date.now() - 1000).toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("passada a hora, a mensagem sai",
+       t.sb.dados.fila_envio[0].status === "enviada",
+       JSON.stringify(t.sb.dados.fila_envio[0]));
+    ok("e entra no histórico da conversa",
+       (t.sb.dados.mensagens || []).some((m) => m.texto === "Bom dia"),
+       JSON.stringify(t.sb.dados.mensagens));
+    await t.parar();
+  }
+
+  // ---- 43d. a conexão que nunca abriu ----
+  //
+  // Não houve conversa com a Uazapi, então não houve mensagem. É o único caso
+  // de rede em que a certeza existe — e o código que o prova (`ECONNREFUSED`)
+  // vinha do Node em `cause` e era jogado fora antes desta mudança.
+  {
+    const { t, linha } = await enfileirarEFalhar(null, { servidorMorto: true });
+    ok("servidor fora do ar devolve o item para a fila",
+       linha?.status === "pendente", `ficou ${linha?.status}`);
+    ok("e o código da falha de rede é guardado, em vez de descartado",
+       /ECONNREFUSED/i.test(linha?.erro_detalhe || ""), JSON.stringify(linha?.erro_detalhe));
+    await t.parar();
+  }
+
+  // ---- 43e. o que NÃO pode ser tentado de novo ----
+  //
+  // Estas três são o coração da régua. Em nenhuma delas a ponte pode insistir
+  // sozinha: nas duas primeiras porque insistir não resolveria nada e adiaria
+  // o aviso que uma pessoa precisa ver; na terceira porque a mensagem PODE ter
+  // saído, e reenviar seria o cliente recebendo duas vezes.
+  {
+    const { t, linha } = await enfileirarEFalhar(
+      { status: 400, corpo: { error: "number not exists" } });
+    ok("número que não existe vira erro na hora, sem insistir",
+       linha?.status === "erro", `ficou ${linha?.status}`);
+    ok("sem hora marcada — não há o que tentar de novo",
+       !linha?.tentar_em, String(linha?.tentar_em));
+    await t.parar();
+  }
+  {
+    const { t, linha, registro } = await enfileirarEFalhar(
+      { status: 503, corpo: { error: true, message: "WhatsApp disconnected: session is not reconnectable" } });
+    ok("linha do escritório caída vira erro, e não retentativa",
+       linha?.status === "erro", `ficou ${linha?.status}`);
+    // Insistir aqui gastaria as cinco tentativas em vinte minutos para terminar
+    // na mesma bolha vermelha — só que mais tarde, e depois de o aviso já ter
+    // passado. Este caso pede uma pessoa, não uma retentativa.
+    ok("e o aviso de linha caída continua saindo na hora",
+       /LINHA DESCONECTADA/.test(registro), registro.slice(-400));
+    await t.parar();
+  }
+  {
+    // O TEMPO LIMITE FICA DE FORA DE PROPÓSITO. A Uazapi demora e nós
+    // desistimos — mas o pedido pode ter chegado inteiro, e ela pode ter
+    // mandado a mensagem. Enquanto isso não for medido contra a Uazapi de
+    // verdade, a decisão é de quem atende.
+    const { t, linha } = await enfileirarEFalhar(null, {
+      opcoes: { uazapi: { demoraDoEnvio: 3000 } },
+      env: { UAZAPI_TIMEOUT_MS: "300" },
+    });
+    ok("tempo limite estourado vira erro, e a ponte NÃO reenvia sozinha",
+       linha?.status === "erro", `ficou ${linha?.status}`);
+    ok("sem hora marcada", !linha?.tentar_em, String(linha?.tentar_em));
+    await t.parar();
+  }
+
+  // ---- 43f. o teto continua valendo ----
+  //
+  // Uma retentativa sem teto seria um laço que reentrega a mesma mensagem para
+  // sempre. Na última tentativa a régua muda de lado: vira bolha vermelha, que
+  // é onde uma pessoa consegue agir.
+  {
+    const { t, linha } = await enfileirarEFalhar(
+      { status: 429, corpo: { error: "too many requests" } }, { tentativas: 4 });
+    ok("esgotadas as tentativas, vira erro em vez de insistir para sempre",
+       linha?.status === "erro", `ficou ${linha?.status}`);
+    ok("e a tela diz que tentamos várias vezes",
+       /v[áa]rias vezes/i.test(linha?.erro_motivo || ""), JSON.stringify(linha?.erro_motivo));
+    // SEM PERDER A CAUSA. Dizer só "tentamos várias vezes" tiraria de quem
+    // investiga a única pista do porquê — e o porquê é o que decide se o
+    // conserto é esperar, arrumar o cadastro ou reconectar um aparelho.
+    ok("sem jogar fora o motivo técnico",
+       /429|too many/i.test(linha?.erro_detalhe || ""), JSON.stringify(linha?.erro_detalhe));
+    await t.parar();
+  }
+
+  // ---- 43g. base sem a coluna: tudo como antes ----
+  //
+  // O estado real de produção entre a entrega e o SQL rodado. A fila NÃO pode
+  // parar por causa de uma coluna que falta: uma fila que não é lida é o
+  // escritório inteiro sem enviar nada, bem pior do que ficar sem a
+  // retentativa automática.
+  {
+    const { t, linha, registro } = await enfileirarEFalhar(
+      { status: 429, corpo: { error: "too many requests" } },
+      { opcoes: { semColunas: { fila_envio: ["tentar_em"] } } });
+    ok("sem a coluna, a falha vira erro — exatamente como antes",
+       linha?.status === "erro", `ficou ${linha?.status}`);
+    ok("e o log diz o que rodar para ligar a retentativa",
+       /tentar_em.*n[ãa]o existe/s.test(registro)
+       && /2026-09-a-mensagem-que-nao-saiu-tenta-de-novo\.sql/.test(registro),
+       registro.slice(-600));
+    await t.parar();
+  }
+  {
+    // E a fila continua ENVIANDO. Sem esta, a anterior provaria só que a ponte
+    // avisa antes de parar de funcionar.
+    const t = await subirTudo({}, { semColunas: { fila_envio: ["tentar_em"] } });
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas: 0, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("e a fila segue enviando normalmente sem a coluna",
+       t.sb.dados.fila_envio[0].status === "enviada",
+       JSON.stringify(t.sb.dados.fila_envio[0]));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
