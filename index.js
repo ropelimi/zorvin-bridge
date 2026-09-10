@@ -408,6 +408,29 @@ function tipoDaMensagem(m) {
   return 'texto';
 }
 
+// O NOME DO ARQUIVO QUE O CLIENTE MANDOU.
+//
+// A ponte nunca gravou `midia_nome` de nada que CHEGA — só do que o escritório
+// envia. Então todo documento recebido aparecia na conversa escrito
+// "Documento", e o nome, que é o que distingue a procuração assinada do
+// panfleto encaminhado, ficava só do lado do WhatsApp.
+//
+// Isso é metade do relato de 10/09 ("Documento — indisponível"): a outra
+// metade é o arquivo não chegar, e esta é a que fica visível mesmo quando ele
+// chega.
+//
+// SÓ A PONTA DO CAMINHO: `fileName` costuma vir como o nome puro, mas um
+// remetente pode mandar "C:\\Users\\...\\procuracao.pdf". Guardar o caminho de
+// outra pessoa não serve para nada e ainda diz onde ela guarda as coisas.
+function nomeDoArquivo(m) {
+  const c = (m && m.content) || {};
+  const cru = c.fileName || c.filename || c.title || c.docName
+           || (m && (m.fileName || m.filename || m.docName)) || null;
+  if (!cru) return null;
+  const so = String(cru).split(/[\\/]/).pop().trim().slice(0, 200);
+  return so || null;
+}
+
 // "ESTE TIPO EU RECONHECI, OU SÓ CHUTEI UM PADRÃO?"
 //
 // É uma pergunta diferente de "que tipo é este", e a diferença some no
@@ -1659,6 +1682,7 @@ async function processarEventoDoWebhook(corpo) {
       midiaUrl = 'data:image/jpeg;base64,' + m.content.JPEGThumbnail;
     }
     const midiaMime = (m.content && m.content.mimetype) || null;
+    const midiaNome = tipo === 'texto' ? null : nomeDoArquivo(m);
 
     // ------------------------------------------------------------
     //  O ARQUIVO GRANDE VEM DEPOIS. A BOLHA VEM AGORA.
@@ -1688,17 +1712,8 @@ async function processarEventoDoWebhook(corpo) {
       ? () => {
           const servidorAdv = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
           // Sem `await` de propósito: quem chamou já respondeu ao webhook.
-          baixarMidiaRecebida(servidorAdv, adv.token, m, midiaMime)
-            .then((urlReal) => (urlReal
-              ? trocarMiniaturaPeloArquivo(m.messageid, urlReal, midiaMime)
-              // O ID VAI JUNTO E INTEIRO — é por ele que se cruza com o
-              // `FileURL` que chega depois, num `messages_update`. Sem os dois
-              // lados escritos do mesmo jeito, não há como saber se um conserto
-              // é possível.
-              : console.log(`Anexo (${tipo}) sem arquivo: o download falhou. `
-                  + `Mensagem ${m.messageid} fica sem mídia. `
-                  + 'Quem abrir a conversa vê um anexo vazio.')))
-            .catch((e) => console.log(`Anexo (${tipo}) ${m.messageid}: ${(e && e.message) || e}`));
+          perseguirOArquivo({ servidor: servidorAdv, token: adv.token, m, mime: midiaMime,
+                              nome: midiaNome, tipo });
         }
       : null;
 
@@ -1748,6 +1763,10 @@ async function processarEventoDoWebhook(corpo) {
     const extras = { ...(extrairResposta(m) || {}) };
     const segundos = segundosDaMidia(m, tipo);
     if (segundos) extras.midia_segundos = segundos;
+    // O NOME DO ARQUIVO VAI JUNTO DOS EXTRAS, e não em `base`, pelo mesmo
+    // motivo da duração: numa base sem a coluna, um campo em `base` derruba a
+    // gravação inteira, e a mensagem do cliente sumiria por causa de um nome.
+    if (midiaNome) extras.midia_nome = midiaNome;
 
     const msgErro = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
     // A MESMA REGRA, e aqui ela é a mais importante das três: se a mensagem não
@@ -1787,6 +1806,118 @@ async function processarEventoDoWebhook(corpo) {
     processarFilaDeEnvio().catch(() => {});
   }
 }
+
+// ============================================================
+//  O RESGATE DOS ANEXOS QUE JÁ ESTÃO VAZIOS
+//
+//  A insistência conserta o que chega de agora em diante. Os documentos que já
+//  estão na conversa escritos "indisponível" — o do relato de 10/09 entre eles
+//  — continuariam vazios para sempre, porque nada no sistema volta a olhar
+//  para eles.
+//
+//  Esta porta volta. Procura no banco as mensagens de anexo sem arquivo,
+//  descobre por qual telefone cada uma entrou e pede o arquivo à Uazapi outra
+//  vez, uma a uma.
+//
+//  NÃO DEVOLVE CONTEÚDO DE MENSAGEM NENHUMA: quantas achou, quantas encheu, e
+//  os ids da Uazapi das que não deram. É o bastante para saber se funcionou e
+//  não expõe conversa de cliente numa página aberta no navegador.
+//
+//  A MESMA PORTA DO HISTÓRICO, com a mesma senha: quem pode reimportar
+//  conversa pode rebuscar anexo, e uma variável a mais no Render é uma a mais
+//  para esquecer.
+// ============================================================
+app.get('/anexos/resgatar', async (req, res) => {
+  try {
+    const senha = process.env.IMPORT_TOKEN;
+    if (!senha) {
+      return res.status(403).send(
+        'Esta porta está fechada para todo mundo: a variável IMPORT_TOKEN não existe '
+        + 'neste servidor.\n\nRender → o serviço da ponte → Environment → Add Environment '
+        + 'Variable, com o nome IMPORT_TOKEN e uma senha forte que você escolher.');
+    }
+    if (req.query.token !== senha) {
+      return res.status(403).send(
+        'O ?token= não confere com o IMPORT_TOKEN deste servidor.\n\n'
+        + 'A variável existe — o que não bate é o valor. O engano mais comum é um '
+        + 'espaço em branco colado junto no começo ou no fim.');
+    }
+
+    const dias = Math.min(Math.max(parseInt(req.query.dias || '7', 10) || 7, 1), 90);
+    const limite = Math.min(Math.max(parseInt(req.query.limite || '30', 10) || 30, 1), 200);
+    const desde = new Date(Date.now() - dias * 86400000).toISOString();
+
+    // MAIS DO QUE O LIMITE, de propósito: a peneira do arquivo vazio é feita
+    // aqui (uma miniatura `data:` não é "coluna nula", e o banco não sabe
+    // disso), então pedir só `limite` linhas devolveria quase só mensagens que
+    // já têm arquivo e o resgate acharia meia dúzia.
+    const { data: candidatas, error } = await supabase.from('mensagens')
+      .select('id, id_uazapi, conversa_id, tipo, midia_url, midia_mime')
+      .neq('tipo', 'texto')
+      .gte('criado_em', desde)
+      .order('criado_em', { ascending: false })
+      .limit(limite * 20);
+    if (error) return res.status(500).send(`O banco recusou a consulta: ${error.message}`);
+
+    const vazias = (candidatas || [])
+      .filter((c) => c.id_uazapi && ehSoMiniatura(c.midia_url))
+      .slice(0, limite);
+    if (!vazias.length) {
+      return res.json({ ok: true, dias, achadas: 0,
+        recado: `Nenhum anexo sem arquivo nos últimos ${dias} dia(s).` });
+    }
+
+    // De qual telefone é cada mensagem. Duas idas ao banco para o lote inteiro,
+    // e não duas por mensagem.
+    const idsDeConversa = [...new Set(vazias.map((v) => v.conversa_id).filter(Boolean))];
+    const { data: conversas } = await supabase.from('conversas')
+      .select('id, advogado_id').in('id', idsDeConversa);
+    const advDaConversa = new Map((conversas || []).map((c) => [String(c.id), c.advogado_id]));
+    const { data: advs } = await supabase.from('advogados')
+      .select('id, token, servidor').in('id', [...new Set((conversas || []).map((c) => c.advogado_id))]);
+    const advPorId = new Map((advs || []).map((a) => [String(a.id), a]));
+
+    let encheu = 0;
+    const faltaram = [];
+    for (const v of vazias) {
+      const adv = advPorId.get(String(advDaConversa.get(String(v.conversa_id))));
+      if (!adv || !adv.token) {
+        faltaram.push({ id: v.id_uazapi, porque: 'não achei o telefone desta conversa' });
+        continue;
+      }
+      const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+      const relato = { motivo: '' };
+      const url = await baixarMidiaRecebida(servidor, adv.token,
+        { messageid: v.id_uazapi, content: {} }, v.midia_mime, relato);
+      if (!url) {
+        faltaram.push({ id: v.id_uazapi, porque: relato.motivo || 'não deu, e não sei dizer por quê' });
+        continue;
+      }
+      await trocarMiniaturaPeloArquivo(v.id_uazapi, url, v.midia_mime);
+      encheu++;
+    }
+
+    // OS MOTIVOS CONTADOS, e não só listados. Com 115 anexos vazios, uma lista
+    // de 115 linhas iguais não se lê; "113 por isto, 2 por aquilo" se lê de
+    // relance e diz qual é o conserto.
+    const porMotivo = {};
+    for (const f of faltaram) porMotivo[f.porque] = (porMotivo[f.porque] || 0) + 1;
+
+    console.log(`Resgate de anexos: ${vazias.length} sem arquivo, ${encheu} recuperado(s).`);
+    res.json({
+      ok: true, dias, achadas: vazias.length, recuperados: encheu,
+      // Os ids da Uazapi, e não o conteúdo: servem para procurar no log e para
+      // saber se vale tentar outra vez daqui a pouco.
+      nao_deram: faltaram,
+      por_motivo: porMotivo,
+      recado: encheu
+        ? `${encheu} anexo(s) voltaram para a conversa. Recarregue o Zorvin para vê-los.`
+        : 'Nenhum voltou. A Uazapi já não tem estes arquivos, ou o telefone perdeu o token.',
+    });
+  } catch (e) {
+    res.status(500).send(`Não consegui resgatar: ${(e && e.message) || e}`);
+  }
+});
 
 app.post('/webhook', async (req, res) => {
   // JÁ ESTAMOS SAINDO: é melhor recusar do que aceitar e não terminar.
@@ -2032,9 +2163,34 @@ const rotaQueServe = new Map();
 // a conversa lenta ao abrir.
 const CACHE_DA_MIDIA = { cacheControl: '31536000, immutable' };
 
-async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
+/** A ponta do arquivo guardado no Storage.
+ *
+ *  Vinha do mime e só dele: `application/pdf` dá "pdf", mas a planilha do
+ *  Excel dá `vnd.openxmlformats-officedocument.spreadsheetml.sheet` — sessenta
+ *  caracteres de extensão —, e um arquivo que a Uazapi não soube identificar
+ *  dá "octet-stream". Quem clica em baixar recebe um nome que o computador
+ *  dele não sabe abrir.
+ *
+ *  O NOME QUE O CLIENTE MANDOU VALE MAIS que o mime justamente nesses casos,
+ *  porque foi ele que saiu do computador de alguém com a extensão certa. */
+function extensaoDoArquivo(mime, nome) {
+  const doNome = String(nome || '').split('.').pop();
+  if (doNome && doNome !== nome && /^[a-z0-9]{1,8}$/i.test(doNome)) return doNome.toLowerCase();
+  const sub = (String(mime || '').split('/')[1] || '').split(';')[0].toLowerCase();
+  if (!sub || sub === 'octet-stream' || sub.length > 8 || !/^[a-z0-9]+$/.test(sub)) return 'bin';
+  return sub;
+}
+
+async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
+  // POR QUE NÃO DEU — dito para quem chamou, e não só para o log.
+  //
+  // A porta de resgate devolve uma lista de ids que não deram, e um id sem
+  // motivo não ensina nada: "115 documentos não voltaram" pode ser token
+  // vencido, arquivo que a Uazapi já apagou, ou Storage recusando. São
+  // consertos diferentes, e quem lê a resposta não tem o log da Render.
+  const porque = (motivo) => { if (relato) relato.motivo = motivo; return null; };
   try {
-    if (!token || !m.messageid) return null;
+    if (!token || !m.messageid) return porque('o telefone está sem token');
 
     // A lembrada primeiro; as outras continuam na fila, para o dia em que ela
     // deixar de responder.
@@ -2069,7 +2225,40 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
         console.log(`downloadmedia ${rota} erro: ${e.message}`);
       }
     }
-    if (!dados) {
+    // ------------------------------------------------------------
+    //  A RESPOSTA INÚTIL É UMA FALHA IGUAL À RESPOSTA NENHUMA
+    //
+    //  A segunda chance — o endereço que a Uazapi mandou à parte, guardado pelo
+    //  id EXATO desta mensagem — só era tentada quando o download não respondia
+    //  NADA. Se ele respondia 200 com um corpo sem arquivo dentro, o `dados`
+    //  chegava preenchido, a função seguia em frente, não achava bytes e
+    //  desistia sem nunca olhar para o endereço que estava ali na mão.
+    //
+    //  É o caminho do relato de 10/09 ("Documento — indisponível"): o servidor
+    //  responde, o corpo não traz o arquivo, e o resgate que existia
+    //  justamente para isso ficava do lado de fora do `if`.
+    //
+    //  Agora as duas falhas passam pelo mesmo lugar.
+    // ------------------------------------------------------------
+    let mime = mimeInformado || 'application/octet-stream';
+    let bytes = null;
+    if (dados) {
+      mime = dados.mimetype || dados.mime || mimeInformado || 'application/octet-stream';
+      const b64 = dados.file || dados.data || dados.base64 || dados.media || dados.buffer;
+      const urlBaixavel = dados.url || dados.fileURL || dados.fileUrl || dados.link || dados.mediaUrl;
+      if (typeof b64 === 'string' && b64.length > 100) {
+        bytes = Buffer.from(b64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+      } else if (urlBaixavel) {
+        const arq = await fetchComTimeout(urlBaixavel, {}, 20000);
+        if (arq.ok) bytes = Buffer.from(await arq.arrayBuffer());
+      }
+      if (!bytes || !bytes.length) {
+        console.log('downloadmedia respondeu sem arquivo reconhecível:',
+                    JSON.stringify(dados).slice(0, 300));
+      }
+    }
+
+    if (!bytes || !bytes.length) {
       // A SEGUNDA CHANCE, antes de desistir: o endereço que a Uazapi mandou
       // por um `messages_update`, guardado pelo id EXATO desta mensagem.
       //
@@ -2095,34 +2284,23 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
       try {
         console.log('Mídia que não deu para baixar (content):', JSON.stringify(m.content).slice(0, 600));
       } catch (_) { /* ignora */ }
-      return null;
+      return porque(dados
+        ? 'a Uazapi respondeu, e sem arquivo dentro'
+        : 'nenhuma rota de download respondeu');
     }
 
-    const mime = dados.mimetype || dados.mime || mimeInformado || 'application/octet-stream';
-    let bytes = null;
-    const b64 = dados.file || dados.data || dados.base64 || dados.media || dados.buffer;
-    const urlBaixavel = dados.url || dados.fileURL || dados.fileUrl || dados.link || dados.mediaUrl;
-    if (typeof b64 === 'string' && b64.length > 100) {
-      bytes = Buffer.from(b64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-    } else if (urlBaixavel) {
-      const arq = await fetchComTimeout(urlBaixavel, {}, 20000);
-      if (arq.ok) bytes = Buffer.from(await arq.arrayBuffer());
-    }
-    if (!bytes || !bytes.length) {
-      console.log('downloadmedia sem arquivo reconhecível:', JSON.stringify(dados).slice(0, 300));
-      return null;
-    }
-
-    const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
-    const caminho = `recebidos/${m.messageid}.${ext}`;
+    const caminho = `recebidos/${m.messageid}.${extensaoDoArquivo(mime, nomeDoArquivo(m))}`;
     const { error: upErr } = await supabase.storage.from('anexos')
       .upload(caminho, bytes, { contentType: mime, upsert: true, ...CACHE_DA_MIDIA });
-    if (upErr) { console.error('Erro ao salvar mídia recebida no Storage:', upErr.message); return null; }
+    if (upErr) {
+      console.error('Erro ao salvar mídia recebida no Storage:', upErr.message);
+      return porque(`o Storage recusou: ${upErr.message}`);
+    }
     const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
-    return pub?.publicUrl || null;
+    return pub?.publicUrl || porque('o Storage guardou e não devolveu endereço');
   } catch (e) {
     console.error('Erro em baixarMidiaRecebida:', e.message);
-    return null;
+    return porque(`estourou: ${e.message}`);
   }
 }
 
@@ -2131,6 +2309,79 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado) {
  *  caminhos que põem arquivo em mensagem já gravada perguntam por aqui, para
  *  não divergirem no dia em que um deles for mexido. */
 const ehSoMiniatura = (v) => !v || String(v).startsWith('data:');
+
+// ============================================================
+//  O ANEXO QUE NÃO CHEGOU DE PRIMEIRA — E A INSISTÊNCIA
+//
+//  RELATO DE 10/09: "Documentos recebidos no Zorvin estão como indisponível."
+//
+//  Uma tentativa era tudo o que existia. Falhou o download, a bolha ficava
+//  vazia PARA SEMPRE: só o `FileURL` de um `messages_update` a salvava, e ele
+//  nem sempre vem. Não havia nada — nem na tela, nem por fora — que fizesse a
+//  ponte tentar de novo, e o escritório ficava com um documento que o cliente
+//  jurava ter mandado.
+//
+//  A Uazapi vai buscar o arquivo nos servidores do WhatsApp na hora do pedido.
+//  Falhar uma vez e servir na seguinte é o comportamento normal dela, e não a
+//  exceção: um documento grande, uma fila cheia, um segundo de rede ruim.
+//
+//  TRÊS TENTATIVAS ESPAÇADAS, e não um laço apertado: 20 segundos, um minuto,
+//  cinco minutos. A primeira costuma pegar o arquivo enquanto quem atende
+//  ainda está com a conversa aberta, e a última cobre a lentidão de verdade
+//  sem virar martelada num serviço que tem limite de uso.
+//
+//  ANTES DE CADA TENTATIVA, PERGUNTA-SE AO BANCO. O resgate pelo `FileURL`
+//  corre por fora e pode ter chegado primeiro; insistir depois disso seria
+//  baixar de novo um arquivo que já está guardado.
+// ============================================================
+const ESPERAS_DO_ANEXO = (process.env.ESPERA_DO_ANEXO_MS || '20000,60000,300000')
+  .split(',').map((n) => parseInt(n, 10)).filter((n) => n > 0);
+
+/** A mensagem já tem o arquivo de verdade? (Miniatura não conta.) */
+async function jaTemOArquivo(idUazapi) {
+  const { data, error } = await supabase
+    .from('mensagens').select('midia_url').eq('id_uazapi', idUazapi);
+  if (error || !data || !data.length) return false;
+  return data.every((c) => !ehSoMiniatura(c.midia_url));
+}
+
+async function perseguirOArquivo({ servidor, token, m, mime, nome, tipo, tentativa = 0 }) {
+  try {
+    const url = await baixarMidiaRecebida(servidor, token, m, mime);
+    if (url) {
+      await trocarMiniaturaPeloArquivo(m.messageid, url, mime, nome);
+      if (tentativa) {
+        console.log(`Anexo (${tipo}) ${m.messageid}: chegou na tentativa ${tentativa + 1}.`);
+      }
+      return;
+    }
+  } catch (e) {
+    console.log(`Anexo (${tipo}) ${m.messageid}: ${(e && e.message) || e}`);
+  }
+
+  const espera = ESPERAS_DO_ANEXO[tentativa];
+  if (espera === undefined) {
+    // O ID VAI JUNTO E INTEIRO — é por ele que se cruza com o `FileURL` que
+    // chega depois, num `messages_update`, e é por ele que o resgate manual
+    // (`/anexos/resgatar`) encontra a mensagem para tentar outra vez.
+    console.log(`Anexo (${tipo}) sem arquivo depois de ${ESPERAS_DO_ANEXO.length + 1} `
+      + `tentativas. Mensagem ${m.messageid} fica sem mídia. `
+      + 'Quem abrir a conversa vê um anexo vazio.');
+    return;
+  }
+  console.log(`Anexo (${tipo}) ${m.messageid}: não veio. Tento de novo em ${Math.round(espera / 1000)}s.`);
+  // `unref` para o relógio não segurar o processo de pé sozinho. Numa ponte que
+  // fica meses ligada isso não muda nada; numa bancada que sobe e desce a ponte
+  // a cada prova, um relógio de cinco minutos pendurado é uma suíte que não
+  // termina.
+  const relogio = setTimeout(() => {
+    jaTemOArquivo(m.messageid).then((tem) => {
+      if (tem) return;
+      perseguirOArquivo({ servidor, token, m, mime, nome, tipo, tentativa: tentativa + 1 });
+    }).catch(() => {});
+  }, espera);
+  if (relogio && typeof relogio.unref === 'function') relogio.unref();
+}
 
 /**
  * Põe o arquivo de verdade na mensagem que nasceu com a miniatura.
@@ -2145,7 +2396,7 @@ const ehSoMiniatura = (v) => !v || String(v).startsWith('data:');
  * Vale também para a repetição do mesmo webhook: na segunda vez a coluna já
  * aponta para o Storage, não casa com a miniatura, e nada é reescrito.
  */
-async function trocarMiniaturaPeloArquivo(idUazapi, url, mime) {
+async function trocarMiniaturaPeloArquivo(idUazapi, url, mime, nome) {
   if (!idUazapi || !url) return;
   // TODAS AS CÓPIAS, e não uma. Num grupo com dois telefones nossos a mesma
   // mensagem existe em duas conversas: trocar a miniatura só na primeira
@@ -2161,11 +2412,23 @@ async function trocarMiniaturaPeloArquivo(idUazapi, url, mime) {
 
   const remendo = { midia_url: url };
   if (mime) remendo.midia_mime = mime;
-  let escrita = supabase.from('mensagens').update(remendo).eq('id', alvo.id);
-  escrita = alvo.midia_url === null || alvo.midia_url === undefined
-    ? escrita.is('midia_url', null)
-    : escrita.eq('midia_url', alvo.midia_url);
-  const { error: erroEscrita } = await escrita;
+  if (nome) remendo.midia_nome = nome;
+  // A MESMA TRAVA, DUAS VEZES. A segunda escrita repete a condição inteira em
+  // vez de reaproveitar a primeira: `escrita` já foi enviada, e um construtor
+  // do supabase-js não se manda duas vezes.
+  const comTrava = (remendar) => {
+    let e = supabase.from('mensagens').update(remendar).eq('id', alvo.id);
+    return alvo.midia_url === null || alvo.midia_url === undefined
+      ? e.is('midia_url', null)
+      : e.eq('midia_url', alvo.midia_url);
+  };
+  let { error: erroEscrita } = await comTrava(remendo);
+  if (erroEscrita && nome) {
+    // Base sem a coluna do nome: grava o arquivo assim mesmo. Perder o nome é
+    // um aborrecimento; perder o arquivo por causa dele é o defeito de volta.
+    const { midia_nome, ...semNome } = remendo;
+    ({ error: erroEscrita } = await comTrava(semNome));
+  }
   if (erroEscrita) console.log(`Não consegui pôr o arquivo em ${idUazapi}: ${erroEscrita.message}`);
   }
 }
@@ -3284,6 +3547,14 @@ async function processarFilaDeEnvio() {
         const extras = {};
         if (item.enviado_por) extras.enviado_por = item.enviado_por;
         if (item.enviado_por_foto) extras.enviado_por_foto = item.enviado_por_foto;
+        // O NOME DO ARQUIVO TAMBÉM NO QUE SAI.
+        //
+        // O painel já grava `midia_nome` na FILA — é dele que sai o `docName`
+        // mandado ao WhatsApp, logo acima. Mas a linha de `mensagens`, que é a
+        // que a conversa desenha, nunca o recebia: o nome fazia a viagem
+        // inteira até o cliente e não sobrava para o escritório. Toda bolha de
+        // documento ENVIADO também aparecia escrita só "Documento".
+        if (ehMidia && item.midia_nome) extras.midia_nome = item.midia_nome;
         // O ID de quem enviou viaja junto com o nome. O nome é o que a bolha
         // mostra (o nome de então); o id é o que o painel conta, porque ele não
         // muda quando alguém edita o próprio perfil. Entra como "extra" pelo

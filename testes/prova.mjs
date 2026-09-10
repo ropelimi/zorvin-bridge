@@ -5318,5 +5318,262 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   await t.parar();
 }
 
+
+// ==================================================================
+//  45. O DOCUMENTO QUE CHEGA — E O QUE FICOU "INDISPONÍVEL"
+//
+//  RELATO DO ESCRITÓRIO, em 10/09, com a foto da tela: uma bolha escrita
+//  "Documento — indisponível" numa conversa de atendimento. "Documentos
+//  recebidos no Zorvin estão como indisponível. Favor corrigir."
+//
+//  Três coisas estavam erradas, e as três aparecem naquela bolha:
+//
+//  1. A SEGUNDA CHANCE FICAVA DO LADO DE FORA. O endereço que a Uazapi manda à
+//     parte só era usado quando o download não respondia NADA. Se ele
+//     respondia 200 com um corpo sem arquivo dentro — que é o que ela faz
+//     quando não conseguiu o arquivo no WhatsApp —, a ponte seguia em frente,
+//     não achava bytes e desistia sem olhar para o endereço que estava na mão.
+//
+//  2. UMA TENTATIVA ERA TUDO. Falhou, a bolha ficava vazia para sempre. A
+//     Uazapi busca o arquivo no WhatsApp na hora do pedido: falhar uma vez e
+//     servir na seguinte é o normal dela, não a exceção.
+//
+//  3. O NOME NUNCA FOI GRAVADO. `midia_nome` só era escrito no que o
+//     escritório ENVIA. Todo documento recebido aparecia como "Documento", e o
+//     nome — que é o que distingue a procuração assinada do panfleto
+//     encaminhado — ficava só do lado do WhatsApp.
+// ==================================================================
+console.log("\n45. O documento que chega, e o que ficou indisponível");
+{
+  const CHAT = "5511999998888@s.whatsapp.net";
+  const documentoDaUazapi = (id, nome = "procuracao assinada.pdf") => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: CHAT, sender: CHAT, fromMe: false, isGroup: false,
+      messageType: "documentMessage", mimetype: "application/pdf",
+      content: { mimetype: "application/pdf", fileName: nome },
+      messageTimestamp: Date.now(), wasSentByApi: false, senderName: "Cliente",
+    },
+  });
+  const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const mensagemDe = (t, id) => (t.sb.dados.mensagens || []).find((m) => m.id_uazapi === id);
+  const enderecoDoArquivoDe = (t, ids) => ({
+    BaseUrl: t.uaz.url,
+    EventType: "messages_update",
+    event: { Chat: CHAT, FileURL: `${t.uaz.url}/files/abc.pdf?assinatura=xyz`,
+             MessageIDs: ids, Type: "Delivered" },
+  });
+
+  // ---- 45a. o nome do arquivo entra na mensagem ----
+  {
+    const t = await subirTudo({}, { uazapi: { mimeDoDownload: "application/pdf" } });
+    await mandar(t, documentoDaUazapi("DOC-NOME"));
+    await espera(1200);
+
+    const m = mensagemDe(t, "DOC-NOME");
+    ok("o documento entra com o arquivo", !!(m && m.midia_url), `veio ${m && m.midia_url}`);
+    // SEM ISTO A BOLHA DIZ "Documento" mesmo com o arquivo dentro — que é
+    // metade do que o escritório fotografou.
+    ok("e com o NOME que o cliente mandou",
+       m && m.midia_nome === "procuracao assinada.pdf", `veio ${m && m.midia_nome}`);
+    await t.parar();
+  }
+
+  // ---- 45b. o caminho do relato: responde 200, sem arquivo ----
+  {
+    // `falhasDeDownload: 1` é o servidor que ATENDE e não traz nada — a falha
+    // que a bancada não sabia imitar. `rotaDeDownload: null` imitava só o
+    // outro caso, o do servidor que não responde, e os dois caminhos dentro da
+    // ponte eram diferentes.
+    //
+    // A espera curta é para a prova caber num teste; em produção são 20s, 1min
+    // e 5min.
+    //
+    // A PRIMEIRA É A MAIS LONGA DAS DUAS, de propósito. Com ela em 400ms, a
+    // segunda tentativa já tinha enchido o anexo antes de a conferência de
+    // baixo olhar — e "na primeira tentativa não vem arquivo nenhum" reprovava
+    // por causa do relógio da prova, e não do que ela mede. É a armadilha de
+    // sempre: uma conferência que depende de chegar primeiro não mede o que
+    // diz medir.
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "1500,400" },
+                              { uazapi: { falhasDeDownload: 1, mimeDoDownload: "application/pdf" } });
+    await mandar(t, documentoDaUazapi("DOC-TEIMOSO"));
+    await espera(600);
+
+    const vazio = mensagemDe(t, "DOC-TEIMOSO");
+    ok("na primeira tentativa não vem arquivo nenhum", vazio && !vazio.midia_url,
+       `veio ${vazio && vazio.midia_url}`);
+    ok("mas a bolha existe, para ninguém ficar sem saber que chegou algo", !!vazio);
+
+    // AQUI ESTÁ O CONSERTO. Antes, esta espera não mudava nada: nada no
+    // sistema voltava a pedir o arquivo, nunca.
+    await espera(2000);
+    const cheio = mensagemDe(t, "DOC-TEIMOSO");
+    ok("a ponte tenta de novo, e o documento chega", !!(cheio && cheio.midia_url),
+       "sem isto o documento fica 'indisponível' para sempre");
+    ok("e o log conta em que tentativa ele veio",
+       /chegou na tentativa/.test(t.registro.join("")), t.registro.join("").slice(-400));
+    await t.parar();
+  }
+
+  // ---- 45b-bis. a resposta inútil também merece a segunda chance ----
+  {
+    // A BRECHA, em uma frase: a segunda chance — o endereço que a Uazapi
+    // manda à parte, guardado pelo id EXATO da mensagem — só era tentada
+    // quando o download não respondia NADA. Se ele respondia 200 com um corpo
+    // sem arquivo dentro, a ponte seguia em frente, não achava bytes e
+    // desistia sem olhar para o endereço que estava ali na mão.
+    //
+    // A ORDEM AQUI É A DO CASO REAL: o evento do arquivo chega ANTES da
+    // mensagem, que é o que acontece sempre que a Uazapi manda o `FileURL` na
+    // frente. Ele fica guardado esperando; a mensagem chega logo depois, o
+    // download atende sem trazer nada, e é este endereço que salva o anexo.
+    //
+    // Sem o conserto: a bolha fica vazia com o arquivo a um passo de distância.
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "60000" },
+                              { uazapi: { falhasDeDownload: 99 } });
+    await mandar(t, enderecoDoArquivoDe(t, ["DOC-DE-BANDEJA"]));
+    await espera(400);
+    await mandar(t, documentoDaUazapi("DOC-DE-BANDEJA"));
+    await espera(1500);
+
+    const m = mensagemDe(t, "DOC-DE-BANDEJA");
+    ok("o download responde sem arquivo, e o endereço guardado salva o anexo",
+       !!(m && m.midia_url), "era o documento do cliente a um passo de distância");
+    ok("e o log conta por onde ele veio",
+       /mandou à parte/.test(t.registro.join("")), t.registro.join("").slice(-300));
+    await t.parar();
+  }
+
+  // ---- 45c. a insistência tem fim ----
+  {
+    // Um serviço que tem limite de uso não pode ser martelado. Depois das
+    // tentativas combinadas, desiste — e diz no log que desistiu, com o id, que
+    // é por onde o resgate manual acha a mensagem depois.
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "300,300" },
+                              { uazapi: { rotaDeDownload: null } });
+    await mandar(t, documentoDaUazapi("DOC-PERDIDO"));
+    await espera(2000);
+
+    const pedidos = () => t.uaz.recebidas.filter(
+      (c) => String(c.caminho).includes("download")).length;
+    ok("desiste depois das tentativas combinadas, e não fica batendo",
+       pedidos() <= 12, `foram ${pedidos()} idas ao servidor`);
+    ok("e o log diz que desistiu, com o id da mensagem",
+       /sem arquivo depois de \d+ tentativas/.test(t.registro.join(""))
+       && /DOC-PERDIDO/.test(t.registro.join("")), t.registro.join("").slice(-400));
+
+    // O NOME SOBREVIVE À FALTA DO ARQUIVO, e esta conferência tem de estar
+    // AQUI, e não na 45a.
+    //
+    // Lá o download funciona, e aí o nome entra pela gravação de depois — a
+    // que troca a miniatura pelo arquivo. Uma sabotagem que apagasse a
+    // gravação inicial passava despercebida: a conferência aprovava um nome
+    // que tinha chegado pelo outro caminho. Foi a sabotagem que mostrou isso.
+    //
+    // Sem arquivo não há gravação de depois, então o que se vê aqui só pode
+    // ter vindo do momento em que a mensagem nasceu. E é justamente a bolha
+    // que o escritório fotografou: sem o nome, ela diz "Documento —
+    // indisponível", sem dizer que documento era.
+    const perdido = mensagemDe(t, "DOC-PERDIDO");
+    ok("e mesmo sem o arquivo a bolha sabe QUE documento é",
+       perdido && perdido.midia_nome === "procuracao assinada.pdf",
+       `veio ${perdido && perdido.midia_nome}`);
+    await t.parar();
+  }
+
+  // ---- 45c-bis. o documento que o ESCRITÓRIO manda também tem nome ----
+  {
+    // O painel já grava o nome na FILA, e é dele que sai o `docName` mandado ao
+    // WhatsApp. Mas a linha de `mensagens` — a que a conversa desenha — nunca o
+    // recebia: o nome fazia a viagem inteira até o cliente e não sobrava para o
+    // escritório. Quem mandou "contrato assinado.pdf" via, na própria conversa,
+    // uma bolha escrita "Documento".
+    const t = await subirTudo();
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente Teste" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "documento", texto: "", status: "pendente",
+      midia_url: "https://falsa/anexos/contrato.pdf", midia_mime: "application/pdf",
+      midia_nome: "contrato assinado.pdf",
+      tentativas: 0, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1500);
+
+    const enviada = (t.sb.dados.mensagens || []).find((m) => m.tipo === "documento");
+    ok("o documento enviado vira mensagem", !!enviada);
+    ok("e leva o nome do arquivo junto",
+       enviada && enviada.midia_nome === "contrato assinado.pdf",
+       `veio ${enviada && enviada.midia_nome}`);
+    await t.parar();
+  }
+
+  // ---- 45d. o resgate do que JÁ está vazio ----
+  {
+    // A insistência conserta o que chega de agora em diante. O documento que o
+    // escritório fotografou já está na conversa, vazio, e nada no sistema volta
+    // a olhar para ele.
+    const t = await subirTudo({ IMPORT_TOKEN: "senha-boa", ESPERA_DO_ANEXO_MS: "300" },
+                              { uazapi: { rotaDeDownload: null } });
+    await mandar(t, documentoDaUazapi("DOC-ANTIGO"));
+    await espera(1500);
+    ok("o documento está lá, vazio, como o da foto",
+       (() => { const m = mensagemDe(t, "DOC-ANTIGO"); return m && !m.midia_url; })());
+
+    // O servidor volta a servir — é o caso real: o arquivo não veio naquele
+    // minuto e vem agora.
+    t.uaz.servirDownloadDeNovo("application/pdf");
+
+    const semSenha = await fetch(`http://127.0.0.1:${t.porta}/anexos/resgatar`);
+    ok("sem o token, a porta não abre", semSenha.status === 403, `veio ${semSenha.status}`);
+
+    const r = await fetch(`http://127.0.0.1:${t.porta}/anexos/resgatar?token=senha-boa&dias=7`);
+    const corpo = await r.json();
+    ok("com o token, ela responde", r.status === 200 && corpo.ok === true, JSON.stringify(corpo).slice(0, 200));
+    ok("acha o anexo vazio e o enche", corpo.recuperados === 1,
+       JSON.stringify(corpo).slice(0, 300));
+
+    const m = mensagemDe(t, "DOC-ANTIGO");
+    ok("e a mensagem passa a ter o arquivo", !!(m && m.midia_url), `veio ${m && m.midia_url}`);
+    // A RESPOSTA NÃO CARREGA CONVERSA DE CLIENTE. É uma página aberta num
+    // navegador, com uma senha que várias pessoas do escritório têm.
+    const cru = JSON.stringify(corpo);
+    ok("e a resposta não devolve texto de mensagem nenhuma",
+       !/procuracao|Cliente|5511999998888/.test(cru), cru.slice(0, 200));
+    await t.parar();
+  }
+
+  // ---- 45e. quando o resgate NÃO traz, ele diz por quê ----
+  {
+    // Sem isto, "115 documentos não voltaram" é um beco: pode ser token
+    // vencido, arquivo que a Uazapi já apagou, ou Storage recusando — três
+    // consertos diferentes. E quem lê a resposta é alguém num navegador, sem
+    // acesso ao log da Render.
+    const t = await subirTudo({ IMPORT_TOKEN: "senha-boa", ESPERA_DO_ANEXO_MS: "300" },
+                              { uazapi: { rotaDeDownload: null } });
+    await mandar(t, documentoDaUazapi("DOC-SEM-JEITO"));
+    await espera(1500);
+
+    const r = await fetch(`http://127.0.0.1:${t.porta}/anexos/resgatar?token=senha-boa&dias=7`);
+    const corpo = await r.json();
+    ok("não recupera o que a Uazapi não tem mais", corpo.recuperados === 0,
+       JSON.stringify(corpo).slice(0, 200));
+    ok("mas diz o motivo, e não só o id",
+       Array.isArray(corpo.nao_deram) && corpo.nao_deram[0]
+       && /rota de download/.test(corpo.nao_deram[0].porque || ""),
+       JSON.stringify(corpo.nao_deram || []).slice(0, 250));
+    // CONTADOS, e não só listados: com 115 linhas iguais ninguém lê a lista.
+    ok("e resume por motivo, para a lista longa se ler de relance",
+       corpo.por_motivo && Object.values(corpo.por_motivo)[0] === 1,
+       JSON.stringify(corpo.por_motivo || {}));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

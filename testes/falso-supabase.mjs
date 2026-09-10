@@ -31,8 +31,16 @@ function testeDoFiltro(bruto) {
   switch (op) {
     case "eq":  return (v) => eq(v, valor);
     case "neq": return (v) => !eq(v, valor);
-    case "gt":  return (v) => Number(v) > Number(valor);
-    case "gte": return (v) => Number(v) >= Number(valor);
+    // DATA NÃO É NÚMERO, e `gt`/`gte` fingiam que era: `Number("2026-09-10…")`
+    // é `NaN`, e toda comparação com `NaN` é falsa. Quer dizer que um
+    // `.gte('criado_em', …)` — o filtro de "dos últimos sete dias" — devolvia
+    // LISTA VAZIA na bancada, sempre. A prova que dependesse dele estaria
+    // medindo o defeito da bancada em vez do da ponte.
+    //
+    // `lt` e `lte`, logo abaixo, já faziam certo desde sempre; estes dois é que
+    // ficaram para trás.
+    case "gt":  return (v) => (isNaN(Number(valor)) ? String(v) > valor : Number(v) > Number(valor));
+    case "gte": return (v) => (isNaN(Number(valor)) ? String(v) >= valor : Number(v) >= Number(valor));
     case "lt":  return (v) => (isNaN(Number(valor)) ? String(v) < valor : Number(v) < Number(valor));
     case "lte": return (v) => (isNaN(Number(valor)) ? String(v) <= valor : Number(v) <= Number(valor));
     case "is":  return (v) => (valor === "null" ? v == null : String(v) === valor);
@@ -625,8 +633,24 @@ export function subirFalsaUazapi({
   // começa e termina antes de qualquer outra coisa acontecer, e um toque
   // perdido durante o ciclo não tem como aparecer em prova nenhuma.
   demoraDoEnvio = 0,
+  // QUANTAS VEZES O DOWNLOAD RESPONDE 200 SEM ARQUIVO DENTRO.
+  //
+  // É a falha que a bancada não sabia imitar, e é a do relato de 10/09: o
+  // servidor ATENDE — não é 404, não é queda de rede —, devolve um JSON e
+  // dentro dele não vem arquivo nenhum. A Uazapi vai buscar o arquivo nos
+  // servidores do WhatsApp na hora do pedido, e falhar uma vez e servir na
+  // seguinte é comportamento normal dela.
+  //
+  // Com `rotaDeDownload: null` imitava-se só o outro caso, o do servidor que
+  // não responde — e os dois caminhos, dentro da ponte, eram diferentes.
+  falhasDeDownload = 0,
+  // O tipo e o nome do que o download devolve. A bancada só sabia devolver
+  // foto, então o caminho do DOCUMENTO — que é o do relato — nunca foi
+  // exercitado com um arquivo de verdade chegando.
+  mimeDoDownload = "image/jpeg",
 } = {}) {
   const recebidas = [];
+  let downloadsFalhados = 0;
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
   const servidor = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
@@ -677,8 +701,14 @@ export function subirFalsaUazapi({
       if (demoraDoDownload > 0) {
         await new Promise((r) => setTimeout(r, demoraDoDownload));
       }
+      // ATENDE, E NÃO TRAZ NADA. O corpo é o que a Uazapi devolve quando não
+      // conseguiu o arquivo no WhatsApp: uma resposta de sucesso sem arquivo.
+      if (downloadsFalhados < falhasDeDownload) {
+        downloadsFalhados++;
+        return responder(200, { status: "ok", mimetype: mimeDoDownload });
+      }
       return responder(200, {
-        mimetype: "image/jpeg",
+        mimetype: mimeDoDownload,
         file: (arquivo || Buffer.from("uma-foto-de-mentira".repeat(20))).toString("base64"),
       });
     }
@@ -690,6 +720,17 @@ export function subirFalsaUazapi({
       resolve({
         url: `http://127.0.0.1:${servidor.address().port}`,
         recebidas,
+        // O SERVIDOR VOLTA A SERVIR, no meio da prova.
+        //
+        // É o caso do resgate: o arquivo não veio naquele minuto e vem agora.
+        // Sem poder mudar de ideia, a única prova possível seria a de um
+        // servidor que nunca serve — e aí "não resgatou" não distingue "a
+        // porta não funciona" de "não havia arquivo para trazer".
+        servirDownloadDeNovo: (mime) => {
+          rotaDeDownload = "/message/downloadmedia";
+          if (mime) mimeDoDownload = mime;
+          downloadsFalhados = falhasDeDownload;
+        },
         parar: () => new Promise((r) => servidor.close(r)),
       });
     });
