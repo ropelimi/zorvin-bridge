@@ -3843,6 +3843,33 @@ app.get('/vantoro/cliente', rotaVantoro(async (req) => {
   return chamarVantoro(`/clientes/buscar?${busca}`);
 }));
 
+// ------------------------------------------------------------
+//  DE QUEM É ESTE CPF — perguntado ENQUANTO a pessoa digita
+//
+//  Relato do escritório, em 08/09: "está sendo permitido cadastrar o mesmo
+//  cliente com o mesmo CPF... o ideal é que ao digitar o CPF o sistema avise
+//  que já existe o cadastro e se o usuário quer ver a ficha".
+//
+//  O Vantoro passou a RECUSAR o CPF de outro cadastro (vantoro#232). Recusar
+//  no fim, porém, é tarde: a pessoa preencheu nome, nascimento, endereço e
+//  profissão, e só então descobre que o cadastro já existia — o trabalho todo
+//  refeito à toa, e o cadastro certo continuando sem o que ela digitou.
+//
+//  Esta rota é a pergunta feita ANTES. Repassa e mais nada: quem sabe de quem
+//  é o CPF é o Vantoro, e uma segunda resposta aqui divergiria da dele no
+//  primeiro caso que eu não tivesse previsto.
+// ------------------------------------------------------------
+app.get('/vantoro/cpf-existe', rotaVantoro(async (req) => {
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  // MENOS DE ONZE DÍGITOS NEM SAI DAQUI. A tela chama a cada tecla; mandar
+  // "398" ao Vantoro seria uma ida à rede por caractere digitado, num serviço
+  // que hiberna, para uma pergunta que não tem resposta possível.
+  if (cpf.length !== 11 && cpf.length !== 14) {
+    return { status: 200, corpo: { ok: true, encontrado: false, incompleto: true } };
+  }
+  return chamarVantoro(`/clientes/cpf-existe?cpf=${encodeURIComponent(cpf)}`);
+}));
+
 // Busca livre no cadastro: nome, CPF ou número do processo. É o que permite ao
 // atendente procurar no Zorvin do mesmo jeito que procuraria no Vantoro, em vez
 // de depender de já ter o telefone da pessoa.

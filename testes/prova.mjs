@@ -5260,5 +5260,63 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
   }
 }
 
+// ==================================================================
+//  44. DE QUEM É ESTE CPF — perguntado enquanto se digita
+// ==================================================================
+//
+// Relato do escritório, em 08/09: "está sendo permitido cadastrar o mesmo
+// cliente com o mesmo CPF... o ideal é que ao digitar o CPF o sistema avise
+// que já existe o cadastro e se o usuário quer ver a ficha".
+//
+// O Vantoro passou a RECUSAR o CPF de outro cadastro (vantoro#232). Recusar no
+// fim, porém, é tarde: a pessoa preencheu nome, nascimento, endereço e
+// profissão, e só então descobre que o cadastro já existia — o trabalho todo
+// refeito à toa.
+//
+// Esta rota é a pergunta feita ANTES, e a ponte só repassa: quem sabe de quem
+// é o CPF é o Vantoro.
+{
+  console.log("\n44. De quem é este CPF, perguntado enquanto se digita");
+
+  const t = await subirTudo({}, { vantoro: {} });
+  const perguntar = (cpf) => fetch(
+    `http://127.0.0.1:${t.porta}/vantoro/cpf-existe?cpf=${encodeURIComponent(cpf)}`,
+    { headers: { Authorization: "Bearer jwt-bom" } });
+  const noVantoro = () => t.van.recebidas.filter((x) => x.caminho.includes("/clientes/cpf-existe"));
+
+  const r = await perguntar("398.506.618-36");
+  ok("o CPF completo chega ao Vantoro", noVantoro().length === 1,
+     JSON.stringify(t.van.recebidas.map((x) => x.caminho)));
+  // SÓ OS DÍGITOS ATRAVESSAM. O Vantoro compara por dígitos; mandar a
+  // pontuação junto faria a comparação depender de como cada tela formata.
+  ok("e só com os dígitos, sem a pontuação",
+     noVantoro()[0] && noVantoro()[0].busca.includes("cpf=39850661836"),
+     noVantoro()[0] && noVantoro()[0].busca);
+  ok("e a rota responde 200", r.status === 200, `veio ${r.status}`);
+
+  // O CPF PELA METADE NEM SAI DAQUI.
+  //
+  // A tela chama a cada tecla. Mandar "398" ao Vantoro seria uma ida à rede por
+  // caractere digitado, num serviço que hiberna — e para uma pergunta que não
+  // tem resposta possível.
+  const antes = noVantoro().length;
+  const meio = await perguntar("398");
+  const corpo = await meio.json();
+  ok("o CPF pela metade não vira ida à rede", noVantoro().length === antes,
+     `foram ${noVantoro().length - antes} idas a mais`);
+  ok("e a resposta diz que está incompleto, sem inventar um 'não achei'",
+     meio.status === 200 && corpo.encontrado === false && corpo.incompleto === true,
+     JSON.stringify(corpo));
+
+  // SEM SESSÃO NÃO RESPONDE, e nem toca o Vantoro. A rota diz se um CPF está
+  // na base do escritório — é informação de cadastro, não de tela pública.
+  const semLogin = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cpf-existe?cpf=39850661836`);
+  ok("sem sessão do Zorvin, recusa", semLogin.status === 401, `veio ${semLogin.status}`);
+  ok("e nem chega a perguntar ao Vantoro", noVantoro().length === antes,
+     `perguntou ${noVantoro().length - antes} vez(es)`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
