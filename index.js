@@ -2206,6 +2206,51 @@ async function tratarPresenca(body, evento) {
 // vez e lembra-se. Se um dia a lembrada parar de servir, a busca recomeça
 // sozinha pelas três.
 const ROTAS_DE_DOWNLOAD = ['/message/downloadmedia', '/message/download', '/downloadmedia'];
+
+// ------------------------------------------------------------
+//  POST NÃO É A ÚNICA FORMA DE PEDIR
+//
+//  MEDIDO em 11/09, nos 35 anexos vazios do escritório:
+//
+//      POST /message/downloadmedia  ->  405   (nas 35, sem exceção)
+//      POST /downloadmedia          ->  405   (nas 35, sem exceção)
+//      POST /message/download       ->  400, 404 ou 500
+//
+//  405 é "método não permitido": o endereço EXISTE e o POST é que não serve
+//  ali. Quer dizer que a rota preferida da ponte nunca funcionou nesta conta —
+//  em nenhum dia, para nenhum anexo. O que enche as bolhas hoje é o outro
+//  caminho, o do endereço que a Uazapi manda à parte num `messages_update`, e
+//  ele só cobre quem recebe esse aviso.
+//
+//  Então cada rota é tentada TAMBÉM por GET, com o id no endereço. Um servidor
+//  que responde 405 ao POST está dizendo, com todas as letras, que aceita
+//  outro método — e tentar o outro custa uma ida a mais só onde já não havia
+//  nenhuma chance.
+//
+//  A ORDEM IMPORTA: todos os POSTs primeiro, e só então os GETs. Onde o POST
+//  serve (e serve, em servidor de outra versão), nada muda: acha na primeira e
+//  para. Os GETs são o que sobra para o servidor que recusa o POST.
+// ------------------------------------------------------------
+//  E A LEMBRANÇA GUARDA O MÉTODO JUNTO DA ROTA.
+//
+//  Guardando só a rota, o servidor que atende por GET pagava a fila inteira de
+//  POSTs a cada anexo — seis idas onde uma bastava. Um servidor não troca de
+//  versão entre um documento e o seguinte: descobre-se o par que serve, e
+//  lembra-se dele. A prova mede isso, porque "funciona" e "funciona sem
+//  martelar o serviço" são duas coisas.
+function tentativasDeDownload(servidor, id, lembrada) {
+  const todas = [];
+  for (const rota of ROTAS_DE_DOWNLOAD) {
+    todas.push({ rota, metodo: 'POST', endereco: `${servidor}${rota}`, corpo: { id } });
+  }
+  for (const rota of ROTAS_DE_DOWNLOAD) {
+    todas.push({ rota, metodo: 'GET', corpo: null,
+                 endereco: `${servidor}${rota}?id=${encodeURIComponent(id)}` });
+  }
+  if (!lembrada) return todas;
+  const ehALembrada = (t) => t.rota === lembrada.rota && t.metodo === lembrada.metodo;
+  return [...todas.filter(ehALembrada), ...todas.filter((t) => !ehALembrada(t))];
+}
 const rotaQueServe = new Map();
 
 // QUANTO TEMPO O NAVEGADOR PODE GUARDAR O ARQUIVO.
@@ -2259,10 +2304,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
 
     // A lembrada primeiro; as outras continuam na fila, para o dia em que ela
     // deixar de responder.
-    const lembrada = rotaQueServe.get(servidor);
-    const ordem = lembrada
-      ? [lembrada, ...ROTAS_DE_DOWNLOAD.filter((r) => r !== lembrada)]
-      : ROTAS_DE_DOWNLOAD;
+    const lembrada = rotaQueServe.get(servidor) || null;
 
     let dados = null;
     // O QUE CADA ROTA RESPONDEU — e não só "nenhuma respondeu".
@@ -2272,31 +2314,49 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
     // arquivo (não há o que fazer); 401 é token vencido (conserto de cadastro);
     // e um estouro de rede é outra coisa ainda. Sem separá-los, a resposta diz
     // que falhou e não diz o que fazer a respeito.
+    //
+    // E O CORPO DA RECUSA VAI JUNTO. Medido em 11/09, nos 35 anexos vazios:
+    // `/message/download` respondeu 400 em vinte deles — e 400 é a Uazapi
+    // dizendo "o pedido está errado", não "o arquivo sumiu". A explicação dela
+    // vinha no corpo, e o corpo era jogado fora. Ficamos com o número e sem a
+    // frase, que é como olhar para um erro pela fechadura.
     const respostas = [];
-    for (const rota of ordem) {
+    for (const tentativa of tentativasDeDownload(servidor, m.messageid, lembrada)) {
+      const { rota, metodo, endereco, corpo } = tentativa;
       try {
-        const r = await fetchComTimeout(`${servidor}${rota}`, {
-          method: 'POST',
+        const r = await fetchComTimeout(endereco, {
+          method: metodo,
           headers: { 'Content-Type': 'application/json', 'token': token },
-          body: JSON.stringify({ id: m.messageid })
+          ...(corpo ? { body: JSON.stringify(corpo) } : {}),
         }, 20000);
-        respostas.push(`${rota} respondeu ${r.status}`);
+        const comoFoi = `${metodo} ${rota} respondeu ${r.status}`;
         if (r.ok) {
+          respostas.push(comoFoi);
           dados = await r.json().catch(() => null);
           if (dados) {
-            if (lembrada !== rota) {
-              console.log(`downloadmedia: este servidor atende por ${rota}.`);
-              rotaQueServe.set(servidor, rota);
+            if (!lembrada || lembrada.rota !== rota || lembrada.metodo !== metodo) {
+              console.log(`downloadmedia: este servidor atende por ${metodo} ${rota}.`);
+              rotaQueServe.set(servidor, { rota, metodo });
             }
             break;
           }
-        } else if (rota === lembrada) {
-          // A que servia parou de servir: esquece e deixa as outras tentarem.
-          rotaQueServe.delete(servidor);
+        } else {
+          // A FRASE DA RECUSA, cortada curta. É a Uazapi explicando o que ela
+          // queria receber — não é conteúdo de conversa de ninguém.
+          const dito = await r.text().catch(() => '');
+          respostas.push(dito
+            ? `${comoFoi} ("${dito.replace(/\s+/g, ' ').trim().slice(0, 160)}")`
+            : comoFoi);
+          if (lembrada && lembrada.rota === rota && lembrada.metodo === metodo) {
+            // A que servia parou de servir: esquece e deixa as outras tentarem.
+            rotaQueServe.delete(servidor);
+          }
         }
       } catch (e) {
-        respostas.push(`${rota} estourou (${(e && e.message) || e})`);
-        if (rota === lembrada) rotaQueServe.delete(servidor);
+        respostas.push(`${metodo} ${rota} estourou (${(e && e.message) || e})`);
+        if (lembrada && lembrada.rota === rota && lembrada.metodo === metodo) {
+          rotaQueServe.delete(servidor);
+        }
         console.log(`downloadmedia ${rota} erro: ${e.message}`);
       }
     }

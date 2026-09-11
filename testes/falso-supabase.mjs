@@ -648,6 +648,17 @@ export function subirFalsaUazapi({
   // foto, então o caminho do DOCUMENTO — que é o do relato — nunca foi
   // exercitado com um arquivo de verdade chegando.
   mimeDoDownload = "image/jpeg",
+  // QUAL MÉTODO O DOWNLOAD ACEITA.
+  //
+  // MEDIDO no servidor do escritório, em 11/09: `POST /message/downloadmedia`
+  // responde 405 — "método não permitido" —, nas 35 mensagens sem exceção. O
+  // endereço existe; o POST é que não serve ali. A bancada só sabia imitar
+  // servidor que aceita POST, então a rota preferida da ponte podia estar
+  // quebrada em produção desde sempre sem reprovar uma prova sequer.
+  //
+  // O corpo da recusa também é de verdade: é nele que a Uazapi diz o que
+  // queria receber, e era ele que a ponte jogava fora.
+  metodoDoDownload = "POST",
 } = {}) {
   const recebidas = [];
   let downloadsFalhados = 0;
@@ -698,6 +709,10 @@ export function subirFalsaUazapi({
 
     if (ROTAS_DE_DOWNLOAD.includes(url.pathname)) {
       if (url.pathname !== rotaDeDownload) return responder(404, { erro: "não existe nesta versão" });
+      if (req.method !== metodoDoDownload) {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: `use ${metodoDoDownload} aqui` }));
+      }
       if (demoraDoDownload > 0) {
         await new Promise((r) => setTimeout(r, demoraDoDownload));
       }

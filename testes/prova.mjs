@@ -5449,6 +5449,50 @@ console.log("\n45. O documento que chega, e o que ficou indisponível");
     await t.parar();
   }
 
+  // ---- 45b-ter. o servidor que recusa POST e atende GET ----
+  {
+    // MEDIDO no servidor do escritório, em 11/09, nos 35 anexos vazios:
+    //
+    //     POST /message/downloadmedia  ->  405   (nas 35, sem exceção)
+    //     POST /downloadmedia          ->  405   (nas 35, sem exceção)
+    //     POST /message/download       ->  400, 404 ou 500
+    //
+    // 405 é "método não permitido": o endereço EXISTE e o POST é que não serve
+    // ali. Quer dizer que a rota preferida da ponte nunca funcionou nessa conta
+    // — em nenhum dia, para nenhum anexo. O que enchia as bolhas era só o outro
+    // caminho, o do endereço que a Uazapi manda à parte.
+    //
+    // A bancada só sabia imitar servidor que aceita POST, então isso podia
+    // estar quebrado em produção desde sempre sem reprovar uma prova sequer.
+    const t = await subirTudo({}, { uazapi: { metodoDoDownload: "GET",
+                                              mimeDoDownload: "application/pdf" } });
+    await mandar(t, documentoDaUazapi("DOC-SO-GET"));
+    await espera(1500);
+
+    const m = mensagemDe(t, "DOC-SO-GET");
+    ok("num servidor que recusa POST, a ponte pede por GET e o arquivo vem",
+       !!(m && m.midia_url), `veio ${m && m.midia_url}`);
+    const pediu = t.uaz.recebidas.filter((c) => String(c.caminho).includes("download"));
+    ok("e ela só recorre ao GET depois de tentar o POST em todas as rotas",
+       pediu.length > 3, `foram ${pediu.length} tentativas`);
+
+    // E NÃO PAGA A FILA DE NOVO NO PRÓXIMO DOCUMENTO.
+    //
+    // Guardando só a rota, o servidor que atende por GET pagava seis idas por
+    // anexo, para sempre. Um servidor não troca de versão entre um documento e
+    // o seguinte: descobre-se o par que serve, e lembra-se dele. "Funciona" e
+    // "funciona sem martelar o serviço" são duas coisas.
+    const antes = pediu.length;
+    await mandar(t, documentoDaUazapi("DOC-SO-GET-2"));
+    await espera(1200);
+    const agora = t.uaz.recebidas.filter((c) => String(c.caminho).includes("download")).length;
+    const m2 = mensagemDe(t, "DOC-SO-GET-2");
+    ok("o segundo documento chega", !!(m2 && m2.midia_url));
+    ok("e custa UMA ida, porque o método que serve ficou lembrado",
+       agora - antes === 1, `custou ${agora - antes} idas`);
+    await t.parar();
+  }
+
   // ---- 45c. a insistência tem fim ----
   {
     // Um serviço que tem limite de uso não pode ser martelado. Depois das
@@ -5461,8 +5505,12 @@ console.log("\n45. O documento que chega, e o que ficou indisponível");
 
     const pedidos = () => t.uaz.recebidas.filter(
       (c) => String(c.caminho).includes("download")).length;
+    // O TETO ACOMPANHOU O GET. São três rotas por dois métodos, e três
+    // tentativas: dezoito no pior caso, que é o servidor em que NADA serve.
+    // Onde alguma coisa serve, a lembrança corta isso para uma — e é a
+    // conferência logo abaixo, na 45b-ter, que mede essa parte.
     ok("desiste depois das tentativas combinadas, e não fica batendo",
-       pedidos() <= 12, `foram ${pedidos()} idas ao servidor`);
+       pedidos() <= 18, `foram ${pedidos()} idas ao servidor`);
     ok("e o log diz que desistiu, com o id da mensagem",
        /sem arquivo depois de \d+ tentativas/.test(t.registro.join(""))
        && /DOC-PERDIDO/.test(t.registro.join("")), t.registro.join("").slice(-400));
@@ -5576,6 +5624,13 @@ console.log("\n45. O documento que chega, e o que ficou indisponível");
     // diz o que fazer.
     ok("e diz o que cada rota respondeu, com o número",
        /respondeu 404/.test(corpo.nao_deram[0].porque || ""),
+       corpo.nao_deram[0].porque);
+    // A FRASE DA RECUSA, e não só o número. Em 11/09 a Uazapi respondeu 400 em
+    // vinte dos trinta e cinco — e 400 é "o pedido está errado", não "o arquivo
+    // sumiu". A explicação vinha no corpo, e o corpo era jogado fora: ficávamos
+    // com o número e sem a frase, que é olhar para o erro pela fechadura.
+    ok("e traz a frase com que a Uazapi recusou, além do número",
+       /não existe nesta versão/.test(corpo.nao_deram[0].porque || ""),
        corpo.nao_deram[0].porque);
     // DE QUAL TELEFONE. Trinta e cinco falhas iguais podem ser o sistema
     // inteiro ou UM telefone com o cadastro errado, e são consertos opostos.
