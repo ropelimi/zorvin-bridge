@@ -229,12 +229,34 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    só para `anon`; `authenticated` continua herdando o que sempre herdou, e
    tabela nova segue servindo o painel sem passo extra. Ao criar tabela, o que
    continua sendo obrigatório é a POLÍTICA junto.
-6. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
+6. **Cache curto em mídia derruba o atendimento** (21/08/2026): a biblioteca do
+   Supabase manda `max-age=3600` quando ninguém diz nada, então de hora em hora
+   cada atendente rebaixava todas as fotos e áudios das conversas que abrisse.
+   Com oito pessoas rolando conversas o dia inteiro e mais de 1 GB guardado, a
+   franquia de banda zerou e o workspace foi suspenso. Hoje é um ano e
+   `immutable` (`CACHE_DA_MIDIA`), o que é seguro porque o endereço é
+   `recebidos/{messageid}` e o messageid não se repete — aquele endereço nunca
+   aponta para outro conteúdo.
+7. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos
 
-- **Mídias em alta resolução**: hoje imagens só têm a miniatura (`JPEGThumbnail`) e áudios não são baixados. As URLs da Uazapi vêm criptografadas (`.enc` + `mediaKey`) — falta usar o endpoint de download/convert da Uazapi e salvar no Storage do Supabase.
-- **Enviar anexos pelo painel** (imagem, áudio, documento) — endpoints `/send/media` da Uazapi.
+- ~~Mídias em alta resolução~~ e ~~enviar anexos pelo painel~~ — **as duas foram
+  feitas**, e esta lista ficou meses dizendo o contrário. Isso tem custo: em
+  11/09 uma sessão leu a lista em vez do código e recomendou refazer o que já
+  estava pronto. **Ao terminar algo daqui, risque na mesma entrega.**
+  - Enviar: `/send/media` cobre imagem, vídeo, áudio (`ptt`), documento e
+    figurinha, com `replyid` e `docName`, e um segundo caminho em base64 para
+    quando o endereço público do Storage é recusado.
+  - Receber: `baixarMidiaRecebida` procura a rota de download (três endereços,
+    por POST e por GET), **lembra o par que serviu** para não martelar o
+    serviço, e guarda no Storage (`anexos`) com cache de um ano e `immutable`.
+    A porta `/anexos/resgatar` preenche os vazios do passado — e **depende de
+    `IMPORT_TOKEN`**, que sem existir recusa todo mundo.
+  - **Em aberto, e é empírico, não de programação**: neste servidor as três
+    rotas responderam 405 ao POST (medido em 11/09, nos 35 anexos vazios do
+    escritório). As tentativas por GET entraram depois e ainda não foram
+    confirmadas com anexo de verdade.
 - **E-mails (Gmail)**: fase futura, fora do escopo atual.
 - Recursos de UX: "Digitando…" (`delay`), marcar como lida (`readmessages`).
 
