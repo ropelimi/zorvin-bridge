@@ -399,6 +399,41 @@ app.get('/ping', (req, res) => {
 // que uma bolha vazia, e muito melhor que a mensagem desaparecer.
 function tipoDaMensagem(m) {
   const mt = String(m.mediaType || m.messageType || m.type || '').toLowerCase();
+  const qual = String(m.messageType || '').toLowerCase();
+
+  // ------------------------------------------------------------
+  //  O QUE NUNCA FOI DOCUMENTO — e virava documento por descarte
+  //
+  //  MEDIDO em 11/09, cruzando os 35 anexos vazios com o evento cru que a
+  //  Uazapi mandou. Dos vinte que ela ainda conhecia, NENHUM era documento:
+  //
+  //      link com previa (ExtendedTextMessage)   5
+  //      contato compartilhado (vcard)           6
+  //      localizacao e localizacao ao vivo       4
+  //      mensagem de modelo, de marketing        4
+  //      "nao foi possivel descriptografar"      2
+  //
+  //  A regra `if (m.type === 'media') return 'documento'` era a rede de
+  //  seguranca para o anexo que a Uazapi anunciasse de um jeito novo — e ela
+  //  pegava tudo isto junto. A bolha virava "Documento — indisponivel", a
+  //  ponte saia pedindo um arquivo que nao existe, e a Uazapi respondia com
+  //  todas as letras: "Message does not contain downloadable media".
+  //
+  //  E NAO ERA SO A BOLHA ERRADA: era conteudo PERDIDO. Um link do eproc e um
+  //  documento do Adobe chegaram como balao vazio, porque o texto deles mora
+  //  em `content.text` e o codigo so olhava `m.text`.
+  //
+  //  TUDO ISTO VIRA 'texto', e nao um tipo novo. A coluna `tipo` pode ter
+  //  restricao no banco, e um valor novo recusado ali derrubaria a gravacao —
+  //  quer dizer, perder a mensagem inteira para melhorar o desenho dela. O que
+  //  cada uma e fica dito no proprio texto, que e o que a equipe le.
+  // ------------------------------------------------------------
+  if (qual.includes('location') || mt.includes('location')) return 'texto';
+  if (qual.includes('contact') || mt.includes('vcard')) return 'texto';
+  if (qual.includes('extendedtext') || mt === 'url') return 'texto';
+  if (qual.includes('template') || qual.includes('interactive')) return 'texto';
+  if (qual === 'error' || ehIndecifravel(m)) return 'texto';
+
   if (mt.includes('sticker') || mt.includes('figurinha')) return 'figurinha';
   if (mt.includes('image')) return 'imagem';
   if (mt === 'ptt' || mt.includes('audio') || mt.includes('voice')) return 'audio';
@@ -406,6 +441,98 @@ function tipoDaMensagem(m) {
   if (mt.includes('document') || mt.includes('file')) return 'documento';
   if (m.type === 'media') return 'documento';
   return 'texto';
+}
+
+/** A mensagem que o WhatsApp nao conseguiu abrir. O conteudo vem como TEXTO
+ *  cru, comecando por "[Undecryptable]". */
+const ehIndecifravel = (m) => typeof (m && m.content) === 'string'
+  && /^\s*\[Undecryptable\]/i.test(m.content);
+
+/** O primeiro telefone de um vCard, e o nome. */
+function lerVcard(vcard) {
+  const linhas = String(vcard || '').split(/\r?\n/);
+  let nome = '';
+  const telefones = [];
+  for (const linha of linhas) {
+    if (/^FN[:;]/i.test(linha)) nome = linha.replace(/^FN[^:]*:/i, '').trim();
+    const tel = linha.match(/^[^:]*TEL[^:]*:(.+)$/i);
+    if (tel) telefones.push(tel[1].trim());
+  }
+  return { nome, telefones };
+}
+
+/** Procura o texto do corpo de uma mensagem de modelo, que a Uazapi aninha de
+ *  jeitos diferentes conforme a versao. Devolve o primeiro que achar. */
+function textoDoModelo(c) {
+  const caminhos = [
+    ['Format', 'InteractiveMessageTemplate', 'body', 'text'],
+    ['InteractiveMessageTemplate', 'body', 'text'],
+    ['hydratedTemplate', 'hydratedContentText'],
+    ['templateMessage', 'hydratedTemplate', 'hydratedContentText'],
+    ['body', 'text'],
+  ];
+  for (const caminho of caminhos) {
+    let onde = c;
+    for (const passo of caminho) onde = onde && onde[passo];
+    if (typeof onde === 'string' && onde.trim()) return onde.trim();
+  }
+  return '';
+}
+
+/**
+ * O QUE ESCREVER NA BOLHA do que nao e anexo.
+ *
+ * Devolve `null` para tudo que nao seja um destes casos — e e importante que
+ * devolva, porque este texto tem prioridade sobre o texto normal da mensagem.
+ */
+function textoDoQueNaoEAnexo(m) {
+  const qual = String((m && m.messageType) || '').toLowerCase();
+  const mt = String((m && m.mediaType) || '').toLowerCase();
+
+  if (ehIndecifravel(m)) {
+    // A frase crua traz colchetes e jargao. Esta diz a mesma coisa e diz o que
+    // fazer, que e o que quem atende precisa saber.
+    return 'Esta mensagem não pôde ser aberta: o WhatsApp não conseguiu '
+         + 'decifrá-la. Peça ao contato para enviar de novo.';
+  }
+
+  const c = (m && m.content) || {};
+  if (typeof c === 'string') return null;
+
+  if (qual.includes('location') || mt.includes('location')) {
+    const lat = c.degreesLatitude ?? c.latitude ?? null;
+    const lon = c.degreesLongitude ?? c.longitude ?? null;
+    const nome = String(c.name || c.address || '').trim();
+    const aoVivo = qual.includes('live') || mt.includes('live');
+    const cabeca = aoVivo ? 'Localização em tempo real' : 'Localização';
+    if (lat == null || lon == null) return `📍 ${cabeca}${nome ? `: ${nome}` : ''}`;
+    // O ENDERECO DO MAPA VAI JUNTO. Uma coordenada solta nao leva ninguem a
+    // lugar nenhum; o link abre onde o cliente estava, que e o que o
+    // atendimento precisa.
+    return `📍 ${cabeca}${nome ? `: ${nome}` : ''}\n`
+         + `https://www.google.com/maps?q=${lat},${lon}`;
+  }
+
+  if (qual.includes('contact') || mt.includes('vcard')) {
+    const { nome, telefones } = lerVcard(c.vcard);
+    const quem = String(c.displayName || nome || '').trim() || 'sem nome';
+    return `👤 Contato compartilhado: ${quem}`
+         + (telefones.length ? `\n${telefones.join('\n')}` : '');
+  }
+
+  if (qual.includes('extendedtext') || mt === 'url') {
+    // O TEXTO MORA EM `content.text`, e o codigo so olhava `m.text` — foi assim
+    // que um link do eproc e um documento do Adobe viraram balao vazio.
+    const texto = String(c.text || c.matchedText || '').trim();
+    return texto || null;
+  }
+
+  if (qual.includes('template') || qual.includes('interactive')) {
+    const corpo = textoDoModelo(c);
+    return corpo || null;
+  }
+
+  return null;
 }
 
 // O NOME DO ARQUIVO QUE O CLIENTE MANDOU.
@@ -639,7 +766,11 @@ function mapearMensagemHistorico(m, conversaId, ehGrupo = false) {
   if (ehAvisoDeAlbum(m)) return null;
   const fromMe = m.fromMe === true || (m.key && m.key.fromMe === true);
   const tipo = tipoDaMidiaHist(m);
-  const texto = m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
+  // O ESPECIAL VEM NA FRENTE. A localizacao, o contato, o link com previa e a
+  // mensagem de modelo guardam o que interessa dentro de `content`, e o
+  // `m.text` delas costuma vir vazio — era assim que viravam balao em branco.
+  const texto = textoDoQueNaoEAnexo(m)
+    || m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
   const midiaUrl = m.fileURL || m.mediaUrl || m.url || null;
   const midiaMime = m.mimetype || (m.content && m.content.mimetype) || null;
   const linha = {
@@ -1738,8 +1869,8 @@ async function processarEventoDoWebhook(corpo) {
     // então o mesmo anexo trazia a legenda quando importado e a perdia quando
     // chegava ao vivo. Duas leituras diferentes do mesmo campo é sempre uma
     // delas errada.
-    const texto =
-      m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
+    const texto = textoDoQueNaoEAnexo(m)
+      || m.text || (typeof m.content === 'string' ? m.content : '') || m.caption || null;
 
     // Miniatura embutida (prévia imediata, baixa resolução). Vale para a
     // FIGURINHA também: se o download do arquivo grande falhar, é ela que
