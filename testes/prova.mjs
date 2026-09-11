@@ -5765,5 +5765,137 @@ console.log("\n46. A porta diz o que não bate");
   await t.parar();
 }
 
+
+// ==================================================================
+//  47. O QUE NUNCA FOI DOCUMENTO
+//
+//  MEDIDO em 11/09, cruzando os 35 anexos vazios com o evento cru que a Uazapi
+//  mandou. Dos vinte que ela ainda conhecia, NENHUM era documento:
+//
+//      link com prévia (ExtendedTextMessage)   5
+//      contato compartilhado (vcard)           6
+//      localização e localização ao vivo       4
+//      mensagem de modelo, de marketing        4
+//      "não foi possível descriptografar"      2
+//
+//  A regra `if (m.type === 'media') return 'documento'` era a rede para o
+//  anexo que a Uazapi anunciasse de um jeito novo, e pegava tudo isto junto. A
+//  bolha virava "Documento — indisponível", a ponte saía pedindo um arquivo
+//  que não existe, e a Uazapi respondia com todas as letras: "Message does not
+//  contain downloadable media".
+//
+//  E NÃO ERA SÓ A BOLHA ERRADA, era conteúdo PERDIDO: um link do eproc e um
+//  documento do Adobe chegaram como balão vazio, porque o texto deles mora em
+//  `content.text` e o código só olhava `m.text`.
+//
+//  Os corpos abaixo são os do banco, copiados como vieram.
+// ==================================================================
+console.log("\n47. O que nunca foi documento");
+{
+  const CHAT = "5511999998888@s.whatsapp.net";
+  const t = await subirTudo({}, { uazapi: { rotaDeDownload: null } });
+  const mandar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const evento = (id, campos) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    message: {
+      id, messageid: id, chatid: CHAT, sender: CHAT, fromMe: false, isGroup: false,
+      type: "media", messageTimestamp: Date.now(), wasSentByApi: false,
+      senderName: "Cliente", ...campos,
+    },
+  });
+  const achar = (id) => (t.sb.dados.mensagens || []).find((m) => m.id_uazapi === id);
+
+  // ---- a localização, que é a bolha da foto do escritório ----
+  await mandar(evento("EV-LOCAL", {
+    messageType: "LocationMessage", mediaType: "location",
+    content: { degreesLatitude: -20.4697, degreesLongitude: -54.6201,
+               JPEGThumbnail: "/9j/4AAQSkZJRgABAQAA" },
+  }));
+  // ---- o contato compartilhado ----
+  await mandar(evento("EV-CONTATO", {
+    messageType: "ContactMessage", mediaType: "vcard",
+    content: { displayName: "Atendimento Canaverde",
+               vcard: "BEGIN:VCARD\nVERSION:3.0\nN:;Atendimento Canaverde;;;\n"
+                    + "FN:Atendimento Canaverde\nTEL;type=CELL;waid=5511969401932:+55 11 96940-1932\nEND:VCARD" },
+  }));
+  // ---- o link com prévia: o do eproc, que sumiu de verdade ----
+  await mandar(evento("EV-LINK", {
+    messageType: "ExtendedTextMessage", mediaType: "url",
+    content: { text: "https://eproc2g.tjsp.jus.br/eproc/controlador.php?acao=processo_cadastrar_4",
+               title: ":: eproc ::", matchedText: "https://eproc2g.tjsp.jus.br/" },
+  }));
+  // ---- a mensagem de modelo, que vinha como imagem vazia ----
+  await mandar(evento("EV-MODELO", {
+    messageType: "TemplateMessage", mediaType: "image",
+    content: { Format: { InteractiveMessageTemplate: {
+      body: { text: "Seu cartão está com limite pré-aprovado!" } } } },
+  }));
+  // ---- a que o WhatsApp não conseguiu abrir ----
+  await mandar(evento("EV-CIFRADA", {
+    messageType: "error", mediaType: null,
+    content: "[Undecryptable] [media] [collection] Não foi possível descriptografar a mensagem.",
+  }));
+  await espera(2000);
+
+  const local = achar("EV-LOCAL");
+  ok("a localização deixa de ser 'documento'", local && local.tipo === "texto",
+     `veio tipo ${local && local.tipo}`);
+  ok("e a bolha leva o endereço do mapa, que é o que serve ao atendimento",
+     local && /maps\?q=-20\.4697,-54\.6201/.test(local.texto || ""),
+     `dizia: ${local && local.texto}`);
+
+  const contato = achar("EV-CONTATO");
+  ok("o contato compartilhado vira contato, com nome e telefone",
+     contato && contato.tipo === "texto"
+     && /Atendimento Canaverde/.test(contato.texto || "")
+     && /96940-1932/.test(contato.texto || ""),
+     `dizia: ${contato && contato.texto}`);
+
+  // O QUE MAIS DOEU: conteúdo perdido, e não só bolha feia.
+  const link = achar("EV-LINK");
+  ok("o link com prévia chega com o link dentro",
+     link && /eproc2g\.tjsp\.jus\.br/.test(link.texto || ""),
+     `dizia: ${link && link.texto}`);
+
+  const modelo = achar("EV-MODELO");
+  ok("a mensagem de modelo chega com o texto dela",
+     modelo && /limite pré-aprovado/.test(modelo.texto || ""),
+     `dizia: ${modelo && modelo.texto}`);
+
+  const cifrada = achar("EV-CIFRADA");
+  ok("a que não pôde ser aberta diz isso, e diz o que fazer",
+     cifrada && /não conseguiu/i.test(cifrada.texto || "")
+     && /enviar de novo/i.test(cifrada.texto || ""),
+     `dizia: ${cifrada && cifrada.texto}`);
+
+  // ------------------------------------------------------------
+  //  E NENHUMA DELAS SAI PEDINDO ARQUIVO
+  //
+  //  Pedir o arquivo de uma localização é uma ida à rede que só pode falhar —
+  //  e, com a insistência, são três tentativas vezes seis caminhos por
+  //  mensagem, num serviço que tem limite de uso.
+  // ------------------------------------------------------------
+  const pedidos = t.uaz.recebidas.filter((c) => String(c.caminho).includes("download"));
+  ok("e nenhuma delas sai pedindo arquivo à Uazapi", pedidos.length === 0,
+     `foram ${pedidos.length} idas`);
+
+  // O DOCUMENTO DE VERDADE CONTINUA SENDO DOCUMENTO. Sem isto, o conserto
+  // poderia ter jogado fora o caso que funciona.
+  await mandar(evento("EV-DOC", {
+    messageType: "documentMessage", mediaType: "document",
+    content: { mimetype: "application/pdf", fileName: "peticao.pdf" },
+  }));
+  await espera(1200);
+  const doc = achar("EV-DOC");
+  ok("e o documento de verdade continua sendo documento",
+     doc && doc.tipo === "documento", `veio tipo ${doc && doc.tipo}`);
+
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
