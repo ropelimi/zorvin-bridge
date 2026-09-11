@@ -157,6 +157,17 @@ O motivo vai para `mensagens.midia_erro`, e é dele que a tela se serve para diz
 SQL: `sql/2026-09-o-anexo-que-nao-vem-mais.sql`. **Sem a coluna, tudo como
 antes** — a ponte avisa uma vez no log e segue.
 
+**E parte do que "se perdeu" nunca foi anexo.** Uma sessão anterior mediu isso
+em 11/09 e consertou seis tipos (link com prévia, contato, localização, modelo,
+interativa, indecifrável) que a regra `if (m.type === 'media') return 'documento'`
+pegava por descarte. Em **12/09** apareceu o que faltava, e ele é de outra
+natureza: `ButtonsResponseMessage` — o cliente **tocou num botão**, e o
+escritório via "Documento — indisponível". Não é arquivo perdido: é **resposta
+de cliente que nunca apareceu na tela**. A forma foi medida no evento cru
+(`type: "media"`, `mediaType: "buttons_response"`, texto em `content.Response`).
+Ao aparecer um tipo novo de mensagem, a pergunta certa é *"isto é anexo?"* antes
+de *"por que o anexo não veio?"*.
+
 **Números de 11/09**, sobre 1.237 anexos de 10 dias: 96,9% chegam com o arquivo,
 **nenhum** fica só na miniatura, e 38 ficam vazios — 20 documentos e 5 imagens
 entre eles. O tamanho do `id_uazapi` **não** é a causa (todos os tamanhos baixam

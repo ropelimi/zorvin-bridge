@@ -432,6 +432,20 @@ function tipoDaMensagem(m) {
   if (qual.includes('contact') || mt.includes('vcard')) return 'texto';
   if (qual.includes('extendedtext') || mt === 'url') return 'texto';
   if (qual.includes('template') || qual.includes('interactive')) return 'texto';
+  // A RESPOSTA DE BOTÃO. Ela escapava de todas as regras acima e caía na rede
+  // de segurança — `type` vem como "media", então virava "documento".
+  //
+  // MEDIDO em 12/09, no evento cru guardado pela caixa de entrada:
+  //     messageType: "ButtonsResponseMessage"
+  //     type:        "media"          <- o que a fazia virar documento
+  //     mediaType:   "buttons_response"
+  //
+  // `list_response` (tocar num item de lista, em vez de num botão) vai junto
+  // por simetria, e isto NÃO foi medido — não apareceu nenhum. Vale assim
+  // mesmo: hoje ele já viraria um documento vazio, então errar aqui não piora
+  // nada e acertar conserta em silêncio.
+  if (mt.includes('buttons_response') || mt.includes('list_response')
+      || qual.includes('buttonsresponse') || qual.includes('listresponse')) return 'texto';
   if (qual === 'error' || ehIndecifravel(m)) return 'texto';
 
   if (mt.includes('sticker') || mt.includes('figurinha')) return 'figurinha';
@@ -532,7 +546,54 @@ function textoDoQueNaoEAnexo(m) {
     return corpo || null;
   }
 
+  // ------------------------------------------------------------
+  //  O QUE O CLIENTE RESPONDEU TOCANDO NUM BOTÃO
+  //
+  //  Isto não é um anexo perdido: é uma RESPOSTA DO CLIENTE que nunca apareceu
+  //  na tela. Ele tocou em "Sim" e o escritório viu "Documento — indisponível".
+  //
+  //  SEM DECORAÇÃO, ao contrário da localização e do contato aqui de cima. Os
+  //  dois precisam de rótulo porque a bolha sozinha não diria o que são; esta
+  //  não: a palavra que ele tocou É a resposta dele, e é assim que o próprio
+  //  WhatsApp a mostra. Escrever "Respondeu: Sim" seria a ponte narrando por
+  //  cima do cliente.
+  //
+  //  O ID DO BOTÃO NÃO SERVE DE TEXTO. `selectedButtonID` é coisa de máquina
+  //  ("btn_2"); pô-lo na bolha seria mostrar jargão fingindo que é a palavra
+  //  de alguém. Sem texto legível, é melhor dizer o que houve.
+  // ------------------------------------------------------------
+  if (mt.includes('buttons_response') || mt.includes('list_response')
+      || qual.includes('buttonsresponse') || qual.includes('listresponse')) {
+    const dito = textoDaResposta(c) || String((m && m.text) || '').trim();
+    return dito || 'O contato respondeu tocando num botão, e o WhatsApp não '
+                 + 'mandou o texto dele.';
+  }
+
   return null;
+}
+
+/** O texto de uma resposta de botão ou de lista.
+ *
+ *  `content.Response` é o campo que a Uazapi manda aqui — MEDIDO em 12/09, no
+ *  evento cru. Os outros nomes são as variações conhecidas do WhatsApp, e
+ *  entram porque uma versão diferente do servidor não pode significar a
+ *  resposta do cliente sumindo de novo.
+ *
+ *  ELE PODE VIR COMO OBJETO. Só os NOMES dos campos foram medidos, não os
+ *  valores — então o texto é procurado dentro também, em vez de a bolha
+ *  receber um "[object Object]". */
+function textoDaResposta(c) {
+  const candidatos = [c.Response, c.response, c.selectedDisplayText,
+                      c.selectedRowId && c.title, c.title, c.text];
+  for (const v of candidatos) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (v && typeof v === 'object') {
+      for (const dentro of [v.text, v.title, v.displayText, v.selectedDisplayText]) {
+        if (typeof dentro === 'string' && dentro.trim()) return dentro.trim();
+      }
+    }
+  }
+  return '';
 }
 
 // O NOME DO ARQUIVO QUE O CLIENTE MANDOU.

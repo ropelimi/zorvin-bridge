@@ -5932,6 +5932,24 @@ console.log("\n47. O que nunca foi documento");
     content: { Format: { InteractiveMessageTemplate: {
       body: { text: "Seu cartão está com limite pré-aprovado!" } } } },
   }));
+  // ---- A RESPOSTA DE BOTÃO, que não é anexo nenhum ----
+  //
+  // MEDIDA em 12/09, no evento cru guardado pela caixa de entrada: `type` vem
+  // como "media" e `mediaType` como "buttons_response", e o texto da resposta
+  // mora em `content.Response`. Era o que restava escapando da rede de
+  // segurança — e o estrago é de outra natureza: não é um anexo que se perdeu,
+  // é uma RESPOSTA DO CLIENTE que nunca apareceu na tela. Ele tocou em "Sim" e
+  // o escritório viu "Documento — indisponível".
+  await mandar(evento("EV-BOTAO", {
+    messageType: "ButtonsResponseMessage", mediaType: "buttons_response",
+    content: { type: "response", Response: "Sim, pode enviar o acordo",
+               selectedButtonID: "btn_1", contextInfo: {} },
+  }));
+  // ---- a mesma coisa sem texto legível: só o id de máquina ----
+  await mandar(evento("EV-BOTAO-MUDO", {
+    messageType: "ButtonsResponseMessage", mediaType: "buttons_response",
+    content: { type: "response", selectedButtonID: "btn_7", contextInfo: {} },
+  }));
   // ---- a que o WhatsApp não conseguiu abrir ----
   await mandar(evento("EV-CIFRADA", {
     messageType: "error", mediaType: null,
@@ -5969,6 +5987,28 @@ console.log("\n47. O que nunca foi documento");
      cifrada && /não conseguiu/i.test(cifrada.texto || "")
      && /enviar de novo/i.test(cifrada.texto || ""),
      `dizia: ${cifrada && cifrada.texto}`);
+
+  const botao = achar("EV-BOTAO");
+  ok("a resposta de botão deixa de ser 'documento'",
+     botao && botao.tipo === "texto", `veio tipo ${botao && botao.tipo}`);
+  // O QUE O CLIENTE RESPONDEU, na bolha. Sem isto o conserto seria só trocar
+  // uma bolha errada por uma bolha vazia — a resposta dele continuaria perdida.
+  ok("e a bolha traz o que ele respondeu",
+     botao && /Sim, pode enviar o acordo/.test(botao.texto || ""),
+     `dizia: ${botao && botao.texto}`);
+  // SEM DECORAÇÃO. A palavra que ele tocou É a resposta dele, e é assim que o
+  // próprio WhatsApp a mostra; "Respondeu: Sim" seria a ponte narrando por
+  // cima do cliente.
+  ok("e sem a ponte narrando por cima dele",
+     botao && !/respondeu/i.test(botao.texto || ""), `dizia: ${botao && botao.texto}`);
+
+  const mudo = achar("EV-BOTAO-MUDO");
+  ok("sem texto legível, a bolha diz o que houve",
+     mudo && /tocando num botão/i.test(mudo.texto || ""), `dizia: ${mudo && mudo.texto}`);
+  // O ID DO BOTÃO É COISA DE MÁQUINA. Pô-lo na bolha seria mostrar jargão
+  // fingindo que é a palavra de alguém.
+  ok("e nunca mostra o id do botão como se fosse a palavra do cliente",
+     mudo && !/btn_7/.test(mudo.texto || ""), `dizia: ${mudo && mudo.texto}`);
 
   // ------------------------------------------------------------
   //  E NENHUMA DELAS SAI PEDINDO ARQUIVO
