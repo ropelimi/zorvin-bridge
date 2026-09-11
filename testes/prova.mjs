@@ -5567,12 +5567,147 @@ console.log("\n45. O documento que chega, e o que ficou indisponível");
        Array.isArray(corpo.nao_deram) && corpo.nao_deram[0]
        && /rota de download/.test(corpo.nao_deram[0].porque || ""),
        JSON.stringify(corpo.nao_deram || []).slice(0, 250));
+    // O QUE CADA ROTA RESPONDEU, e não só "não deu".
+    //
+    // Em 11/09 os 35 anexos vieram todos com o mesmo motivo, e ele juntava
+    // três diagnósticos opostos: 404 é a Uazapi já não ter o arquivo (não há
+    // o que fazer), 401 é token vencido (conserto de cadastro), estouro de
+    // rede é outra coisa ainda. Sem o número, a resposta diz que falhou e não
+    // diz o que fazer.
+    ok("e diz o que cada rota respondeu, com o número",
+       /respondeu 404/.test(corpo.nao_deram[0].porque || ""),
+       corpo.nao_deram[0].porque);
+    // DE QUAL TELEFONE. Trinta e cinco falhas iguais podem ser o sistema
+    // inteiro ou UM telefone com o cadastro errado, e são consertos opostos.
+    ok("e de qual telefone é cada anexo que não voltou",
+       !!corpo.nao_deram[0].telefone && corpo.por_telefone
+       && Object.keys(corpo.por_telefone).length === 1,
+       JSON.stringify(corpo.por_telefone || {}));
     // CONTADOS, e não só listados: com 115 linhas iguais ninguém lê a lista.
     ok("e resume por motivo, para a lista longa se ler de relance",
        corpo.por_motivo && Object.values(corpo.por_motivo)[0] === 1,
        JSON.stringify(corpo.por_motivo || {}));
     await t.parar();
   }
+}
+
+
+// ==================================================================
+//  46. A PORTA DIZ O QUE NÃO BATE
+//
+//  Em 10/09, com os 115 documentos vazios esperando: "O ?token= não confere
+//  com o IMPORT_TOKEN deste servidor. A variável existe — o que não bate é o
+//  valor. O engano mais comum é um espaço em branco colado junto no começo ou
+//  no fim."
+//
+//  O palpite estava errado, e era o único que a porta tinha. Quem está do
+//  outro lado fica comparando dois textos longos de olho, caractere a
+//  caractere, sem saber o que procurar.
+//
+//  O ENDEREÇO DE NAVEGADOR MEXE NO QUE PASSA POR ELE: um "+" dentro do token
+//  vira ESPAÇO no caminho, e um "#" corta o endereço ali. Nos dois casos a
+//  pessoa jura ter colado o valor certo, e colou.
+//
+//  E O VALOR NUNCA APARECE. As pistas só são ditas quando o que veio já É o
+//  token a menos de uma transformação — quem chega nelas já tem a senha
+//  inteira. Nada aqui confirma PEDAÇO de senha: um "você acertou o começo"
+//  transformaria a porta numa máquina de adivinhar letra por letra, e é a
+//  conferência mais importante desta seção.
+// ==================================================================
+console.log("\n46. A porta diz o que não bate");
+{
+  const SENHA = "ab+cd-EFGH-1234";
+  const t = await subirTudo({ IMPORT_TOKEN: SENHA });
+  const bater = async (token) => {
+    const url = `http://127.0.0.1:${t.porta}/anexos/resgatar?token=${token}`;
+    const r = await fetch(url);
+    return { status: r.status, texto: await r.text() };
+  };
+
+  // O "+" COLADO CRU, que é o caso do relato: o navegador o entrega como
+  // espaço, e o token chega diferente do que está no Render.
+  const comMais = await bater("ab+cd-EFGH-1234");
+  ok("o '+' colado cru é recusado, como tem de ser", comMais.status === 403);
+  // O QUE SÓ ESTE RAMO DIZ, e não o que o texto genérico também diria.
+  //
+  // A primeira versão desta conferência procurava "%2B" e "vira espaço" — e as
+  // duas expressões estão TAMBÉM na lista genérica que a porta manda quando
+  // não reconhece o engano. Quer dizer que ela passaria com o ramo do "+"
+  // apagado, aprovando um diagnóstico que não foi feito. Foi a sabotagem que
+  // mostrou isso; sem ela, ficaria verde para sempre falando de outro assunto.
+  ok("e a porta explica que o '+' virou espaço no endereço",
+     /É o token certo, mas ele tem/.test(comMais.texto) && /%2B/.test(comMais.texto),
+     comMais.texto.slice(0, 200));
+
+  // ESCRITO DO JEITO CERTO, a mesma senha entra.
+  const certo = await bater("ab%2Bcd-EFGH-1234");
+  ok("e com %2B no lugar do '+' a porta abre", certo.status === 200,
+     certo.texto.slice(0, 160));
+
+  const comEspaco = await bater(encodeURIComponent("  ab+cd-EFGH-1234 "));
+  ok("espaço em volta continua sendo dito", /espaço em branco colado em volta/.test(comEspaco.texto),
+     comEspaco.texto.slice(0, 200));
+
+  // O ESPAÇO DO LADO DE LÁ. Uma ponte cuja variável foi criada com uma quebra
+  // de linha colada junto: quem confere de olho no Render vê o texto certo, e
+  // não vê o que está depois dele. Mandar o valor certo continua sendo recusado,
+  // e mexer no endereço não conserta — o conserto é editar a variável.
+  {
+    const t2 = await subirTudo({ IMPORT_TOKEN: "abcd-1234\n" });
+    const r = await fetch(`http://127.0.0.1:${t2.porta}/anexos/resgatar?token=abcd-1234`);
+    const texto = await r.text();
+    ok("quando o espaço está no valor guardado, ela aponta para o Render",
+       r.status === 403 && /GUARDADO no Render/.test(texto), texto.slice(0, 220));
+    await t2.parar();
+  }
+
+  const exemplo = await bater("SEU_IMPORT_TOKEN");
+  ok("quem cola o exemplo ouve que colou o exemplo",
+     /colou o exemplo/.test(exemplo.texto), exemplo.texto.slice(0, 200));
+
+  const caixa = await bater(encodeURIComponent("AB+CD-efgh-1234"));
+  ok("maiúscula trocada por minúscula é dita", /maiúscula/.test(caixa.texto),
+     caixa.texto.slice(0, 200));
+
+  const semNada = await fetch(`http://127.0.0.1:${t.porta}/anexos/resgatar`);
+  const semNadaTexto = await semNada.text();
+  ok("sem ?token= nenhum, ela ensina onde ele entra",
+     /Não veio \?token=/.test(semNadaTexto), semNadaTexto.slice(0, 200));
+
+  // ------------------------------------------------------------
+  //  A CONFERÊNCIA QUE IMPEDE O CONSERTO ESPERTO DEMAIS
+  //
+  //  Dizer "você acertou o começo" seria a pista mais útil de todas, e é
+  //  justamente a que não se pode dar: com ela, adivinha-se a senha letra por
+  //  letra, e uma senha de vinte caracteres cai em algumas centenas de
+  //  tentativas.
+  // ------------------------------------------------------------
+  //
+  // A CONFERÊNCIA É DE INDISTINGUIBILIDADE, e não de palavras proibidas.
+  //
+  // A primeira versão procurava as palavras "começo", "acertou" e afins no
+  // texto — e reprovava a frase genérica, que tem "no começo ou no fim" num
+  // sentido inocente. Pior do que o falso alarme: procurar palavra não mede o
+  // que importa. O que importa é que "ab", que É o começo do token, receba
+  // EXATAMENTE a mesma resposta que "zz", que não é nada. Byte a byte.
+  const pedaco = await bater("ab");
+  const nada = await bater("zz");
+  ok("um pedaço certo do token responde igualzinho a um palpite qualquer",
+     pedaco.status === 403 && pedaco.status === nada.status
+     && pedaco.texto === nada.texto,
+     `pedaço: ${pedaco.texto.slice(0, 90)} | qualquer: ${nada.texto.slice(0, 90)}`);
+  ok("e o valor de verdade não aparece em resposta nenhuma",
+     ![comMais, comEspaco, exemplo, caixa, pedaco, nada].some((r) => r.texto.includes(SENHA))
+     && !semNadaTexto.includes(SENHA));
+
+  // A PORTA DO HISTÓRICO É A MESMA PORTA. Eram duas cópias da mesma frase, e
+  // consertar uma deixaria a outra com o palpite velho.
+  const hist = await fetch(`http://127.0.0.1:${t.porta}/importar-historico?token=ab+cd-EFGH-1234`);
+  const histTexto = await hist.text();
+  ok("o importador de histórico ganha a mesma explicação",
+     /%2B/.test(histTexto), histTexto.slice(0, 200));
+
+  await t.parar();
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
