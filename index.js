@@ -1948,6 +1948,13 @@ app.get('/anexos/resgatar', async (req, res) => {
       const url = await baixarMidiaRecebida(servidor, adv.token,
         { messageid: v.id_uazapi, content: {} }, v.midia_mime, relato);
       if (!url) {
+        // O QUE JÁ SE SABE PERDIDO FICA DITO NA TELA. O resgate é a única
+        // ocasião em que alguém pergunta de novo por um anexo antigo; deixar a
+        // resposta só nesta página faria a conversa continuar mostrando
+        // "indisponível" para sempre, como se ainda houvesse esperança.
+        if (ehRecusaDefinitiva(relato.motivo)) {
+          await marcarMidiaIndisponivel(v.id_uazapi, relato.motivo);
+        }
         faltaram.push({ id: v.id_uazapi, telefone: adv.nome || String(adv.id),
                         porque: relato.motivo || 'não deu, e não sei dizer por quê' });
         continue;
@@ -2472,6 +2479,73 @@ const ehSoMiniatura = (v) => !v || String(v).startsWith('data:');
 const ESPERAS_DO_ANEXO = (process.env.ESPERA_DO_ANEXO_MS || '20000,60000,300000')
   .split(',').map((n) => parseInt(n, 10)).filter((n) => n > 0);
 
+// ============================================================
+//  "NÃO CONSEGUI AGORA" E "NÃO EXISTE" SÃO COISAS DIFERENTES
+//
+//  MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que
+//  serve neste servidor é `POST /message/download`, e ela respondeu:
+//
+//      400 {"error":"Message does not contain downloadable media"}
+//
+//  Isso não é a rota falhando. É a rota FUNCIONANDO e dizendo que aquela
+//  mensagem não tem arquivo para baixar — ou porque o WhatsApp já o descartou,
+//  ou porque a Uazapi não guarda mais. A resposta não vai mudar daqui a cinco
+//  minutos, nem amanhã.
+//
+//  E a ponte insistia assim mesmo: mais três rodadas, de seis pedidos cada,
+//  para ouvir a mesma frase. Dezoito chamadas num serviço que TEM limite de
+//  uso e que já nos devolve 429 — e é o mesmo 429 que faz a fila de envio
+//  segurar a mensagem que o atendente escreveu. Insistir no impossível custa
+//  na coisa que importa.
+//
+//  A RÉGUA, então: insiste-se em quem não respondeu, e não em quem disse não.
+//  Na dúvida, insiste — é o comportamento de antes, e ele não perde nada.
+// ============================================================
+const RECUSAS_DEFINITIVAS = [
+  // A mensagem não tem mídia. É a resposta que os 38 anexos vazios deram.
+  /does not contain downloadable media/i,
+  // A Uazapi não consegue nem ler o conteúdo da mensagem. Foi uma das cinco:
+  // "failed to parse message content: unrecognized message type".
+  /failed to parse message content/i,
+  /unrecognized message type/i,
+];
+
+/** A Uazapi disse NÃO, ou apenas não disse nada?
+ *
+ *  O `motivo` traz TODAS as tentativas emendadas — inclusive os 405 e 404 das
+ *  rotas que este servidor não atende. Procurar a frase definitiva dentro dele
+ *  é de propósito: basta que a rota que responde de verdade tenha dito não, e
+ *  o ruído das outras não atrapalha. */
+function ehRecusaDefinitiva(motivo) {
+  const t = String(motivo || '');
+  return RECUSAS_DEFINITIVAS.some((re) => re.test(t));
+}
+
+/** Marca a mensagem como "este arquivo não vem mais", com o porquê.
+ *
+ *  O PORQUÊ FICA GRAVADO, e não só no log. A tela precisa saber que pode parar
+ *  de prometer o arquivo, e quem for investigar daqui a um mês precisa saber
+ *  qual foi a resposta — o log da Render não guarda tanto tempo.
+ *
+ *  Coluna que não existe não derruba nada: numa base sem o SQL rodado, isto
+ *  avisa uma vez e segue. O anexo continua vazio, como sempre esteve. */
+let semAColunaDoErro = false;
+async function marcarMidiaIndisponivel(idUazapi, motivo) {
+  if (semAColunaDoErro || !idUazapi) return;
+  const { error } = await supabase.from('mensagens')
+    .update({ midia_erro: String(motivo || '').slice(0, 1000) })
+    .eq('id_uazapi', idUazapi);
+  if (!error) return;
+  if (/midia_erro/i.test(error.message || '') || String(error.code) === '42703') {
+    semAColunaDoErro = true;
+    console.warn('ATENÇÃO: a coluna "mensagens.midia_erro" não existe, então a tela '
+      + 'não tem como dizer que um anexo não vem mais — ela segue mostrando '
+      + '"indisponível" para sempre. Rode sql/2026-09-o-anexo-que-nao-vem-mais.sql.');
+    return;
+  }
+  console.error(`Não consegui marcar o anexo ${idUazapi} como indisponível:`, error.message);
+}
+
 /** A mensagem já tem o arquivo de verdade? (Miniatura não conta.) */
 async function jaTemOArquivo(idUazapi) {
   const { data, error } = await supabase
@@ -2481,8 +2555,12 @@ async function jaTemOArquivo(idUazapi) {
 }
 
 async function perseguirOArquivo({ servidor, token, m, mime, nome, tipo, tentativa = 0 }) {
+  // O RELATO ENTRA AQUI TAMBÉM, e não só no resgate manual. Sem ele, a razão
+  // da recusa ficava restrita ao log e esta função não tinha como distinguir
+  // "não consegui agora" de "não existe" — insistia nas duas.
+  const relato = { motivo: '' };
   try {
-    const url = await baixarMidiaRecebida(servidor, token, m, mime);
+    const url = await baixarMidiaRecebida(servidor, token, m, mime, relato);
     if (url) {
       await trocarMiniaturaPeloArquivo(m.messageid, url, mime, nome);
       if (tentativa) {
@@ -2492,6 +2570,16 @@ async function perseguirOArquivo({ servidor, token, m, mime, nome, tipo, tentati
     }
   } catch (e) {
     console.log(`Anexo (${tipo}) ${m.messageid}: ${(e && e.message) || e}`);
+  }
+
+  // A UAZAPI DISSE NÃO. Insistir não muda a resposta, e cada rodada são seis
+  // pedidos num serviço com limite de uso — o mesmo de onde vem o 429 que
+  // segura a mensagem que o atendente escreveu.
+  if (ehRecusaDefinitiva(relato.motivo)) {
+    await marcarMidiaIndisponivel(m.messageid, relato.motivo);
+    console.log(`Anexo (${tipo}) ${m.messageid}: a Uazapi diz que não tem este arquivo. `
+      + 'Não insisto — a resposta não muda com o tempo. A tela vai dizer que ele não vem mais.');
+    return;
   }
 
   const espera = ESPERAS_DO_ANEXO[tentativa];

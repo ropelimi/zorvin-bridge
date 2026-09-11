@@ -5644,6 +5644,104 @@ console.log("\n45. O documento que chega, e o que ficou indisponível");
        JSON.stringify(corpo.por_motivo || {}));
     await t.parar();
   }
+
+  // ---- 45e. "não existe" NÃO é "não consegui agora" ----
+  //
+  // MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que
+  // serve naquele servidor respondeu:
+  //
+  //     400 {"error":"Message does not contain downloadable media"}
+  //
+  // Isso não é a rota falhando: é a rota FUNCIONANDO e dizendo que aquela
+  // mensagem não tem arquivo. A resposta não muda daqui a cinco minutos.
+  //
+  // E a ponte insistia assim mesmo — mais três rodadas de seis pedidos cada,
+  // para ouvir a mesma frase. Dezoito chamadas num serviço que tem limite de
+  // uso e que já nos devolve 429; e é o mesmo 429 que faz a fila segurar a
+  // mensagem que o atendente escreveu. Insistir no impossível custa na coisa
+  // que importa.
+  {
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "300,300,300" },
+      { uazapi: { recusaDefinitiva: "Message does not contain downloadable media" } });
+    await mandar(t, documentoDaUazapi("DOC-QUE-NAO-EXISTE"));
+    await espera(2500);   // tempo de sobra para três rodadas, se houvesse
+
+    const m = mensagemDe(t, "DOC-QUE-NAO-EXISTE");
+    ok("a bolha existe, para ninguém ficar sem saber que chegou algo", !!m);
+    ok("e ela guarda o motivo de o arquivo não vir mais",
+       !!(m && m.midia_erro && /does not contain downloadable media/i.test(m.midia_erro)),
+       JSON.stringify(m && m.midia_erro));
+    ok("o log diz que não vai insistir, e por quê",
+       /não insisto/i.test(t.registro.join("")), t.registro.join("").slice(-400));
+
+    // O NÚMERO É A PROVA. Sem ele, "não insiste" seria uma frase no log com a
+    // ponte martelando o serviço por baixo.
+    const pedidos = t.uaz.recebidas.filter((c) => /download/i.test(c.caminho)).length;
+    ok("e a Uazapi é procurada UMA rodada, e não quatro", pedidos <= 7,
+       `foram ${pedidos} pedidos; uma rodada são seis`);
+    await t.parar();
+  }
+
+  // ---- 45f. a falha passageira continua merecendo insistência ----
+  //
+  // A metade que segura a régua. Sem esta, bastaria parar em toda falha para
+  // a de cima passar — e aí a ponte desistiria do documento que chega na
+  // segunda tentativa, que é o comportamento normal da Uazapi e o motivo de a
+  // insistência existir.
+  {
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "400,400" },
+                              { uazapi: { falhasDeDownload: 1 } });
+    await mandar(t, documentoDaUazapi("DOC-QUE-DEMORA"));
+    await espera(2000);
+
+    const m = mensagemDe(t, "DOC-QUE-DEMORA");
+    ok("o arquivo que só vem na segunda tentativa continua chegando",
+       !!(m && m.midia_url), "a régua não pode parar de insistir no passageiro");
+    ok("e a mensagem NÃO fica marcada como perdida", !(m && m.midia_erro),
+       JSON.stringify(m && m.midia_erro));
+    await t.parar();
+  }
+
+  // ---- 45g. na dúvida, insiste ----
+  //
+  // A ponte só para diante das frases que RECONHECE. Uma recusa que ela nunca
+  // viu é tratada como passageira — e tem de ser: parar por engano é desistir
+  // de um documento que viria, e isso não tem quem conserte depois.
+  {
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "300,300,300" },
+      { uazapi: { recusaDefinitiva: "erro novo que ninguém nunca viu" } });
+    await mandar(t, documentoDaUazapi("DOC-DE-MOTIVO-NOVO"));
+    await espera(2500);
+
+    const m = mensagemDe(t, "DOC-DE-MOTIVO-NOVO");
+    ok("motivo desconhecido NÃO marca a mensagem como perdida",
+       !(m && m.midia_erro), JSON.stringify(m && m.midia_erro));
+    const pedidos = t.uaz.recebidas.filter((c) => /download/i.test(c.caminho)).length;
+    ok("e a ponte insiste, como insistia antes", pedidos > 7,
+       `foram ${pedidos} pedidos; uma rodada só são seis`);
+    await t.parar();
+  }
+
+  // ---- 45h. sem a coluna, tudo como antes ----
+  //
+  // O estado real entre a entrega e o SQL rodado. Uma coisa nova não pode
+  // derrubar o que já funcionava: a bolha continua existindo, o anexo continua
+  // vazio como sempre esteve, e o log diz o que rodar.
+  {
+    const t = await subirTudo({ ESPERA_DO_ANEXO_MS: "300" },
+      { uazapi: { recusaDefinitiva: "Message does not contain downloadable media" },
+        semColunas: { mensagens: ["midia_erro"] } });
+    await mandar(t, documentoDaUazapi("DOC-SEM-A-COLUNA"));
+    await espera(1500);
+
+    const m = mensagemDe(t, "DOC-SEM-A-COLUNA");
+    ok("sem a coluna, a mensagem continua existindo", !!m);
+    ok("e o log diz o que rodar para a tela poder avisar",
+       /midia_erro.*não existe/s.test(t.registro.join(""))
+       && /2026-09-o-anexo-que-nao-vem-mais\.sql/.test(t.registro.join("")),
+       t.registro.join("").slice(-600));
+    await t.parar();
+  }
 }
 
 

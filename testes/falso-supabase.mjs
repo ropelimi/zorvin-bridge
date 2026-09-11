@@ -463,6 +463,28 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       }
 
       if (req.method === "PATCH") {
+        // GRAVAR NUMA COLUNA QUE NÃO EXISTE TAMBÉM RECUSA.
+        //
+        // `semColunas` só valia para LEITURA, e isso deixava de fora toda uma
+        // família de caminhos: o código tem vários "se a coluna não existir,
+        // grava sem ela" (erro_motivo, editada, apagada, enviado_por…), e
+        // nenhum deles tinha como ser exercitado — a bancada aceitava a
+        // gravação e o desvio nunca rodava. Uma prova que dissesse "sem a
+        // coluna, tudo como antes" passaria sem que nada disso fosse verdade.
+        //
+        // Só as colunas DECLARADAS ausentes são recusadas, e não toda coluna
+        // desconhecida: a lista de `COLUNAS_DO_BANCO` é parcial de propósito, e
+        // recusar o que não está nela derrubaria provas que escrevem colunas
+        // reais que ninguém listou.
+        const ausentes = semColunas[tabela] || [];
+        const proibida = Object.keys(json || {}).find((c) => ausentes.includes(c));
+        if (proibida) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({
+            code: "42703", message: `column ${tabela}.${proibida} does not exist`,
+            details: null, hint: null,
+          }));
+        }
         const alvos = casam();
         alvos.forEach((l) => Object.assign(l, json));
         if (aoGravar) aoGravar(tabela, alvos);
@@ -602,6 +624,10 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
 export function subirFalsaUazapi({
   porta = 0, historico = [], sufixo = "@s.whatsapp.net",
   rotaDeDownload = "/message/downloadmedia", arquivo = null,
+  // A rota atende e diz que a mensagem NÃO TEM arquivo. O texto é o da Uazapi
+  // de verdade; passar outro serve para provar que a ponte só para diante das
+  // frases que ela reconhece, e insiste em todo o resto.
+  recusaDefinitiva = null,
   // Como o envio falha, quando se quer que ele falhe: `{ status, corpo }`.
   // É o único jeito de exercitar a tradução do motivo do erro sem depender de
   // uma Uazapi de verdade recusando uma mensagem.
@@ -715,6 +741,21 @@ export function subirFalsaUazapi({
       }
       if (demoraDoDownload > 0) {
         await new Promise((r) => setTimeout(r, demoraDoDownload));
+      }
+      // A RECUSA DEFINITIVA — a rota funcionando e dizendo NÃO.
+      //
+      // É diferente de tudo o que estava aqui. `falhasDeDownload` imita a
+      // Uazapi que ATENDE e não traz o arquivo (passageiro, e a ponte insiste
+      // com razão). Isto imita a que atende e diz que a mensagem não TEM
+      // arquivo — medido em 11/09, nos anexos vazios do escritório:
+      //
+      //     400 {"error":"Message does not contain downloadable media"}
+      //
+      // Sem este estado, a bancada não tinha como exercitar a diferença, e um
+      // painel que insistisse para sempre passaria igual a um que para.
+      if (recusaDefinitiva) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: String(recusaDefinitiva) }));
       }
       // ATENDE, E NÃO TRAZ NADA. O corpo é o que a Uazapi devolve quando não
       // conseguiu o arquivo no WhatsApp: uma resposta de sucesso sem arquivo.
