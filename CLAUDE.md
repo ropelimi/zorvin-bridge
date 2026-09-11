@@ -222,6 +222,13 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    várias são `security definer`. Fechá-las em bloco derruba o painel (o acesso
    de `authenticated` a várias vem do próprio `public`) — tem de ser uma a uma,
    e a parte 6 daquele arquivo lista todas.
+   **E aquele `revoke` tinha prazo**: a varredura seguinte mostrou que toda
+   tabela, sequência e função NOVA em `public` nascia liberada para `anon`
+   (`anon=arwdDxtm`), então a próxima tabela criada reabriria tudo, calada. A
+   herança foi fechada em `sql/2026-09-a-tabela-nova-nao-nasce-aberta.sql` —
+   só para `anon`; `authenticated` continua herdando o que sempre herdou, e
+   tabela nova segue servindo o painel sem passo extra. Ao criar tabela, o que
+   continua sendo obrigatório é a POLÍTICA junto.
 6. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos
