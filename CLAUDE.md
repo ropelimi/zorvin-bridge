@@ -132,6 +132,36 @@ SQL: `sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql` (coluna
 `fila_envio.tentar_em`). **Sem ela tudo funciona como antes** — a ponte descobre
 sozinha, avisa uma vez no log, e a fila continua enviando.
 
+## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
+
+MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve
+neste servidor é `POST /message/download`, e ela respondeu:
+
+```
+400 {"error":"Message does not contain downloadable media"}
+```
+
+Isso **não é a rota falhando** — é a rota funcionando e dizendo que aquela
+mensagem não tem arquivo. A resposta não muda daqui a cinco minutos. E a ponte
+insistia assim mesmo: mais três rodadas de seis pedidos, **24 chamadas para
+ouvir a mesma frase**, num serviço com limite de uso de onde vem o 429 que faz a
+fila segurar a mensagem que o atendente escreveu.
+
+**A régua: insiste-se em quem não respondeu, não em quem disse não.** Só as
+frases de `RECUSAS_DEFINITIVAS` param a insistência; qualquer outra continua
+sendo tentada, porque parar por engano é desistir de um documento que viria.
+
+O motivo vai para `mensagens.midia_erro`, e é dele que a tela se serve para dizer
+"não veio — peça para reenviar" em vez de "indisponível" para sempre.
+
+SQL: `sql/2026-09-o-anexo-que-nao-vem-mais.sql`. **Sem a coluna, tudo como
+antes** — a ponte avisa uma vez no log e segue.
+
+**Números de 11/09**, sobre 1.237 anexos de 10 dias: 96,9% chegam com o arquivo,
+**nenhum** fica só na miniatura, e 38 ficam vazios — 20 documentos e 5 imagens
+entre eles. O tamanho do `id_uazapi` **não** é a causa (todos os tamanhos baixam
+na maioria das vezes); a explicação é a que a própria Uazapi deu.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
