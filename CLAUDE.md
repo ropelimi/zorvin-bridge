@@ -210,7 +210,19 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    zorvin_admin()`, então cada atendente passaria a ver só a própria linha e os
    nomes das mensagens antigas sumiriam em silêncio. Ao criar vista nova, decida
    e ESCREVA qual das duas ela é.
-5. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
+5. **A regra de acesso estava sozinha** (09/09/2026): `anon` tinha DELETE,
+   INSERT, UPDATE, SELECT e TRUNCATE em **todas** as tabelas — o padrão do
+   Supabase. Nada vazava, porque nenhuma política o alcançava; mas bastava UMA
+   política escrita para `{anon, ...}` para abrir tudo, e isso aconteceu duas
+   vezes (a política da `fila_envio` e a vista `equipe`). Hoje `anon` não tem
+   permissão em tabela nem sequência nenhuma, e
+   `limpar_eventos_recebidos()` — `security definer`, que APAGA — é só da ponte.
+   Conserto em `sql/2026-09-quem-nao-entrou-nao-alcanca-nada.sql`.
+   **Ainda aberto**: as funções em `public` nascem executáveis por `public`, e
+   várias são `security definer`. Fechá-las em bloco derruba o painel (o acesso
+   de `authenticated` a várias vem do próprio `public`) — tem de ser uma a uma,
+   e a parte 6 daquele arquivo lista todas.
+6. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos
 
