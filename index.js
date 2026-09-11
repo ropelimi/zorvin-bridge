@@ -662,42 +662,109 @@ function mapearMensagemHistorico(m, conversaId, ehGrupo = false) {
   return linha;
 }
 
+// ============================================================
+//  A PORTA DIZ O QUE NÃO BATE
+//
+//  Era uma frase só para duas situações opostas: "Acesso negado. Configure
+//  IMPORT_TOKEN e informe ?token= correto."
+//
+//  Quem a recebe não tem como saber se a variável NÃO EXISTE no Render ou se
+//  ela existe e o token não confere — e os consertos são diferentes: criar uma
+//  variável, ou reconferir o que se colou. Aconteceu em 02/09, no resgate do
+//  histórico do grupo: a resposta mandou procurar um erro de digitação num
+//  token que estava certo, porque a variável nunca tinha sido criada.
+//
+//  ACONTECEU DE NOVO em 10/09, e a frase já separava os dois casos: "a variável
+//  existe — o que não bate é o valor", com um palpite só, o do espaço em
+//  branco. O palpite errou, e quem está do outro lado fica comparando dois
+//  textos longos de olho, caractere a caractere, sem saber o que procurar.
+//
+//  O ENDEREÇO DE NAVEGADOR MEXE NO QUE PASSA POR ELE, e é aí que mora o
+//  engano que ninguém desconfia: um `+` dentro do token vira ESPAÇO no
+//  caminho, e um `#` corta o endereço ali — o que vem depois nem chega ao
+//  servidor. Nos dois casos a pessoa jura ter colado o valor certo, e colou.
+//
+//  O VALOR NUNCA APARECE: nem no acerto, nem no erro, nem no log. E as pistas
+//  abaixo só são ditas quando o que veio já É o token a menos de uma
+//  transformação — quem chega nelas já tem a senha inteira na mão. Nada aqui
+//  confirma pedaço de senha: um "você acertou o começo" transformaria a porta
+//  numa máquina de adivinhar letra por letra.
+// ============================================================
+const EXEMPLOS_DE_TOKEN = new Set([
+  'SEU_IMPORT_TOKEN', 'SEU_TOKEN', 'IMPORT_TOKEN', 'TOKEN', 'seu-token', 'o-token',
+]);
+
+const CHECKLIST_DO_TOKEN =
+  'Confira, nesta ordem:\n\n'
+  + '1. Copie o valor do próprio Render (Environment → o olhinho que revela), e não '
+  + 'de anotação guardada.\n'
+  + '2. Se o token tiver "+", escreva %2B no lugar dele no endereço: num endereço de '
+  + 'navegador, o "+" vira espaço.\n'
+  + '3. Se o token tiver "#", o navegador corta o endereço ali e o resto nem chega '
+  + 'aqui. Nesse caso troque o token no Render por um sem "#".\n'
+  + '4. Confira se não colou junto um espaço ou uma quebra de linha.';
+
+/** Devolve `null` quando a porta pode abrir, ou `{ status, texto }` com o que
+ *  responder. O `nome` só aparece no log do servidor. */
+function recusaDaPortaAdmin(req, nome) {
+  const senha = process.env.IMPORT_TOKEN;
+  if (!senha) {
+    console.log(`${nome}: recusado porque IMPORT_TOKEN não está configurada no ambiente.`);
+    return { status: 403, texto:
+      'Esta porta está fechada para todo mundo: a variável IMPORT_TOKEN não existe '
+      + 'neste servidor.\n\n'
+      + 'Para abri-la: Render → o serviço da ponte → Environment → Add Environment '
+      + 'Variable, com o nome IMPORT_TOKEN e uma senha forte que você escolher. '
+      + 'Salvar reinicia o serviço; depois use esse MESMO valor no ?token=.' };
+  }
+
+  const veio = req.query.token == null ? '' : String(req.query.token);
+  if (veio === senha) return null;
+
+  let pista;
+  if (!veio) {
+    pista = 'Não veio ?token= nenhum no endereço. Ele entra no fim, assim: '
+          + '…?token=SEU_VALOR (e, se já houver outro ?algo=, com & no lugar do ?).';
+  } else if (EXEMPLOS_DE_TOKEN.has(veio)) {
+    pista = `Você colou o exemplo, "${veio}", em vez do valor de verdade. `
+          + 'Ele está no Render, em Environment, na variável IMPORT_TOKEN.';
+  } else if (veio.trim() === senha) {
+    pista = 'É o token certo com espaço em branco colado em volta. Tire o espaço '
+          + '(ou a quebra de linha) do começo e do fim.';
+  } else if (veio === senha.trim() || veio.trim() === senha.trim()) {
+    // O ESPAÇO ESTÁ DO LADO DE LÁ, e o conserto é outro: não adianta mexer no
+    // endereço. Colar numa caixa de variável costuma levar uma quebra de linha
+    // junto, e aí o valor GUARDADO é que tem o sobrando — quem confere de olho
+    // no Render vê o texto certo e não vê o que está depois dele.
+    pista = 'O que você mandou está certo. Quem tem espaço em branco em volta é o '
+          + 'valor GUARDADO no Render — provavelmente uma quebra de linha colada '
+          + 'junto quando a variável foi criada.\n\n'
+          + 'Render → o serviço da ponte → Environment → IMPORT_TOKEN → editar, '
+          + 'apagar tudo e colar o valor sem espaço no fim. Salvar reinicia a ponte.';
+  } else if (veio.replace(/ /g, '+') === senha) {
+    // O ENGANO QUE NINGUÉM DESCONFIA. O "+" é a forma antiga de escrever espaço
+    // num endereço, então o token chega aqui com espaços onde tinha "+".
+    pista = 'É o token certo, mas ele tem "+" — e num endereço de navegador o "+" '
+          + 'vira espaço. Escreva %2B no lugar de cada "+", ou troque o token no '
+          + 'Render por um sem "+".';
+  } else if (veio.replace(/^["'\s]+|["'\s]+$/g, '') === senha) {
+    pista = 'É o token certo com aspas em volta. Tire as aspas.';
+  } else if (veio.toLowerCase() === senha.toLowerCase()) {
+    pista = 'É o token certo, com maiúscula onde era minúscula (ou o contrário). '
+          + 'Ele diferencia as duas.';
+  } else {
+    pista = CHECKLIST_DO_TOKEN;
+  }
+
+  return { status: 403, texto:
+    'O ?token= não confere com o IMPORT_TOKEN deste servidor.\n\n'
+    + 'A variável existe — o que não bate é o valor.\n\n' + pista };
+}
+
 app.get('/importar-historico', async (req, res) => {
   try {
-    // ------------------------------------------------------------
-    //  A PORTA DIZ QUAL DOS DOIS PROBLEMAS É
-    //
-    //  Era uma frase só para duas situações opostas: "Acesso negado. Configure
-    //  IMPORT_TOKEN e informe ?token= correto."
-    //
-    //  Quem a recebe não tem como saber se a variável NÃO EXISTE no Render ou
-    //  se ela existe e o token digitado não confere — e os consertos são
-    //  diferentes: criar uma variável, ou reconferir o que se colou. Aconteceu
-    //  em 02/09, no resgate do histórico do grupo: a resposta mandou procurar
-    //  um erro de digitação num token que estava certo, porque a variável
-    //  nunca tinha sido criada (ela nem estava na lista do CLAUDE.md).
-    //
-    //  DIZER "NÃO ESTÁ CONFIGURADA" NÃO ABRE BRECHA. Sem a variável esta porta
-    //  recusa TUDO, então não há nada a explorar do outro lado da frase — e o
-    //  silêncio custa uma tarde de quem tem a senha certa na mão. O valor em
-    //  si, esse nunca aparece: nem no acerto, nem no erro, nem no log.
-    // ------------------------------------------------------------
-    const senha = process.env.IMPORT_TOKEN;
-    if (!senha) {
-      console.log('Histórico: recusado porque IMPORT_TOKEN não está configurada no ambiente.');
-      return res.status(403).send(
-        'Esta porta está fechada para todo mundo: a variável IMPORT_TOKEN não existe '
-        + 'neste servidor.\n\n'
-        + 'Para abri-la: Render → o serviço da ponte → Environment → Add Environment '
-        + 'Variable, com o nome IMPORT_TOKEN e uma senha forte que você escolher. '
-        + 'Salvar reinicia o serviço; depois use esse MESMO valor no ?token=.');
-    }
-    if (req.query.token !== senha) {
-      return res.status(403).send(
-        'O ?token= não confere com o IMPORT_TOKEN deste servidor.\n\n'
-        + 'A variável existe — o que não bate é o valor. O engano mais comum é um '
-        + 'espaço em branco colado junto no começo ou no fim.');
-    }
+    const recusa = recusaDaPortaAdmin(req, 'Histórico');
+    if (recusa) return res.status(recusa.status).send(recusa.texto);
     const advogadoNumero = String(req.query.advogado || '').replace(/\D/g, '');
     const alvo = alvoDoHistorico(req.query.contato);
     const limiteTotal = Math.min(parseInt(req.query.limite || '500', 10) || 500, 5000);
@@ -1829,19 +1896,8 @@ async function processarEventoDoWebhook(corpo) {
 // ============================================================
 app.get('/anexos/resgatar', async (req, res) => {
   try {
-    const senha = process.env.IMPORT_TOKEN;
-    if (!senha) {
-      return res.status(403).send(
-        'Esta porta está fechada para todo mundo: a variável IMPORT_TOKEN não existe '
-        + 'neste servidor.\n\nRender → o serviço da ponte → Environment → Add Environment '
-        + 'Variable, com o nome IMPORT_TOKEN e uma senha forte que você escolher.');
-    }
-    if (req.query.token !== senha) {
-      return res.status(403).send(
-        'O ?token= não confere com o IMPORT_TOKEN deste servidor.\n\n'
-        + 'A variável existe — o que não bate é o valor. O engano mais comum é um '
-        + 'espaço em branco colado junto no começo ou no fim.');
-    }
+    const recusa = recusaDaPortaAdmin(req, 'Resgate de anexos');
+    if (recusa) return res.status(recusa.status).send(recusa.texto);
 
     const dias = Math.min(Math.max(parseInt(req.query.dias || '7', 10) || 7, 1), 90);
     const limite = Math.min(Math.max(parseInt(req.query.limite || '30', 10) || 30, 1), 200);
@@ -1874,7 +1930,7 @@ app.get('/anexos/resgatar', async (req, res) => {
       .select('id, advogado_id').in('id', idsDeConversa);
     const advDaConversa = new Map((conversas || []).map((c) => [String(c.id), c.advogado_id]));
     const { data: advs } = await supabase.from('advogados')
-      .select('id, token, servidor').in('id', [...new Set((conversas || []).map((c) => c.advogado_id))]);
+      .select('id, nome, token, servidor').in('id', [...new Set((conversas || []).map((c) => c.advogado_id))]);
     const advPorId = new Map((advs || []).map((a) => [String(a.id), a]));
 
     let encheu = 0;
@@ -1882,7 +1938,9 @@ app.get('/anexos/resgatar', async (req, res) => {
     for (const v of vazias) {
       const adv = advPorId.get(String(advDaConversa.get(String(v.conversa_id))));
       if (!adv || !adv.token) {
-        faltaram.push({ id: v.id_uazapi, porque: 'não achei o telefone desta conversa' });
+        faltaram.push({ id: v.id_uazapi, telefone: (adv && adv.nome) || '(não achei)',
+                        porque: adv ? 'este telefone está sem token no cadastro'
+                                    : 'não achei o telefone desta conversa' });
         continue;
       }
       const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
@@ -1890,7 +1948,8 @@ app.get('/anexos/resgatar', async (req, res) => {
       const url = await baixarMidiaRecebida(servidor, adv.token,
         { messageid: v.id_uazapi, content: {} }, v.midia_mime, relato);
       if (!url) {
-        faltaram.push({ id: v.id_uazapi, porque: relato.motivo || 'não deu, e não sei dizer por quê' });
+        faltaram.push({ id: v.id_uazapi, telefone: adv.nome || String(adv.id),
+                        porque: relato.motivo || 'não deu, e não sei dizer por quê' });
         continue;
       }
       await trocarMiniaturaPeloArquivo(v.id_uazapi, url, v.midia_mime);
@@ -1902,6 +1961,11 @@ app.get('/anexos/resgatar', async (req, res) => {
     // relance e diz qual é o conserto.
     const porMotivo = {};
     for (const f of faltaram) porMotivo[f.porque] = (porMotivo[f.porque] || 0) + 1;
+    // E POR TELEFONE. Trinta e cinco falhas iguais podem ser o sistema inteiro
+    // ou UM telefone com token vencido — e são consertos opostos. Contadas por
+    // telefone, a diferença se vê de relance.
+    const porTelefone = {};
+    for (const f of faltaram) porTelefone[f.telefone] = (porTelefone[f.telefone] || 0) + 1;
 
     console.log(`Resgate de anexos: ${vazias.length} sem arquivo, ${encheu} recuperado(s).`);
     res.json({
@@ -1910,6 +1974,7 @@ app.get('/anexos/resgatar', async (req, res) => {
       // saber se vale tentar outra vez daqui a pouco.
       nao_deram: faltaram,
       por_motivo: porMotivo,
+      por_telefone: porTelefone,
       recado: encheu
         ? `${encheu} anexo(s) voltaram para a conversa. Recarregue o Zorvin para vê-los.`
         : 'Nenhum voltou. A Uazapi já não tem estes arquivos, ou o telefone perdeu o token.',
@@ -2200,6 +2265,14 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
       : ROTAS_DE_DOWNLOAD;
 
     let dados = null;
+    // O QUE CADA ROTA RESPONDEU — e não só "nenhuma respondeu".
+    //
+    // Com 35 anexos dando todos o mesmo motivo, "nenhuma rota respondeu"
+    // esconde três diagnósticos muito diferentes: 404 é a Uazapi já não ter o
+    // arquivo (não há o que fazer); 401 é token vencido (conserto de cadastro);
+    // e um estouro de rede é outra coisa ainda. Sem separá-los, a resposta diz
+    // que falhou e não diz o que fazer a respeito.
+    const respostas = [];
     for (const rota of ordem) {
       try {
         const r = await fetchComTimeout(`${servidor}${rota}`, {
@@ -2207,6 +2280,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
           headers: { 'Content-Type': 'application/json', 'token': token },
           body: JSON.stringify({ id: m.messageid })
         }, 20000);
+        respostas.push(`${rota} respondeu ${r.status}`);
         if (r.ok) {
           dados = await r.json().catch(() => null);
           if (dados) {
@@ -2221,6 +2295,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
           rotaQueServe.delete(servidor);
         }
       } catch (e) {
+        respostas.push(`${rota} estourou (${(e && e.message) || e})`);
         if (rota === lembrada) rotaQueServe.delete(servidor);
         console.log(`downloadmedia ${rota} erro: ${e.message}`);
       }
@@ -2286,7 +2361,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
       } catch (_) { /* ignora */ }
       return porque(dados
         ? 'a Uazapi respondeu, e sem arquivo dentro'
-        : 'nenhuma rota de download respondeu');
+        : `nenhuma rota de download trouxe o arquivo — ${respostas.join('; ') || 'nenhuma tentativa saiu'}`);
     }
 
     const caminho = `recebidos/${m.messageid}.${extensaoDoArquivo(mime, nomeDoArquivo(m))}`;
