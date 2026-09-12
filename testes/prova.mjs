@@ -6035,5 +6035,136 @@ console.log("\n47. O que nunca foi documento");
   await t.parar();
 }
 
+
+// ==================================================================
+//  48. DESATIVAR TEM DE DESATIVAR
+// ==================================================================
+//
+//  `advogados.ativo = false` só tirava o telefone do SELETOR do painel. Nada
+//  mais olhava para ele — nem a fila de envio, nem o caminho automático dos
+//  avisos de audiência. Quer dizer: uma linha que o escritório considera
+//  desligada continuava mandando mensagem para cliente.
+//
+//  E no pior formato possível: ninguém escolheu, e ninguém vê. O telefone
+//  sumiu da tela, então não há para onde olhar para perceber.
+//
+//  O CAMINHO AUTOMÁTICO É O QUE MAIS ASSUSTA. O Vantoro pede, a ponte escolhe
+//  a linha e manda, sem ninguém no meio. Um advogado sai do escritório, é
+//  desativado, e os clientes dele continuam recebendo avisos de audiência em
+//  nome dele.
+//
+//  O QUE ESTA SEÇÃO NÃO PROVA, de propósito: que a linha desativada pare de
+//  RECEBER. Ela continua recebendo, e isso é decisão, não esquecimento —
+//  perder mensagem de cliente é o pior desfecho deste sistema, e um número
+//  desativado continua sendo um número para onde clientes escrevem.
+// ==================================================================
+console.log("\n48. Desativar tem de desativar");
+{
+  const enfileirar = async (t, ativo) => {
+    t.sb.dados.advogados[0].ativo = ativo;
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Bom dia", status: "pendente",
+      tentativas: 0, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    return t.sb.dados.fila_envio.find((f) => f.id === 1);
+  };
+
+  // ---- 48a. a linha desativada não envia ----
+  {
+    const t = await subirTudo({});
+    const linha = await enfileirar(t, false);
+    ok("a mensagem NÃO sai por uma linha desativada", linha?.status === "erro",
+       `ficou ${linha?.status}`);
+    // A UAZAPI NEM É PROCURADA. Recusar depois de já ter mandado não recusaria
+    // nada — o cliente já teria recebido.
+    const enviados = t.uaz.recebidas.filter((c) => /\/send\//.test(c.caminho)).length;
+    ok("e a Uazapi nem chega a ser procurada", enviados === 0,
+       `foram ${enviados} envio(s)`);
+    ok("a tela diz que a linha está desativada, e o que fazer",
+       /desativada/i.test(linha?.erro_motivo || "")
+       && /outro telefone/i.test(linha?.erro_motivo || ""),
+       JSON.stringify(linha?.erro_motivo));
+    await t.parar();
+  }
+
+  // ---- 48b. e a linha ATIVA continua enviando ----
+  //
+  // A metade que segura a régua. Sem ela, bastaria recusar tudo para a de cima
+  // passar — e aí o escritório inteiro ficaria mudo.
+  {
+    const t = await subirTudo({});
+    const linha = await enfileirar(t, true);
+    ok("a linha ativa continua enviando normalmente", linha?.status === "enviada",
+       `ficou ${linha?.status}`);
+    await t.parar();
+  }
+
+  // ---- 48c. base antiga, com a coluna nula ----
+  //
+  // Tratar nulo como desativado calaria o escritório inteiro de uma vez — o
+  // oposto do que este conserto existe para fazer. Só o `false` explícito
+  // desativa.
+  {
+    const t = await subirTudo({});
+    const linha = await enfileirar(t, null);
+    ok("coluna nula NÃO é linha desativada", linha?.status === "enviada",
+       `ficou ${linha?.status}`);
+    await t.parar();
+  }
+
+  // ---- 48d. o aviso de audiência não sai por linha desativada ----
+  {
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+      vantoro: { avisos: [{ id: "AV-1", telefone: "11999998888",
+                            texto: "Sua audiência é amanhã às 14h.",
+                            remetente: TELEFONE.numero, finalidade: "CLIENTE" }] },
+    });
+    t.sb.dados.advogados[0].ativo = false;
+    await espera(5000);   // a rodada roda 4s depois de subir
+
+    const naFila = (t.sb.dados.fila_envio || []).length;
+    ok("o aviso NÃO é enfileirado por uma linha desativada", naFila === 0,
+       `foram ${naFila} item(ns) para a fila`);
+    // O MOTIVO VOLTA PARA O VANTORO. Calando aqui, o aviso sumiria e o cliente
+    // faltaria à audiência sem ninguém saber por quê.
+    //
+    // E O TEXTO É CONFERIDO, não só a chamada. Esta conferência era
+    // `recebidas.some(caminho === /avisos/AV-1/erro)` e PASSAVA mesmo com a
+    // proteção deste caminho arrancada — porque, sem ela, o aviso ia para a
+    // fila e a OUTRA proteção (a do envio) o recusava e avisava o Vantoro
+    // pelo mesmo endereço. Ela dizia "este caminho avisou" e media "alguém
+    // avisou".
+    //
+    // As duas frases são diferentes de propósito, e é só por isso que dá para
+    // distinguir: só a deste caminho manda REATIVAR a linha.
+    const erroDoVantoro = t.van.recebidas.find(
+      (c) => /\/avisos\/AV-1\/erro$/.test(c.caminho));
+    ok("e o Vantoro fica sabendo por que o aviso não saiu, por ESTE caminho",
+       /desativada/i.test(erroDoVantoro?.corpo?.motivo || "")
+       && /reative/i.test(erroDoVantoro?.corpo?.motivo || ""),
+       JSON.stringify(erroDoVantoro?.corpo || t.van.recebidas.map((c) => c.caminho)));
+    await t.parar();
+  }
+
+  // ---- 48e. com a linha ativa, o aviso sai ----
+  {
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+      vantoro: { avisos: [{ id: "AV-2", telefone: "11999998888",
+                            texto: "Sua audiência é amanhã às 14h.",
+                            remetente: TELEFONE.numero, finalidade: "CLIENTE" }] },
+    });
+    await espera(6000);
+    const saiu = (t.sb.dados.fila_envio || []).some((f) => /audiência/i.test(f.texto || ""));
+    ok("com a linha ativa, o aviso de audiência continua saindo", saiu,
+       JSON.stringify(t.sb.dados.fila_envio));
+    await t.parar();
+  }
+}
+
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

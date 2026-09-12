@@ -3402,6 +3402,11 @@ function motivoDoErro(bruto) {
     return 'O Zorvin não encontrou o telefone ou o contato desta conversa. '
          + 'Avise quem administra: é cadastro, não é a mensagem.';
   }
+  if (/esta desativada no zorvin/.test(t)) {
+    return 'Esta linha do escritório está desativada, então nada sai por ela. '
+         + 'Se a mensagem precisa ir, mande por outro telefone nosso — ou peça '
+         + 'a quem administra para reativar esta linha.';
+  }
   if (/falhou apos \d+ tentativas/.test(t)) {
     return 'Tentamos várias vezes seguidas e não deu. Se o número estiver certo, '
          + 'espere alguns minutos e toque em reenviar.';
@@ -3719,12 +3724,40 @@ async function processarFilaDeEnvio() {
       // Descobre para qual número enviar e por qual advogado (token/servidor).
       const { data: conv } = await supabase
         .from('conversas')
-        .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor, numero, nome)')
+        .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor, numero, nome, ativo)')
         .eq('id', item.conversa_id)
         .single();
 
       if (!conv || !conv.advogado || !conv.contato) {
         await marcarErroNaFila(item.id, 'Conversa/advogado/contato não encontrado', item.aviso_vantoro_id);
+        continue;
+      }
+
+      // ------------------------------------------------------------
+      //  DESATIVAR TEM DE DESATIVAR
+      //
+      //  `ativo = false` só tirava o telefone do seletor do painel. A fila não
+      //  olhava para ele: uma mensagem já enfileirada — ou enfileirada pelo
+      //  caminho automático dos avisos de audiência — continuava SAINDO, e o
+      //  cliente recebia um WhatsApp de um número que o escritório considera
+      //  desligado.
+      //
+      //  É o pior formato possível de um defeito: ninguém escolheu, e ninguém
+      //  vê. O telefone sumiu da tela, então não há para onde olhar.
+      //
+      //  RECUSAR É O CERTO MESMO PARA O QUE JÁ ESTAVA NA FILA. Desativar é uma
+      //  decisão de parar; honrá-la só daí para a frente deixaria sair o que
+      //  estava no meio, que é justamente o que ninguém está olhando.
+      //
+      //  SÓ O `false` EXPLÍCITO desativa. Numa base antiga a coluna pode vir
+      //  nula, e tratar nulo como desativado calaria o escritório inteiro de
+      //  uma vez — o oposto do que este conserto existe para fazer.
+      // ------------------------------------------------------------
+      if (conv.advogado.ativo === false) {
+        const quem = conv.advogado.nome || conv.advogado.numero || 'esta linha';
+        await marcarErroNaFila(item.id,
+          `A linha ${quem} está desativada no Zorvin`, item.aviso_vantoro_id);
+        console.log(`Fila: item ${item.id} recusado — a linha ${quem} está desativada.`);
         continue;
       }
 
@@ -7145,16 +7178,35 @@ async function buscarAvisosDeAudiencia() {
       const pedido = String(aviso.remetente || '').trim();
       let adv = null;
       if (/^[\d\s()+-]+$/.test(pedido) && pedido.replace(/\D/g, '').length >= 10) {
-        const { data: todos } = await supabase.from('advogados').select('id, nome, numero');
+        const { data: todos } = await supabase.from('advogados').select('id, nome, numero, ativo');
         adv = (todos || []).find((a) => chaveDoNumero(a.numero) === chaveDoNumero(pedido)) || null;
       } else if (pedido) {
         const { data } = await supabase.from('advogados')
-          .select('id, nome').ilike('nome', `%${pedido}%`).limit(1).maybeSingle();
+          .select('id, nome, ativo').ilike('nome', `%${pedido}%`).limit(1).maybeSingle();
         adv = data || null;
       }
       if (!adv) {
         await avisoDeuErro(aviso.id,
           `Telefone "${pedido || '(em branco)'}" não encontrado no Zorvin.`);
+        continue;
+      }
+
+      // A LINHA DESATIVADA NÃO AVISA CLIENTE NENHUM.
+      //
+      // Este é o caminho AUTOMÁTICO: o Vantoro pede, a ponte escolhe a linha e
+      // manda, sem ninguém no meio. Sem esta conferência, um telefone
+      // desativado seguia avisando clientes de audiência — e o escritório não
+      // tinha como perceber, porque ele já não aparece no painel.
+      //
+      // O MOTIVO VOLTA PARA O VANTORO, em vez de a ponte engolir o aviso. Lá
+      // ele aparece como falhou, com a frase; calando aqui, o aviso sumiria e o
+      // cliente faltaria à audiência sem ninguém saber por quê — e essa é a
+      // consequência que este caminho existe para evitar.
+      if (adv.ativo === false) {
+        await avisoDeuErro(aviso.id,
+          `A linha "${adv.nome || pedido}" está desativada no Zorvin. `
+          + 'Reative-a, ou mande o aviso por outro telefone.');
+        console.log(`Aviso ${aviso.id}: linha ${adv.nome || pedido} desativada; não enfileirado.`);
         continue;
       }
 
@@ -7206,7 +7258,20 @@ setTimeout(() => { terminarOsPendentes().catch(() => {}); }, 5000).unref();
 
 // Os avisos de audiência mudam de hora em hora, não de segundo em segundo:
 // 5 minutos é de sobra e não pesa no plano free.
-setInterval(buscarAvisosDeAudiencia, 5 * 60 * 1000);
+// A RODADA DOS AVISOS DE AUDIÊNCIA.
+//
+// Cinco minutos é o ritmo de produção, e está certo: audiência é marcada com
+// dias de antecedência, e perguntar mais ao Vantoro não avisaria ninguém mais
+// cedo. `AVISOS_INTERVALO_MS` é **opcional** e existe para a bancada encurtar a
+// rodada — uma prova que esperasse cinco minutos não seria rodada por ninguém.
+//
+// E UMA RODADA LOGO DEPOIS DE SUBIR. Só havia o `setInterval`, então toda
+// publicação empurrava o primeiro aviso para cinco minutos adiante. Numa
+// manhã com várias publicações, isso é o cliente sendo avisado mais tarde por
+// um motivo que não tem nada a ver com ele.
+const AVISOS_INTERVALO_MS = Number(process.env.AVISOS_INTERVALO_MS) || 5 * 60 * 1000;
+setInterval(buscarAvisosDeAudiencia, AVISOS_INTERVALO_MS);
+setTimeout(() => { buscarAvisosDeAudiencia().catch(() => {}); }, 4000).unref?.();
 
 // ------------------------------------------------------------
 //  MANTER O VANTORO ACORDADO — no horário de trabalho, e só nele
