@@ -198,10 +198,12 @@ Hoje, uma linha desativada:
 tratar nulo como desativado calaria o escritório inteiro de uma vez — o oposto
 do que isto existe para fazer.
 
-**Fica em aberto, e é consequência disto:** as conversas de uma linha desativada
-ficam gravadas e **invisíveis**, porque o seletor a esconde. É o mesmo defeito
-que a faixa de falhas combate — conteúdo que existe e não se alcança. O conserto
-é do painel, e ainda não foi feito.
+**A consequência disto já foi fechada, do lado do painel:** as conversas de uma
+linha desativada ficavam gravadas e **invisíveis**, porque o seletor a escondia.
+Hoje elas voltam numa seção separada da barra, **só para quem administra**, e com
+a caixa de escrever trocada por uma explicação — a linha continua fora de tudo o
+que a tela oferece, que é o que esta recusa aqui na ponte exige. Ver "A linha
+desativada não some", no CLAUDE.md do painel.
 
 Variável **opcional** `AVISOS_INTERVALO_MS` (padrão 5 min), para a bancada
 encurtar a rodada dos avisos. Junto entrou uma rodada 4s depois de subir: só
