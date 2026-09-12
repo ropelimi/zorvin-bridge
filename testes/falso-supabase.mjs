@@ -532,7 +532,9 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // `frente = null` e NENHUMA prova reclamava. Um falso que não
                                     // responde como o de verdade esconde exatamente o que ele
                                     // deveria expor.
-                                    classificar = { frente: "DESCONHECIDA", cliente: null } } = {}) {
+                                    classificar = { frente: "DESCONHECIDA", cliente: null },
+                                    // Os avisos de audiência que este Vantoro tem para entregar.
+                                    avisos = [] } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -565,6 +567,23 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
+
+    // OS AVISOS DE AUDIÊNCIA — o caminho AUTOMÁTICO.
+    //
+    // Faltava aqui, e por isso ele não tinha prova nenhuma: é o Vantoro que
+    // pede, a ponte que escolhe a linha e manda, sem ninguém no meio. Justamente
+    // o caminho onde um defeito sai para o cliente sem passar por uma tela.
+    //
+    // O `/enviado` e o `/erro` são a volta: a ponte diz ao Vantoro o que
+    // aconteceu com cada aviso, e é por ele que se sabe que um aviso NÃO saiu.
+    if (url.pathname.endsWith("/avisos/pendentes")) {
+      const devolver = avisos.slice();
+      avisos.length = 0;   // como o de verdade: cada aviso é entregue uma vez
+      return res.end(JSON.stringify({ ok: true, avisos: devolver }));
+    }
+    if (/\/avisos\/[^/]+\/(enviado|erro)$/.test(url.pathname)) {
+      return res.end(JSON.stringify({ ok: true }));
+    }
 
     // A CONFERÊNCIA DA SENHA. É o Vantoro quem responde se a pessoa é quem diz
     // ser — a ponte não guarda senha nenhuma. Sem esta rota aqui, a entrada

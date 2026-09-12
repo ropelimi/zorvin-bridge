@@ -173,6 +173,41 @@ de *"por que o anexo não veio?"*.
 entre eles. O tamanho do `id_uazapi` **não** é a causa (todos os tamanhos baixam
 na maioria das vezes); a explicação é a que a própria Uazapi deu.
 
+## Desativar um telefone — o que ele para de fazer, e o que continua
+
+`advogados.ativo = false` só tirava a linha do **seletor do painel**. Nada mais
+olhava para ela: nem a fila de envio, nem o caminho automático dos avisos de
+audiência. Uma linha que o escritório considera desligada continuava mandando
+mensagem para cliente — e no pior formato, porque ninguém escolheu aquilo e
+ninguém vê: o telefone sumiu da tela, então não há para onde olhar.
+
+Hoje, uma linha desativada:
+
+- **não envia**, nem o que já estava na fila. Desativar é uma decisão de parar;
+  honrá-la só daí para a frente deixaria sair justamente o que ninguém está
+  olhando. A bolha diz que a linha está desativada e o que fazer.
+- **não avisa cliente de audiência.** Este é o caminho automático — o Vantoro
+  pede, a ponte escolhe a linha e manda, sem ninguém no meio —, e o motivo
+  **volta para o Vantoro** em vez de o aviso sumir: calando aqui, o cliente
+  faltaria à audiência sem ninguém saber por quê.
+- **continua RECEBENDO, e isso é decisão, não esquecimento.** Perder mensagem de
+  cliente é o pior desfecho deste sistema, e um número desativado continua sendo
+  um número para onde clientes escrevem.
+
+**Só o `false` explícito desativa.** Numa base antiga a coluna pode vir nula, e
+tratar nulo como desativado calaria o escritório inteiro de uma vez — o oposto
+do que isto existe para fazer.
+
+**Fica em aberto, e é consequência disto:** as conversas de uma linha desativada
+ficam gravadas e **invisíveis**, porque o seletor a esconde. É o mesmo defeito
+que a faixa de falhas combate — conteúdo que existe e não se alcança. O conserto
+é do painel, e ainda não foi feito.
+
+Variável **opcional** `AVISOS_INTERVALO_MS` (padrão 5 min), para a bancada
+encurtar a rodada dos avisos. Junto entrou uma rodada 4s depois de subir: só
+havia o intervalo, então toda publicação empurrava o primeiro aviso do dia
+cinco minutos adiante.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
