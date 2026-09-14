@@ -295,6 +295,27 @@ um caminho — os 37 scripts estruturais de `sql/` descrevem a história, não o
 estado final, e alguns criam o que os seguintes destroem. O ponto de partida de
 um banco zerado é problema separado, e ainda em aberto.
 
+**O primeiro script que passou por aqui** é
+`sql/automaticos/001-quem-entra-vira-gente.sql`: um gatilho em `auth.users` que
+cria a linha de `usuarios` junto com a conta, e faz a **primeira conta do banco
+nascer administradora**. Ele existe por causa da entrada sem Vantoro (ver o
+CLAUDE.md do painel): sem Vantoro, ninguém escreveria `usuarios.admin`, e as
+telas de administração ficariam trancadas para todo mundo — inclusive para o
+dono, sem jeito de destrancar por dentro.
+
+**O corpo inteiro dele vive dentro de um `exception when others`, e isso não é
+excesso de cuidado.** No caminho COM Vantoro é a ponte que cria a conta no Auth
+(`createUser`) na primeira entrada da vida de alguém; um gatilho que estoure ali
+faz a criação inteira falhar, e o sintoma é "fulano não entra de jeito nenhum",
+no dia em que fulano foi contratado. Falhando, ele desiste em silêncio (com
+`raise warning` no log do banco) e a conta nasce assim mesmo — a situação de
+antes do script, e não uma pior.
+
+A prova 51l-bis aponta para a **pasta de verdade** e confere que tudo o que está
+lá aplica num banco limpo. Vale para todo script futuro: erro de digitação em
+SQL passa por revisão de código sem ninguém notar e só aparece na hora de
+instalar.
+
 Variável **opcional** `SCRIPTS_PASTA`, para a bancada apontar scripts de mentira
 sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Prova:
 seção 51, que sobe um **Postgres de verdade** (a integração contínua traz um), e
