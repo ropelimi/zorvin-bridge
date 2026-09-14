@@ -296,10 +296,20 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    permissão em tabela nem sequência nenhuma, e
    `limpar_eventos_recebidos()` — `security definer`, que APAGA — é só da ponte.
    Conserto em `sql/2026-09-quem-nao-entrou-nao-alcanca-nada.sql`.
-   **Ainda aberto**: as funções em `public` nascem executáveis por `public`, e
-   várias são `security definer`. Fechá-las em bloco derruba o painel (o acesso
-   de `authenticated` a várias vem do próprio `public`) — tem de ser uma a uma,
-   e a parte 6 daquele arquivo lista todas.
+   **As funções foram fechadas depois**, uma a uma, em
+   `sql/2026-09-as-quatro-funcoes-que-rodam-com-poder-de-dono.sql`. Toda função
+   nasce executável por `public` — que inclui `anon` —, e quatro eram
+   `security definer`. **A régua é tirar de `public` E DEVOLVER a
+   `authenticated` na mesma passada**: `pode_ver_conversa` e `meus_telefones`
+   não são chamadas por ninguém, vivem DENTRO das políticas, e sem elas a
+   leitura de `conversas` morre com `permission denied` para o escritório
+   inteiro. As dez restantes não eram `definer` e já estavam neutralizadas pelo
+   `revoke` das tabelas: sem permissão em tabela nenhuma, `anon` não lê nada
+   por elas.
+   **E a conferência por SQL tem um limite escrito lá**: ela roda sem sessão,
+   então uma política do feitio `auth.uid() is not null AND pode_ver_conversa()`
+   nem chega a chamar a função — passa na consulta e quebra para quem entra. A
+   conferência de verdade é abrir o painel.
    **E aquele `revoke` tinha prazo**: a varredura seguinte mostrou que toda
    tabela, sequência e função NOVA em `public` nascia liberada para `anon`
    (`anon=arwdDxtm`), então a próxima tabela criada reabriria tudo, calada. A
