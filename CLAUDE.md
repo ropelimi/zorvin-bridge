@@ -325,7 +325,26 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    `immutable` (`CACHE_DA_MIDIA`), o que é seguro porque o endereço é
    `recebidos/{messageid}` e o messageid não se repete — aquele endereço nunca
    aponta para outro conteúdo.
-7. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
+7. **O balde `anexos` é PÚBLICO de propósito** (14/09/2026), e isto não é
+   descuido: medido, são **4.187 arquivos e 1.996 MB**, com ~40 MB entrando por
+   dia. Fechá-lo obriga a endereço assinado, e o bilhete do endereço assinado
+   **muda a cada vez que é gerado** — para o navegador é outro endereço, então o
+   cache de um ano (`CACHE_DA_MIDIA`, com `immutable`) deixa de valer e cada
+   foto é rebaixada de novo, por pessoa, a cada expiração. É exatamente o que
+   zerou a banda em 21/08 e suspendeu o workspace. O `immutable` **é** o
+   conserto daquilo; o endereço assinado o desfaz por construção.
+   O que se ganharia é menor do que parece: o endereço é
+   `anexos/recebidos/{messageid}`, que não se adivinha — a exposição real é
+   "quem tem o link", e não "qualquer um", como era na vista `equipe` (onde
+   foram medidas 21 linhas abertas). **Se um dia precisar mudar, o caminho não é
+   trocar por endereço assinado e torcer**: é medir a banda primeiro e
+   provavelmente servir os arquivos pela ponte, com sessão conferida e cache
+   longo preservado.
+   O que mudou junto: a política era `ALL` — qualquer pessoa logada podia
+   **APAGAR** procuração e contrato, e nada no código apaga arquivo. Hoje são
+   três políticas (ler, mandar, regravar) e DELETE não é de ninguém. Ver
+   `sql/2026-09-o-deposito-de-anexos.sql`.
+8. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos
 
