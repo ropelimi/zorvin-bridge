@@ -4431,9 +4431,27 @@ const CRONOMETRO_DESDE = new Date();
  *  números trocados por `:id`. Ver o comentário acima sobre o que não se
  *  guarda. */
 function chaveDoTempo(prefixo, metodo, caminho) {
-  const semConsulta = String(caminho || '').split('?')[0];
+  const [semConsulta, consulta = ''] = String(caminho || '').split('?');
   const generico = semConsulta.replace(/\/\d+(?=\/|$)/g, '/:id');
-  return `${prefixo} ${String(metodo || 'GET').toUpperCase()} ${generico || '/'}`;
+  // ------------------------------------------------------------
+  //  OS NOMES DOS PARÂMETROS FICAM; OS VALORES, NUNCA
+  //
+  //  A primeira versão apagava a consulta inteira, e a primeira leitura de
+  //  verdade mostrou o preço disso: procurar por NOME e achar por TELEFONE são
+  //  duas perguntas muito diferentes — uma varre o cadastro por texto e ainda
+  //  procura processo sem dono; a outra acha pelo telefone e devolve no máximo
+  //  cinco — e as duas caíam na mesma linha `/clientes/buscar`. O "típico"
+  //  daquela linha não era o típico de nenhuma das duas.
+  //
+  //  `q`, `telefone` e `cpf` são palavras escritas neste código; quem é dado de
+  //  cliente é o que vem DEPOIS do `=`, e isso continua fora. A chave passa a
+  //  responder qual pergunta custou caro, sem guardar a pergunta.
+  // ------------------------------------------------------------
+  const nomes = [...new Set(consulta.split('&')
+    .map((p) => p.split('=')[0].trim())
+    .filter(Boolean))].sort();
+  const pergunta = nomes.length ? `?${nomes.join('&')}` : '';
+  return `${prefixo} ${String(metodo || 'GET').toUpperCase()} ${generico || '/'}${pergunta}`;
 }
 
 /** Anota UMA chamada. `falhou` conta separado de propósito: uma média feita só

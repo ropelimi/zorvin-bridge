@@ -6230,8 +6230,18 @@ console.log("\n49. Quanto o Vantoro demora");
     // E A MEDIÇÃO ACONTECEU MESMO ASSIM: sem isto, a conferência de cima
     // passaria com o cronômetro inteiro arrancado — nada guardado, nada
     // vazado, nada medido.
-    ok("e as duas chamadas foram medidas",
-       (linhaDe(json, "vantoro GET /clientes/buscar") || {}).chamadas === 2,
+    //
+    // CADA PERGUNTA NA SUA LINHA. Procurar por nome e achar por telefone vão
+    // ao MESMO caminho do Vantoro (`/clientes/buscar`) e são trabalhos muito
+    // diferentes: uma varre o cadastro por texto e ainda procura processo sem
+    // dono; a outra acha pelo telefone e devolve no máximo cinco. Somadas numa
+    // linha só, o "típico" não é o típico de nenhuma das duas — foi o que a
+    // primeira leitura de verdade mostrou, em 14/09.
+    ok("a busca por nome tem a linha dela",
+       (linhaDe(json, "vantoro GET /clientes/buscar?q") || {}).chamadas === 1,
+       JSON.stringify(json.linhas));
+    ok("e a busca por CPF, a dela",
+       (linhaDe(json, "vantoro GET /clientes/buscar?cpf") || {}).chamadas === 1,
        JSON.stringify(json.linhas));
     await t.parar();
   }
@@ -6264,7 +6274,7 @@ console.log("\n49. Quanto o Vantoro demora");
     await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=abc`, { headers: comBilhete });
     const json = await emJson(t);
 
-    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar");
+    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar?q");
     ok("o tempo medido bate com a demora de verdade",
        doVantoro && doVantoro.tipico_ms >= 350 && doVantoro.tipico_ms < 3000,
        JSON.stringify(doVantoro));
@@ -6280,7 +6290,7 @@ console.log("\n49. Quanto o Vantoro demora");
 
     const { texto } = await tempos(t);
     ok("a janela responde em texto que se lê de olho",
-       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar/.test(texto),
+       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar\?q\b/.test(texto),
        texto.slice(0, 300));
     // ELA DIZ QUE ZERA. Sem esta frase, "12 chamadas" lido numa segunda de
     // manhã parece "o escritório quase não usa" — quando o que houve foi a
@@ -6309,7 +6319,7 @@ console.log("\n49. Quanto o Vantoro demora");
     await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
                 { headers: comBilhete });
     const json = await emJson(t);
-    const linha = linhaDe(json, "vantoro GET /clientes/buscar");
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar?telefone");
     ok("a espera pelo Vantoro acordar é contada", linha && linha.pior_ms >= 6000,
        JSON.stringify(linha));
     ok("e a chamada é marcada como lenta", linha && linha.lentas >= 1, JSON.stringify(linha));
@@ -6340,7 +6350,7 @@ console.log("\n49. Quanto o Vantoro demora");
     ok("a chamada realmente falhou", r.status >= 500, `veio ${r.status}`);
 
     const json = await emJson(t);
-    const linha = linhaDe(json, "vantoro GET /clientes/buscar");
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar?q");
     ok("ela é contada", linha && linha.chamadas === 1, JSON.stringify(json.linhas));
     ok("e marcada como falha, em vez de sumir da conta",
        linha && linha.falhas === 1, JSON.stringify(linha));
