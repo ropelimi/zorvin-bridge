@@ -344,6 +344,15 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    **APAGAR** procuração e contrato, e nada no código apaga arquivo. Hoje são
    três políticas (ler, mandar, regravar) e DELETE não é de ninguém. Ver
    `sql/2026-09-o-deposito-de-anexos.sql`.
+   **O balde `avatares` também fica público, e por outro motivo.** O script
+   tentou fechá-lo e se recusou, porque a conferência dentro do bloco achou
+   fotos de perfil apontando para lá — **medido: 7 das 35**. Fechá-lo teria
+   quebrado sete rostos na tela, em silêncio. Decidido em 14/09 deixar como
+   está: são fotos de perfil DA EQUIPE, não de cliente, e mover tudo para o
+   outro balde reapontando os endereços é risco real por uma porta pequena. O
+   que esse episódio ensina vale mais do que a decisão: **a conferência dentro
+   do bloco é o que impediu o estrago** — sem ela, o `update` teria passado e as
+   fotos sumiriam sem nenhuma mensagem.
 8. Chatwoot foi tentado antes e **abandonado** — estourava os 512 MB do plano free (precisa ~2 GB). Não sugerir voltar para ele sem discutir custo.
 
 ## Pendências / próximos passos

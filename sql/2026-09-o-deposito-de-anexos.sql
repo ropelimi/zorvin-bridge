@@ -46,10 +46,19 @@
 --     que só serve para o dia em que alguém errar o clique — ou para uma
 --     sessão roubada apagar o acervo do escritório.
 --
---  2. FECHA O BALDE `avatares`, que é público e ninguém usa: 10 arquivos,
---     167 kB, de 24/07. Só é fechado SE nenhuma foto de perfil apontar para
---     ele — a conferência está no próprio bloco, e sem ela isto seria trocar
---     um risco pequeno por fotos quebradas na tela.
+--  2. TENTA FECHAR O BALDE `avatares`, que é público: 10 arquivos, 167 kB, de
+--     24/07. Só fecha SE nenhuma foto de perfil apontar para ele.
+--
+--     >>> RODADO EM 14/09: ELE NÃO FECHOU, e estava certo. <<<
+--
+--     A conferência achou 7 das 35 fotos de perfil apontando para lá. Sem ela,
+--     o `update` teria passado e sete rostos sumiriam da tela sem nenhuma
+--     mensagem — o defeito que este projeto passou o mês caçando.
+--
+--     Decidido deixar como está: são fotos DA EQUIPE, não de cliente, e mover
+--     os arquivos reapontando os endereços é risco real por uma porta pequena.
+--     O bloco fica aqui porque ele continua certo: no dia em que aquelas sete
+--     fotos mudarem de lugar, rodar isto de novo fecha o balde sozinho.
 -- ============================================================
 
 -- ------------------------------------------------------------
