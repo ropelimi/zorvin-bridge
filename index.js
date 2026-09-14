@@ -4812,12 +4812,31 @@ app.get('/vantoro/cpf-existe', rotaVantoro(async (req) => {
 // Busca livre no cadastro: nome, CPF ou número do processo. É o que permite ao
 // atendente procurar no Zorvin do mesmo jeito que procuraria no Vantoro, em vez
 // de depender de já ter o telefone da pessoa.
+// ------------------------------------------------------------
+//  ESTA BUSCA PEDE O RESUMO CURTO — `leve=1`
+//
+//  Medido em 14/09, com o cronômetro dos dois lados: ela custava 1532ms, e o
+//  Vantoro gastava 1250ms disso esperando o banco. Não pela consulta: cada ida
+//  e volta ao Postgres custa ~180ms de lá, e o pedido fazia SETE — quatro delas
+//  só para montar processos, documentos, telefones e pendências de até vinte
+//  fichas.
+//
+//  E OS DOIS LUGARES DO PAINEL QUE LEEM ESTA RESPOSTA usam quatro campos: id,
+//  nome, telefone e telefone2. A busca da lista casa telefone com conversa; a
+//  agenda oferece começar conversa. Nenhuma das duas abre processo nem
+//  documento daqui — para isso existe `/vantoro/cliente/:id`, que continua
+//  trazendo a ficha inteira.
+//
+//  Eram seis viagens de carga jogada fora do outro lado. Com `leve=1` sobram
+//  duas, e a resposta vem marcada com `leve:true` em cada ficha — campo ausente
+//  ali quer dizer "não pedi", e nunca "o cliente não tem".
+// ------------------------------------------------------------
 app.get('/vantoro/buscar', rotaVantoro(async (req) => {
   const termo = String(req.query.q || '').trim();
   if (termo.length < 3) {
     return { status: 400, corpo: { ok: false, erro: 'Digite ao menos 3 letras ou números.' } };
   }
-  return chamarVantoro(`/clientes/buscar?q=${encodeURIComponent(termo)}`);
+  return chamarVantoro(`/clientes/buscar?q=${encodeURIComponent(termo)}&leve=1`);
 }));
 
 // Ficha completa (dados, pendências da ordem de serviço e processos).
