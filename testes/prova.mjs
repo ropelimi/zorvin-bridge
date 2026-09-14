@@ -6237,8 +6237,10 @@ console.log("\n49. Quanto o Vantoro demora");
     // dono; a outra acha pelo telefone e devolve no máximo cinco. Somadas numa
     // linha só, o "típico" não é o típico de nenhuma das duas — foi o que a
     // primeira leitura de verdade mostrou, em 14/09.
+    // A CHAVE LEVA O `leve` JUNTO desde que a ponte passou a pedir o resumo
+    // curto — é o cronômetro contando a verdade, e não um detalhe de escrita.
     ok("a busca por nome tem a linha dela",
-       (linhaDe(json, "vantoro GET /clientes/buscar?q") || {}).chamadas === 1,
+       (linhaDe(json, "vantoro GET /clientes/buscar?leve&q") || {}).chamadas === 1,
        JSON.stringify(json.linhas));
     ok("e a busca por CPF, a dela",
        (linhaDe(json, "vantoro GET /clientes/buscar?cpf") || {}).chamadas === 1,
@@ -6274,7 +6276,7 @@ console.log("\n49. Quanto o Vantoro demora");
     await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=abc`, { headers: comBilhete });
     const json = await emJson(t);
 
-    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar?q");
+    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar?leve&q");
     ok("o tempo medido bate com a demora de verdade",
        doVantoro && doVantoro.tipico_ms >= 350 && doVantoro.tipico_ms < 3000,
        JSON.stringify(doVantoro));
@@ -6290,7 +6292,7 @@ console.log("\n49. Quanto o Vantoro demora");
 
     const { texto } = await tempos(t);
     ok("a janela responde em texto que se lê de olho",
-       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar\?q\b/.test(texto),
+       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar\?leve&q\b/.test(texto),
        texto.slice(0, 300));
     // ELA DIZ QUE ZERA. Sem esta frase, "12 chamadas" lido numa segunda de
     // manhã parece "o escritório quase não usa" — quando o que houve foi a
@@ -6350,7 +6352,7 @@ console.log("\n49. Quanto o Vantoro demora");
     ok("a chamada realmente falhou", r.status >= 500, `veio ${r.status}`);
 
     const json = await emJson(t);
-    const linha = linhaDe(json, "vantoro GET /clientes/buscar?q");
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar?leve&q");
     ok("ela é contada", linha && linha.chamadas === 1, JSON.stringify(json.linhas));
     ok("e marcada como falha, em vez de sumir da conta",
        linha && linha.falhas === 1, JSON.stringify(linha));
@@ -6382,7 +6384,109 @@ console.log("\n49. Quanto o Vantoro demora");
 }
 
 // ==================================================================
-//  50. OS SCRIPTS QUE SE APLICAM SOZINHOS
+//  50. A BUSCA PEDE SÓ O QUE O PAINEL USA
+// ==================================================================
+//
+//  Medido em 14/09, com o cronômetro dos dois lados. A busca do cadastro
+//  custava 1532ms vista daqui, e o Vantoro gastava 1250ms disso esperando o
+//  banco — 99% do tempo dele.
+//
+//  E não era a consulta. Cada ida e volta ao Postgres custa ~180ms de lá, e a
+//  conta fecha rota por rota: uma ida 180ms, três idas 534ms, sete idas
+//  1261ms. Um pedido sem consulta nenhuma custa ZERO. Não é trabalho de banco,
+//  é distância — e o preço de um pedido é quantas idas ele faz.
+//
+//  Das sete da busca, quatro montavam processos, documentos, telefones e
+//  pendências de até vinte fichas. Os dois lugares do painel que leem esta
+//  resposta usam QUATRO campos: id, nome, telefone, telefone2.
+//
+//  Agora ela pede `leve=1`. Sobram duas idas.
+//
+//  O QUE ESTA SEÇÃO VIGIA:
+//
+//    1. que a ponte REALMENTE peça o resumo curto — sem isso o conserto está
+//       no Vantoro e ninguém o usa;
+//    2. que o painel continue recebendo os quatro campos de que vive;
+//    3. e que a FICHA INTEIRA continue vindo inteira: é ela que abre o cadastro
+//       na conversa, e cortá-la ali seria trocar um problema por outro bem
+//       pior.
+// ==================================================================
+console.log("\n50. A busca pede só o que o painel usa");
+{
+  const comBilhete = { Authorization: "Bearer jwt-bom" };
+
+  // ---- 50a. a ponte pede o resumo curto ----
+  {
+    const t = await subirTudo({}, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=eliana`, { headers: comBilhete });
+
+    const pedido = t.van.recebidas.find((c) => c.caminho === "/clientes/buscar");
+    ok("a ponte chegou a perguntar ao Vantoro", !!pedido,
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
+    // A CONFERÊNCIA DO CONSERTO. Sem ela, o `leve=1` pode cair do endereço numa
+    // edição e nada na bancada reclama: a resposta continua chegando, só que
+    // cinco viagens mais cara — e lentidão não quebra prova nenhuma.
+    ok("pedindo o resumo curto", /(^|[?&])leve=1(&|$)/.test(pedido?.busca || ""),
+       `foi com "${pedido?.busca}"`);
+    ok("e com o termo que veio da tela", /[?&]q=eliana/.test(pedido?.busca || ""),
+       pedido?.busca);
+    await t.parar();
+  }
+
+  // ---- 50b. e o painel continua recebendo os quatro campos de que vive ----
+  {
+    // O falso Vantoro faz o mesmo recorte do de verdade quando lhe pedem leve.
+    // Sem isso esta conferência mediria o falso: ele devolvia `{ok:true}` seco,
+    // e nada que dependa da FORMA da busca podia ser provado.
+    const t = await subirTudo({}, { vantoro: { clientes: [{
+      id: 7, nome: "ELIANA ALVES DA SILVA", cpf: "529.982.247-25",
+      telefone: "5511967973545", telefone2: "", email: "e@x.com",
+      processos: [{ numero: "1" }], telefones: [{ numero: "5511967973545" }],
+    }] } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=eliana`,
+                          { headers: comBilhete });
+    ok("a busca responde 200", r.status === 200, `veio ${r.status}`);
+    const cliente = ((await r.json().catch(() => ({}))).clientes || [])[0];
+
+    // OS QUATRO CAMPOS DE QUE O PAINEL VIVE. É com eles que a busca da lista
+    // casa telefone com conversa e que a agenda oferece começar conversa.
+    ok("o painel recebe id, nome e os dois telefones",
+       cliente && cliente.id === 7 && /ELIANA/.test(cliente.nome)
+       && cliente.telefone === "5511967973545" && "telefone2" in cliente,
+       JSON.stringify(cliente));
+    // E A RESPOSTA DIZ QUE É CURTA. Sem a marca, "sem processos" é o que se lê
+    // de uma ficha que não os pediu — e quem lê "não tem" decide coisas.
+    ok("e a ficha vem marcada como resumo", cliente && cliente.leve === true,
+       JSON.stringify(cliente));
+    ok("sem a carga que ninguém lê daqui", cliente && !("processos" in cliente),
+       JSON.stringify(cliente));
+    await t.parar();
+  }
+
+  // ---- 50c. a ficha inteira continua inteira ----
+  {
+    // A TRAVA CONTRA O CONSERTO QUE CORTA DEMAIS. É por esta rota que a ficha
+    // do cliente abre na conversa, com processos, documentos e as pendências da
+    // ordem de serviço. Pedir leve AQUI economizaria as mesmas viagens e
+    // esvaziaria a tela que existe para mostrar exatamente isso.
+    const t = await subirTudo({}, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77`, { headers: comBilhete });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                { headers: comBilhete });
+
+    const daFicha = t.van.recebidas.filter((c) => /^\/clientes\//.test(c.caminho)
+                                                || c.caminho === "/clientes/buscar");
+    ok("a ficha e a busca por telefone foram pedidas", daFicha.length === 2,
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho + c.busca)));
+    ok("e NENHUMA delas pediu o resumo curto",
+       daFicha.every((c) => !/leve=1/.test(c.busca || "")),
+       JSON.stringify(daFicha.map((c) => c.caminho + c.busca)));
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  51. OS SCRIPTS QUE SE APLICAM SOZINHOS
 //
 //  ESTA SEÇÃO NÃO USA O SUPABASE DE MENTIRA. Ela sobe um POSTGRES DE VERDADE e
 //  aponta a ponte para ele, porque o que está sendo provado é `create table`,
@@ -6394,7 +6498,7 @@ console.log("\n49. Quanto o Vantoro demora");
 //  prova que não existe, e este projeto já teve duas.
 // ==================================================================
 {
-  console.log("\n50. Os scripts que se aplicam sozinhos");
+  console.log("\n51. Os scripts que se aplicam sozinhos");
 
   const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
 
@@ -6479,7 +6583,7 @@ console.log("\n49. Quanto o Vantoro demora");
       return t;
     }
 
-    // ---- 50a. sem DATABASE_URL, tudo como antes ----
+    // ---- 51a. sem DATABASE_URL, tudo como antes ----
     {
       const b = await bancoNovo();
       const dir = pastaCom({ "001-cria.sql": "create table marca_a (n int);" });
@@ -6493,7 +6597,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50b. o padrão é conferir, e conferir não escreve nada ----
+    // ---- 51b. o padrão é conferir, e conferir não escreve nada ----
     {
       const b = await bancoNovo();
       const dir = pastaCom({ "001-cria.sql": "create table marca_b (n int);" });
@@ -6508,7 +6612,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50c. aplicar aplica de verdade ----
+    // ---- 51c. aplicar aplica de verdade ----
     {
       const b = await bancoNovo();
       const dir = pastaCom({
@@ -6527,7 +6631,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50d. a tabela de controle nasce fechada ----
+    // ---- 51d. a tabela de controle nasce fechada ----
     {
       // Armadilha nº 5 do CLAUDE.md: tabela nova em `public` já nasceu aberta
       // uma vez neste projeto. Esta tem de nascer com RLS ligada e SEM política
@@ -6544,7 +6648,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50e. cada script roda UMA vez, mesmo publicando de novo ----
+    // ---- 51e. cada script roda UMA vez, mesmo publicando de novo ----
     {
       const b = await bancoNovo();
       // `insert` é o que prova: rodar duas vezes deixaria duas linhas. Um
@@ -6563,7 +6667,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t2.parar();
     }
 
-    // ---- 50f. script que falha não derruba a ponte, e para os seguintes ----
+    // ---- 51f. script que falha não derruba a ponte, e para os seguintes ----
     {
       const b = await bancoNovo();
       const dir = pastaCom({
@@ -6617,7 +6721,7 @@ console.log("\n49. Quanto o Vantoro demora");
       }
     }
 
-    // ---- 50g. um script que quebra no meio não deixa metade aplicada ----
+    // ---- 51g. um script que quebra no meio não deixa metade aplicada ----
     {
       const b = await bancoNovo();
       // A propriedade que interessa a quem usa: duas instruções num arquivo só,
@@ -6629,23 +6733,23 @@ console.log("\n49. Quanto o Vantoro demora");
       // numa rodada de sabotagem: tirando o `begin`, ela continuou passando. O
       // Postgres embrulha um LOTE de instruções mandado numa consulta só na
       // própria transação implícita, e é ela que desfaz aqui. O `begin`
-      // explícito serve para outra coisa, e quem o prova é 50i-bis: a anotação
+      // explícito serve para outra coisa, e quem o prova é 51i-bis: a anotação
       // é uma consulta SEPARADA, e só uma transação aberta por nós a junta ao
       // script.
       //
       // Fica escrito porque a tentação é ler isto como "a prova da transação" e
-      // apagar 50i-bis por parecer repetida.
+      // apagar 51i-bis por parecer repetida.
       const dir = pastaCom({
         "001-meio.sql": "create table marca_g (n int);\nselect nao_existe_esta_funcao();",
       });
-      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      // Mesmo cuidado de 51f: aqui um script também quebra de propósito.
       const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
       ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
       ok("o que a primeira metade criou foi desfeito", (await b.temTabela("marca_g")) === false);
       if (t) await t.parar();
     }
 
-    // ---- 50h. script já aplicado que muda faz a ponte PARAR ----
+    // ---- 51h. script já aplicado que muda faz a ponte PARAR ----
     {
       const b = await bancoNovo();
       const dir = pastaCom({ "001-cria.sql": "create table marca_h (n int);" });
@@ -6661,7 +6765,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t2.parar();
     }
 
-    // ---- 50i. banco que não responde não derruba a ponte ----
+    // ---- 51i. banco que não responde não derruba a ponte ----
     {
       const dir = pastaCom({ "001-x.sql": "create table marca_i (n int);" });
       const u = new URL(BANCO_BASE);
@@ -6677,7 +6781,7 @@ console.log("\n49. Quanto o Vantoro demora");
       const log = t.registro.join("");
       ok("diz que não deu para aplicar", /não deu para aplicar agora/.test(log), log.slice(-400));
       ok("e diz que segue atendendo", /segue atendendo normalmente/.test(log));
-      // Mesmo cuidado de 50f: ponte morta reprova, em vez de derrubar a prova.
+      // Mesmo cuidado de 51f: ponte morta reprova, em vez de derrubar a prova.
       const status = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(mensagemDaUazapi("Banco fora, mensagem entra", "msg-banco-fora")),
@@ -6689,7 +6793,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50i-bis. a anotação entra junto com o script, não depois ----
+    // ---- 51i-bis. a anotação entra junto com o script, não depois ----
     {
       // POR QUE ISTO IMPORTA: anotando depois do `commit`, uma publicação
       // caindo entre os dois deixaria o script aplicado e não anotado — e a
@@ -6705,7 +6809,7 @@ console.log("\n49. Quanto o Vantoro demora");
         "002-derruba.sql": "create table marca_m (n int);\n"
           + "alter table public.zorvin_scripts_aplicados drop column impressao;",
       });
-      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      // Mesmo cuidado de 51f: aqui um script também quebra de propósito.
       const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
       ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
       ok("o primeiro script, esse sim, entrou", (await b.temTabela("marca_m0")) === true);
@@ -6718,7 +6822,7 @@ console.log("\n49. Quanto o Vantoro demora");
       if (t) await t.parar();
     }
 
-    // ---- 50j. a trava: duas pontes numa publicação, e só uma aplica ----
+    // ---- 51j. a trava: duas pontes numa publicação, e só uma aplica ----
     {
       // Toda publicação da Render sobe a ponte nova ENQUANTO a velha ainda
       // está saindo. Por alguns segundos há duas, e as duas acordam querendo
@@ -6747,7 +6851,7 @@ console.log("\n49. Quanto o Vantoro demora");
       await t2.parar();
     }
 
-    // ---- 50k. `-- sem-transacao`, para o que não roda dentro de uma ----
+    // ---- 51k. `-- sem-transacao`, para o que não roda dentro de uma ----
     {
       // `create index concurrently` é o caso de verdade: o Postgres o RECUSA
       // dentro de uma transação. Sem a saída, um script desses seria impossível
@@ -6767,17 +6871,17 @@ console.log("\n49. Quanto o Vantoro demora");
       await t.parar();
     }
 
-    // ---- 50l. sem a marca, o mesmo script é recusado ----
+    // ---- 51l. sem a marca, o mesmo script é recusado ----
     {
-      // A metade que prova que a marca faz alguma coisa. Sem esta, 50k passaria
+      // A metade que prova que a marca faz alguma coisa. Sem esta, 51k passaria
       // igual se a ponte simplesmente nunca usasse transação nenhuma — e aí a
-      // conferência 50g estaria provando o contrário do que 50k prova.
+      // conferência 51g estaria provando o contrário do que 51k prova.
       const b = await bancoNovo();
       const dir = pastaCom({
         "001-tabela.sql": "create table marca_l (n int);",
         "002-indice.sql": "create index concurrently marca_l_n on marca_l (n);",
       });
-      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      // Mesmo cuidado de 51f: aqui um script também quebra de propósito.
       const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
       ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
       const ctl = await b.consultar("select sucesso, erro from zorvin_scripts_aplicados where nome = '002-indice.sql'");

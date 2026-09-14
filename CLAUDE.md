@@ -297,7 +297,7 @@ um banco zerado é problema separado, e ainda em aberto.
 
 Variável **opcional** `SCRIPTS_PASTA`, para a bancada apontar scripts de mentira
 sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Prova:
-seção 50, que sobe um **Postgres de verdade** (a integração contínua traz um), e
+seção 51, que sobe um **Postgres de verdade** (a integração contínua traz um), e
 **reprova se ele faltar** em vez de se pular em silêncio.
 
 ## A saída (publicação) — a ponte termina o que está no meio
