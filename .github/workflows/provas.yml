@@ -40,6 +40,30 @@ jobs:
     # é curto o bastante para uma prova pendurada não ficar horas de pé.
     timeout-minutes: 10
 
+    # UM POSTGRES DE VERDADE, SÓ PARA A SEÇÃO DOS SCRIPTS AUTOMÁTICOS.
+    #
+    # Ela prova `create table`, `begin`/`rollback` e travas — coisas que o
+    # Supabase de mentira não tem como ter, porque ele fala PostgREST, que lê e
+    # escreve LINHAS. Provar isto contra o falso seria provar o falso.
+    #
+    # E a seção FALHA se este serviço não estiver aqui (ela confere `CI`), em
+    # vez de se pular sozinha em silêncio. Prova que se pula no lugar onde
+    # importa é prova que não existe — e este projeto já teve duas.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: prova
+        # Sem isto o `npm test` começa antes de o banco aceitar conexão, e a
+        # seção reprova falando de um assunto que não é o dela.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
     steps:
       - name: Baixar o código
         uses: actions/checkout@v4
@@ -77,3 +101,7 @@ jobs:
 
       - name: Rodar as provas
         run: npm test
+        env:
+          # O endereço do serviço acima. A prova cria um banco novo por
+          # conferência, para uma não sujar a outra.
+          PROVA_DATABASE_URL: postgresql://postgres:prova@127.0.0.1:5432/postgres
