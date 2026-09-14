@@ -6381,5 +6381,414 @@ console.log("\n49. Quanto o Vantoro demora");
   }
 }
 
+// ==================================================================
+//  50. OS SCRIPTS QUE SE APLICAM SOZINHOS
+//
+//  ESTA SEÇÃO NÃO USA O SUPABASE DE MENTIRA. Ela sobe um POSTGRES DE VERDADE e
+//  aponta a ponte para ele, porque o que está sendo provado é `create table`,
+//  `begin`/`rollback` e travas — coisas que um falso que fala PostgREST não tem
+//  como ter. Um falso que respondesse "apliquei" provaria o falso.
+//
+//  Sem um Postgres à mão a seção é PULADA — mas nunca na integração contínua:
+//  lá a ausência é FALHA. Prova que se pula sozinha no lugar onde importa é
+//  prova que não existe, e este projeto já teve duas.
+// ==================================================================
+{
+  console.log("\n50. Os scripts que se aplicam sozinhos");
+
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar os scripts automáticos (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+
+    const falarCom = async (url, sql, args) => {
+      const c = new pg.Client({ connectionString: url, ssl: false });
+      await c.connect();
+      try { return await c.query(sql, args); } finally { await c.end(); }
+    };
+
+    /** Um banco novo, vazio, só desta conferência — para uma não sujar a outra. */
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await falarCom(BANCO_BASE, `create database ${nome}`);
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      const url = u.toString();
+      return {
+        url,
+        consultar: (sql, args) => falarCom(url, sql, args),
+        /** true/false — a tabela existe mesmo no banco? */
+        temTabela: async (t) => {
+          const { rows } = await falarCom(url, "select to_regclass($1) as achou", [`public.${t}`]);
+          return rows[0].achou !== null;
+        },
+      };
+    }
+
+    /** Escreve scripts de mentira numa pasta temporária e devolve o caminho. */
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    function pastaCom(scripts) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scripts-"));
+      for (const [nome, corpo] of Object.entries(scripts)) {
+        fs.writeFileSync(path.join(dir, nome), corpo);
+      }
+      return dir;
+    }
+
+    // PONTE QUE NÃO SOBE ESTOURA, E AQUI ISSO ESTAVA ERRADO.
+    //
+    // `subirTudo` joga um erro quando a porta não responde, e nas outras 49
+    // seções isso é o certo: ponte que não sobe é falha da bancada, e falha de
+    // bancada tem de dizer o próprio nome.
+    //
+    // Nesta seção, não. Aqui a ponte SOBE e pode morrer logo depois, por causa
+    // de um script — que é exatamente o defeito que esta seção existe para
+    // caçar. Medido numa sabotagem: pondo `process.exit(1)` onde a ponte hoje
+    // só anota a falha, o erro subia, a prova morria no meio, e a rodada
+    // terminava SEM UMA LINHA DE FALHA — calada sobre o defeito. Por isso os
+    // cenários com script quebrado sobem por aqui: ponte que não fica de pé
+    // vira `null`, e `null` vira reprovação com nome logo abaixo.
+    async function pontOuNada(banco, pasta, extra) {
+      try { return await pontComScripts(banco, pasta, extra); }
+      catch (_e) { return null; }
+    }
+
+    /** Sobe a ponte apontada para este banco e esta pasta, e espera a rodada. */
+    async function pontComScripts(banco, pasta, extra = {}) {
+      const t = await subirTudo({
+        DATABASE_URL: banco ? banco.url : "",
+        SCRIPTS_PASTA: pasta,
+        ...extra,
+      });
+      // A rodada sai logo depois do listen. Espera-se o LOG dela, e não um
+      // tempo fixo: tempo fixo passa a reprovar no dia em que a máquina do
+      // GitHub estiver lenta, falando de outro assunto.
+      for (let i = 0; i < 80; i++) {
+        if (/Scripts autom[áa]ticos:/.test(t.registro.join(""))) break;
+        await espera(100);
+      }
+      await espera(400);
+      return t;
+    }
+
+    // ---- 50a. sem DATABASE_URL, tudo como antes ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_a (n int);" });
+      // A ponte sobe SEM o endereço, mas o banco existe e está ali do lado.
+      const t = await pontComScripts(null, dir);
+      ok("sem DATABASE_URL, a ponte diz que está desligado",
+         /Scripts automáticos: desligados/.test(t.registro.join("")),
+         t.registro.join("").slice(-400));
+      ok("e NÃO cria a tabela do script no banco", (await b.temTabela("marca_a")) === false);
+      ok("nem a tabela de controle", (await b.temTabela("zorvin_scripts_aplicados")) === false);
+      await t.parar();
+    }
+
+    // ---- 50b. o padrão é conferir, e conferir não escreve nada ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_b (n int);" });
+      const t = await pontComScripts(b, dir); // sem SCRIPTS_AUTOMATICOS
+      const log = t.registro.join("");
+      ok("diz quantos estão pendentes e quais", /1 pendente\(s\).*001-cria\.sql/s.test(log), log.slice(-500));
+      ok("diz que não aplicou nada", /NÃO apliquei nada/.test(log));
+      // AS DUAS CONFERÊNCIAS DE VERDADE: o banco continua sem nada. Sem elas,
+      // esta seção estaria provando o texto do log, e não o comportamento.
+      ok("a tabela do script NÃO foi criada", (await b.temTabela("marca_b")) === false);
+      ok("a tabela de controle NÃO foi criada", (await b.temTabela("zorvin_scripts_aplicados")) === false);
+      await t.parar();
+    }
+
+    // ---- 50c. aplicar aplica de verdade ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-cria.sql": "create table marca_c (n int);",
+        "002-enche.sql": "insert into marca_c (n) values (7);",
+      });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("a tabela existe no Postgres", (await b.temTabela("marca_c")) === true);
+      const { rows } = await b.consultar("select n from marca_c");
+      ok("e o segundo script rodou DEPOIS do primeiro", rows.length === 1 && rows[0].n === 7,
+         JSON.stringify(rows));
+      const ctl = await b.consultar("select nome, sucesso, impressao, tempo_ms from zorvin_scripts_aplicados order by nome");
+      ok("os dois ficaram anotados como aplicados", ctl.rows.length === 2 && ctl.rows.every((r) => r.sucesso === true),
+         JSON.stringify(ctl.rows));
+      ok("com a impressão digital guardada", ctl.rows.every((r) => /^[0-9a-f]{64}$/.test(r.impressao)));
+      await t.parar();
+    }
+
+    // ---- 50d. a tabela de controle nasce fechada ----
+    {
+      // Armadilha nº 5 do CLAUDE.md: tabela nova em `public` já nasceu aberta
+      // uma vez neste projeto. Esta tem de nascer com RLS ligada e SEM política
+      // — só a ponte (`service_role`) a alcança.
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-x.sql": "create table marca_d (n int);" });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const rls = await b.consultar(
+        "select relrowsecurity from pg_class where oid = 'public.zorvin_scripts_aplicados'::regclass");
+      ok("a tabela de controle nasce com RLS ligada", rls.rows[0].relrowsecurity === true);
+      const pol = await b.consultar(
+        "select count(*)::int as n from pg_policies where tablename = 'zorvin_scripts_aplicados'");
+      ok("e sem política nenhuma (ninguém além da ponte alcança)", pol.rows[0].n === 0, JSON.stringify(pol.rows));
+      await t.parar();
+    }
+
+    // ---- 50e. cada script roda UMA vez, mesmo publicando de novo ----
+    {
+      const b = await bancoNovo();
+      // `insert` é o que prova: rodar duas vezes deixaria duas linhas. Um
+      // `create table if not exists` passaria calado nos dois casos.
+      const dir = pastaCom({
+        "001-cria.sql": "create table marca_e (n int);",
+        "002-conta.sql": "insert into marca_e (n) values (1);",
+      });
+      const t1 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      await t1.parar();
+      const t2 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const log2 = t2.registro.join("");
+      ok("a segunda subida diz que não há nada pendente", /nada pendente/.test(log2), log2.slice(-400));
+      const { rows } = await b.consultar("select count(*)::int as n from marca_e");
+      ok("e o insert continua com UMA linha só", rows[0].n === 1, JSON.stringify(rows));
+      await t2.parar();
+    }
+
+    // ---- 50f. script que falha não derruba a ponte, e para os seguintes ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-boa.sql": "create table marca_f1 (n int);",
+        "002-quebrada.sql": "create table marca_f2 (n int) isto nao e sql;",
+        "003-depois.sql": "create table marca_f3 (n int);",
+      });
+      const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      // A PRIMEIRA CONFERÊNCIA É ESTA, e antes de qualquer outra: um script
+      // quebrado não pode derrubar a ponte. Tudo o mais desta cena só faz
+      // sentido se ela estiver de pé.
+      ok("a ponte fica de pé com um script quebrado", t !== null && t.filho.exitCode === null,
+         t === null ? "não respondeu depois de subir — morreu no script"
+                    : `saiu com código ${t.filho.exitCode}`);
+      if (!t) { console.log("  (o resto desta cena não roda: a ponte morreu)"); }
+      else {
+      ok("a primeira entrou", (await b.temTabela("marca_f1")) === true);
+      ok("a de depois da quebrada NÃO entrou", (await b.temTabela("marca_f3")) === false);
+      const ctl = await b.consultar("select nome, sucesso, erro from zorvin_scripts_aplicados order by nome");
+      const ruim = ctl.rows.find((r) => r.nome === "002-quebrada.sql");
+      ok("a falha fica GRAVADA na tabela, não só no log", ruim && ruim.sucesso === false, JSON.stringify(ctl.rows));
+      ok("com o motivo técnico junto", ruim && /syntax/i.test(String(ruim.erro)), ruim && ruim.erro);
+      // E O LOG TAMBÉM GRITA. A linha na tabela é o registro durável (é dela
+      // que o painel vai se servir), mas quem está olhando a publicação na hora
+      // vê o log — e este projeto já perdeu dois avisos por eles morarem só lá.
+      // As duas coisas, e nenhuma no lugar da outra.
+      const logF = t.registro.join("");
+      ok("o log diz QUAL script falhou, e que a ponte segue atendendo",
+         /002-quebrada\.sql FALHOU/.test(logF) && /segue atendendo normalmente/.test(logF),
+         logF.slice(-400));
+      // O CORAÇÃO DESTA SEÇÃO: um script quebrado não pode calar o WhatsApp do
+      // escritório. A ponte tem de continuar recebendo mensagem de cliente.
+      //
+      // O `then` COM DOIS BRAÇOS NÃO É ENFEITE, e entrou por causa de uma
+      // sabotagem: pondo um `process.exit(1)` no lugar em que a ponte hoje só
+      // anota a falha, o `fetch` estourava (conexão recusada) e derrubava a
+      // PROVA INTEIRA — as conferências seguintes nem chegavam a rodar, e a
+      // rodada terminava sem uma linha de FALHA. A prova ficava calada
+      // justamente sobre o defeito que ela existe para pegar. Ponte morta agora
+      // é uma reprovação, e com essas palavras.
+      const status = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mensagemDaUazapi("Mesmo com script quebrado", "msg-scripts")),
+      }).then((r) => r.status, () => 0);
+      await espera(700);
+      ok("a ponte continua atendendo o webhook", status === 200,
+         status === 0 ? "a ponte não respondeu — morreu com o script quebrado" : `veio ${status}`);
+      ok("e a mensagem do cliente entrou no banco", t.sb.dados.mensagens.length === 1,
+         JSON.stringify(t.sb.dados.mensagens));
+      await t.parar();
+      }
+    }
+
+    // ---- 50g. um script que quebra no meio não deixa metade aplicada ----
+    {
+      const b = await bancoNovo();
+      // A propriedade que interessa a quem usa: duas instruções num arquivo só,
+      // a primeira funciona e a segunda não, e `marca_g` não fica criada. Meio
+      // script aplicado é um estado que nenhum arquivo descreve, e que o script
+      // seguinte encontraria pela frente.
+      //
+      // ESTA CONFERÊNCIA SOZINHA NÃO PROVA O `begin` DAQUI — e isso foi MEDIDO
+      // numa rodada de sabotagem: tirando o `begin`, ela continuou passando. O
+      // Postgres embrulha um LOTE de instruções mandado numa consulta só na
+      // própria transação implícita, e é ela que desfaz aqui. O `begin`
+      // explícito serve para outra coisa, e quem o prova é 50i-bis: a anotação
+      // é uma consulta SEPARADA, e só uma transação aberta por nós a junta ao
+      // script.
+      //
+      // Fica escrito porque a tentação é ler isto como "a prova da transação" e
+      // apagar 50i-bis por parecer repetida.
+      const dir = pastaCom({
+        "001-meio.sql": "create table marca_g (n int);\nselect nao_existe_esta_funcao();",
+      });
+      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
+      ok("o que a primeira metade criou foi desfeito", (await b.temTabela("marca_g")) === false);
+      if (t) await t.parar();
+    }
+
+    // ---- 50h. script já aplicado que muda faz a ponte PARAR ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_h (n int);" });
+      const t1 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      await t1.parar();
+      // Alguém edita o script que já rodou, e acrescenta outro depois dele.
+      fs.writeFileSync(path.join(dir, "001-cria.sql"), "create table marca_h (n int, extra text);");
+      fs.writeFileSync(path.join(dir, "002-nova.sql"), "create table marca_h2 (n int);");
+      const t2 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const log = t2.registro.join("");
+      ok("a ponte para e diz QUAL arquivo mudou", /PAREI.*001-cria\.sql/s.test(log), log.slice(-600));
+      ok("e não aplica a que veio depois", (await b.temTabela("marca_h2")) === false);
+      await t2.parar();
+    }
+
+    // ---- 50i. banco que não responde não derruba a ponte ----
+    {
+      const dir = pastaCom({ "001-x.sql": "create table marca_i (n int);" });
+      const u = new URL(BANCO_BASE);
+      u.pathname = "/banco_que_nao_existe_mesmo";
+      u.searchParams.set("sslmode", "disable");
+      const t = await subirTudo({
+        DATABASE_URL: u.toString(), SCRIPTS_PASTA: dir, SCRIPTS_AUTOMATICOS: "aplicar",
+      });
+      for (let i = 0; i < 80; i++) {
+        if (/Scripts autom[áa]ticos:/.test(t.registro.join(""))) break;
+        await espera(100);
+      }
+      const log = t.registro.join("");
+      ok("diz que não deu para aplicar", /não deu para aplicar agora/.test(log), log.slice(-400));
+      ok("e diz que segue atendendo", /segue atendendo normalmente/.test(log));
+      // Mesmo cuidado de 50f: ponte morta reprova, em vez de derrubar a prova.
+      const status = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mensagemDaUazapi("Banco fora, mensagem entra", "msg-banco-fora")),
+      }).then((r) => r.status, () => 0);
+      await espera(700);
+      ok("e atende mesmo", status === 200 && t.sb.dados.mensagens.length === 1,
+         status === 0 ? "a ponte não respondeu — morreu com o banco fora"
+                      : `${status} · ${t.sb.dados.mensagens.length}`);
+      await t.parar();
+    }
+
+    // ---- 50i-bis. a anotação entra junto com o script, não depois ----
+    {
+      // POR QUE ISTO IMPORTA: anotando depois do `commit`, uma publicação
+      // caindo entre os dois deixaria o script aplicado e não anotado — e a
+      // subida seguinte o aplicaria DE NOVO. Num `insert`, é a linha duplicada.
+      //
+      // Provar aquele instante exigiria matar o processo no microssegundo
+      // certo. Esta conferência prova a MESMA propriedade por dentro: o script
+      // derruba a coluna que a anotação usa, então a anotação falha. Se ela
+      // estivesse fora da transação, a tabela que o script criou sobreviveria.
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-antes.sql": "create table marca_m0 (n int);",
+        "002-derruba.sql": "create table marca_m (n int);\n"
+          + "alter table public.zorvin_scripts_aplicados drop column impressao;",
+      });
+      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
+      ok("o primeiro script, esse sim, entrou", (await b.temTabela("marca_m0")) === true);
+      ok("falhando a anotação, o que o script criou vai junto",
+         (await b.temTabela("marca_m")) === false);
+      const col = await b.consultar(
+        "select count(*)::int as n from information_schema.columns "
+        + "where table_name = 'zorvin_scripts_aplicados' and column_name = 'impressao'");
+      ok("e a coluna que ele derrubou também voltou", col.rows[0].n === 1, JSON.stringify(col.rows));
+      if (t) await t.parar();
+    }
+
+    // ---- 50j. a trava: duas pontes numa publicação, e só uma aplica ----
+    {
+      // Toda publicação da Render sobe a ponte nova ENQUANTO a velha ainda
+      // está saindo. Por alguns segundos há duas, e as duas acordam querendo
+      // aplicar o mesmo script. Aqui a prova segura a trava no lugar da
+      // primeira ponte, e confere que a segunda desiste em vez de aplicar.
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_j (n int);" });
+
+      const outra = new pg.Client({ connectionString: b.url, ssl: false });
+      await outra.connect();
+      const { rows: peguei } = await outra.query("select pg_try_advisory_lock(823005001) as peguei");
+      ok("a bancada consegue segurar a trava (senão o resto não prova nada)", peguei[0].peguei === true);
+
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const log = t.registro.join("");
+      ok("a segunda ponte diz que deixa com a outra", /outra ponte está cuidando disto/.test(log), log.slice(-400));
+      ok("e NÃO aplica o script", (await b.temTabela("marca_j")) === false);
+      await t.parar();
+
+      // Solta a trava e sobe de novo: agora tem de aplicar. Sem esta metade, a
+      // conferência de cima passaria também com a trava quebrada de um jeito
+      // que nunca deixa ninguém aplicar nada.
+      await outra.end();
+      const t2 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("solta a trava, a ponte seguinte aplica", (await b.temTabela("marca_j")) === true);
+      await t2.parar();
+    }
+
+    // ---- 50k. `-- sem-transacao`, para o que não roda dentro de uma ----
+    {
+      // `create index concurrently` é o caso de verdade: o Postgres o RECUSA
+      // dentro de uma transação. Sem a saída, um script desses seria impossível
+      // de aplicar por aqui — e índice concorrente é justamente o que se usa
+      // para não travar a tabela de mensagens de um escritório em expediente.
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-tabela.sql": "create table marca_k (n int);",
+        "002-indice.sql": "-- sem-transacao\ncreate index concurrently marca_k_n on marca_k (n);",
+      });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const { rows } = await b.consultar(
+        "select count(*)::int as n from pg_indexes where indexname = 'marca_k_n'");
+      ok("o índice concorrente foi criado", rows[0].n === 1, JSON.stringify(rows));
+      const ctl = await b.consultar("select sucesso, erro from zorvin_scripts_aplicados where nome = '002-indice.sql'");
+      ok("e ficou anotado como aplicado", ctl.rows[0] && ctl.rows[0].sucesso === true, JSON.stringify(ctl.rows));
+      await t.parar();
+    }
+
+    // ---- 50l. sem a marca, o mesmo script é recusado ----
+    {
+      // A metade que prova que a marca faz alguma coisa. Sem esta, 50k passaria
+      // igual se a ponte simplesmente nunca usasse transação nenhuma — e aí a
+      // conferência 50g estaria provando o contrário do que 50k prova.
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-tabela.sql": "create table marca_l (n int);",
+        "002-indice.sql": "create index concurrently marca_l_n on marca_l (n);",
+      });
+      // Mesmo cuidado de 50f: aqui um script também quebra de propósito.
+      const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("a ponte fica de pé (cena com script que quebra)", t !== null && t.filho.exitCode === null);
+      const ctl = await b.consultar("select sucesso, erro from zorvin_scripts_aplicados where nome = '002-indice.sql'");
+      ok("sem a marca, o Postgres recusa e a falha fica anotada",
+         ctl.rows[0] && ctl.rows[0].sucesso === false, JSON.stringify(ctl.rows));
+      ok("com o motivo dizendo que é a transação",
+         ctl.rows[0] && /transaction/i.test(String(ctl.rows[0].erro)), ctl.rows[0] && ctl.rows[0].erro);
+      if (t) await t.parar();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

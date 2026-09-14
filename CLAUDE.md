@@ -26,8 +26,10 @@ WhatsApp ⇄ Uazapi ⇄ [zorvin-bridge] ⇄ Supabase ⇄ [zorvin-painel]
 ## Este repositório
 
 ```
-index.js        — todo o código da ponte
-package.json    — deps: express, @supabase/supabase-js
+index.js          — todo o código da ponte
+package.json      — deps: express, @supabase/supabase-js, pg
+sql/              — história: os 55 scripts já rodados à mão
+sql/automaticos/  — daqui para a frente: a ponte aplica sozinha
 ```
 
 Variáveis de ambiente (no Render):
@@ -44,6 +46,11 @@ Variáveis de ambiente (no Render):
   resposta da época mandava procurar erro de digitação num token que estava certo.
 - `VANTORO_LENTA_MS` — a partir de quantos milissegundos uma ida ao Vantoro merece
   uma linha no log. **Opcional**, padrão 3000. Ver "Quanto o Vantoro demora" abaixo.
+- `DATABASE_URL` — o endereço do **Session Pooler** do Supabase, para a ponte
+  aplicar sozinha os scripts de `sql/automaticos/`. **Opcional: sem ela, tudo
+  como antes** e as mudanças de banco continuam sendo coladas à mão. Ver "Os
+  scripts que se aplicam sozinhos" abaixo.
+- `SCRIPTS_AUTOMATICOS` — `conferir` (padrão) ou `aplicar`. **Opcional.**
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -235,6 +242,63 @@ Variável **opcional** `AVISOS_INTERVALO_MS` (padrão 5 min), para a bancada
 encurtar a rodada dos avisos. Junto entrou uma rodada 4s depois de subir: só
 havia o intervalo, então toda publicação empurrava o primeiro aviso do dia
 cinco minutos adiante.
+
+## Os scripts que se aplicam sozinhos
+
+Até 14/09, **toda** mudança de banco foi rodada à mão: 55 arquivos em `sql/`,
+colados um a um no editor do Supabase, oito só em setembro. Funciona porque é um
+escritório só e porque o Rodrigo está por perto na hora de publicar — e as duas
+coisas param de valer no dia em que houver um segundo cliente.
+
+Daqui para a frente, **script novo vai para `sql/automaticos/`** e a ponte o
+aplica sozinha ao subir, uma vez cada, na ordem do nome. `sql/` vira história:
+nada ali é reaplicado, e **não se move um arquivo de lá para cá** — no banco do
+escritório ele já rodou, e a ponte não tem como saber disso.
+
+A biblioteca do Supabase não serve para isto: ela fala PostgREST, que lê e
+escreve LINHAS. `create table` não passa por ali — não é permissão, a porta não
+existe. Por isso entrou o `pg`, falando direto com o Postgres, e por isso o
+endereço é o do **Session Pooler** (armadilha nº 1: o direto é IPv6 e a Render
+não alcança).
+
+**As quatro regras, e nenhuma é enfeite:**
+
+1. **Sem `DATABASE_URL`, tudo como antes.** Uma linha no log e nada mais.
+2. **O padrão é `conferir`, não `aplicar`.** Com o endereço e nada mais, a ponte
+   só DIZ o que rodaria. Rodar DDL sozinha, a cada publicação, num banco que
+   atende oito pessoas, é coisa que se escolhe de propósito.
+3. **Falha não derruba a ponte.** Script quebrado não pode calar o WhatsApp do
+   escritório: a ponte anota a falha na tabela, grita no log e segue atendendo —
+   mas **para nos seguintes**, porque o próximo quase sempre supõe o anterior.
+4. **Cada script numa transação.** Meio script aplicado é o pior dos mundos: o
+   banco num estado que nenhum arquivo descreve. Quem precisa do contrário
+   (`create index concurrently`) escreve `-- sem-transacao` na primeira linha.
+
+**A impressão digital recusa, em vez de avisar.** De cada script aplicado fica o
+`sha256`. Mudando o arquivo depois, o banco e o código passam a discordar sobre o
+que está lá dentro — e isso se descobriria como defeito estranho semanas depois.
+Então a ponte **para** e diz qual arquivo mudou. Script aplicado não se edita: o
+conserto é o próximo número.
+
+**A trava existe por causa da própria Render.** Toda publicação sobe a ponte nova
+enquanto a velha ainda está saindo (é o que o desligamento com calma faz, de
+propósito). Por alguns segundos há duas pontes vivas, e as duas acordariam
+querendo aplicar o mesmo script. `pg_try_advisory_lock` faz a segunda desistir.
+
+**A tabela `zorvin_scripts_aplicados` nasce com RLS ligada e SEM política** — só
+a ponte (`service_role`) a alcança. É a armadilha nº 5 aplicada na origem. Quando
+o painel precisar mostrar isto, será por `zorvin_saude()`, que já sabe quem
+administra — e não lendo a tabela direto.
+
+**O que isto NÃO resolve ainda:** um cliente novo, com banco vazio, continua sem
+um caminho — os 37 scripts estruturais de `sql/` descrevem a história, não o
+estado final, e alguns criam o que os seguintes destroem. O ponto de partida de
+um banco zerado é problema separado, e ainda em aberto.
+
+Variável **opcional** `SCRIPTS_PASTA`, para a bancada apontar scripts de mentira
+sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Prova:
+seção 50, que sobe um **Postgres de verdade** (a integração contínua traz um), e
+**reprova se ele faltar** em vez de se pular em silêncio.
 
 ## A saída (publicação) — a ponte termina o que está no meio
 
