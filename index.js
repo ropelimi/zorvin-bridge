@@ -4382,10 +4382,131 @@ async function exigirLogin(req, res) {
 }
 
 // Repassa a chamada ao Vantoro colocando o token (que só existe aqui).
+// ============================================================
+//  O CRONÔMETRO DAS IDAS AO VANTORO
+//
+//  Relato de 14/09: "está demorando para aparecer o resultado do Vantoro.
+//  Demora, mas aparece."
+//
+//  Demora QUANTO? Ninguém sabia dizer. Havia três explicações plausíveis à
+//  mão — o Vantoro hibernando, a consulta do cadastro, a própria ponte —, e
+//  escolher entre elas de olho é como se conserta o que não está quebrado.
+//  Neste projeto isso já custou uma rodada inteira: o "documento indisponível"
+//  teve dois consertos certos antes de a medição mostrar que vinte dos trinta
+//  e cinco casos nunca tinham sido documentos.
+//
+//  O QUE SE MEDE, e são DUAS coisas de propósito:
+//
+//    • `ponte` — o pedido inteiro, do jeito que o navegador espera por ele:
+//      conferir a sessão, chamar o Vantoro, responder;
+//    • `vantoro` — só a ida ao Vantoro por dentro dele.
+//
+//  A diferença entre as duas é o que a ponte gasta sozinha. Com uma medida só
+//  não dá para saber de quem é o tempo — e é exatamente essa a pergunta.
+//
+//  O QUE NÃO SE GUARDA: o que foi perguntado. A busca vai na consulta do
+//  endereço (`?q=ELIANA ALVES DA SILVA`, `?cpf=…`), e isso é nome e documento
+//  de cliente. A chave guarda o CAMINHO e mais nada, com os números virando
+//  `:id` — senão cada cliente aberto viraria uma linha da tabela, com o id
+//  dele dentro, e a tabela cresceria sem fim.
+//
+//  ISTO VIVE NA MEMÓRIA e morre com o serviço. A Render reinicia a ponte a
+//  cada publicação e quando lhe convém: o que a janela mostra é "desde que
+//  este processo subiu", e ela diz isso com todas as letras. Gravar no banco
+//  seria uma escrita por chamada para responder uma pergunta de diagnóstico.
+// ============================================================
+
+// A partir de quanto uma chamada merece uma linha no log. O log serve para
+// achar a chamada ESPECÍFICA que demorou; a conta de todas fica na tabela.
+const VANTORO_LENTA_MS = Number(process.env.VANTORO_LENTA_MS) || 3000;
+
+// Quantos tempos guardar por linha. Duzentos é o suficiente para uma mediana
+// honesta e cabe em nada; o que passa disso empurra o mais antigo.
+const AMOSTRAS_POR_LINHA = 200;
+
+const TEMPOS_DO_VANTORO = new Map();
+const CRONOMETRO_DESDE = new Date();
+
+/** A chave de uma linha da tabela: método + caminho, sem a consulta e com os
+ *  números trocados por `:id`. Ver o comentário acima sobre o que não se
+ *  guarda. */
+function chaveDoTempo(prefixo, metodo, caminho) {
+  const semConsulta = String(caminho || '').split('?')[0];
+  const generico = semConsulta.replace(/\/\d+(?=\/|$)/g, '/:id');
+  return `${prefixo} ${String(metodo || 'GET').toUpperCase()} ${generico || '/'}`;
+}
+
+/** Anota UMA chamada. `falhou` conta separado de propósito: uma média feita só
+ *  das chamadas que deram certo diria "tudo rápido" justamente quando o que
+ *  incomoda é a que não voltou. */
+function anotarTempo(chave, ms, { falhou = false } = {}) {
+  let linha = TEMPOS_DO_VANTORO.get(chave);
+  if (!linha) {
+    linha = { chamadas: 0, falhas: 0, lentas: 0, pior: 0, amostras: [] };
+    TEMPOS_DO_VANTORO.set(chave, linha);
+  }
+  linha.chamadas += 1;
+  if (falhou) linha.falhas += 1;
+  if (ms > linha.pior) linha.pior = ms;
+  if (ms >= VANTORO_LENTA_MS) {
+    linha.lentas += 1;
+    // SEM A CONSULTA, pelo mesmo motivo da chave: o log da Render é lido por
+    // quem tem acesso à hospedagem, e o nome do cliente não tem o que fazer lá.
+    console.log(`Vantoro devagar: ${chave} levou ${ms}ms`
+      + `${falhou ? ' e ainda falhou' : ''}.`);
+  }
+  linha.amostras.push(ms);
+  if (linha.amostras.length > AMOSTRAS_POR_LINHA) linha.amostras.shift();
+}
+
+/** O valor abaixo do qual está `fatia` das amostras (0,5 = a mediana). */
+function percentil(amostras, fatia) {
+  if (!amostras.length) return 0;
+  const ordenadas = [...amostras].sort((a, b) => a - b);
+  const posicao = Math.min(ordenadas.length - 1,
+                           Math.max(0, Math.ceil(fatia * ordenadas.length) - 1));
+  return ordenadas[posicao];
+}
+
+/** A tabela pronta para ler, do mais chamado para o menos. */
+function resumoDosTempos() {
+  return [...TEMPOS_DO_VANTORO.entries()]
+    .map(([onde, l]) => ({
+      onde,
+      chamadas: l.chamadas,
+      // O TÍPICO É A MEDIANA, e não a média: uma chamada de trinta segundos
+      // entre cem de duzentos milissegundos puxa a média para 500ms e diz que
+      // está tudo mal, ou some dentro dela e diz que está tudo bem. A mediana
+      // responde "quanto costuma levar", que é a pergunta de quem usa; a pior
+      // e a de 9 em 10 respondem "e quando é ruim, quanto fica".
+      tipico_ms: percentil(l.amostras, 0.5),
+      nove_em_dez_ms: percentil(l.amostras, 0.9),
+      pior_ms: l.pior,
+      lentas: l.lentas,
+      falhas: l.falhas,
+    }))
+    .sort((a, b) => b.chamadas - a.chamadas);
+}
+
+function desdeQuandoEmPortugues(desde = CRONOMETRO_DESDE, agora = new Date()) {
+  const minutos = Math.max(0, Math.round((agora - desde) / 60000));
+  if (minutos < 60) return `${minutos} min`;
+  const horas = Math.floor(minutos / 60);
+  return `${horas}h${String(minutos % 60).padStart(2, '0')}`;
+}
+
 async function chamarVantoro(caminho, opcoes = {}) {
   if (!VANTORO_URL || !VANTORO_TOKEN) {
     return { status: 503, corpo: { ok: false, erro: 'Integração com o Vantoro não configurada (VANTORO_API_URL/VANTORO_API_TOKEN).' } };
   }
+  // O CRONÔMETRO COMEÇA AQUI, e não em volta só do `fetch`: quando a Render
+  // devolve a página de "acordando" e a ponte espera 6s para tentar de novo,
+  // esses 6s são tempo que quem procurou esperou de verdade. Medir só os
+  // `fetch` diria "duas chamadas de 200ms" para uma espera de sete segundos.
+  const chaveDoCronometro = chaveDoTempo('vantoro', opcoes.method, caminho);
+  const comecouTudo = Date.now();
+  let deuErro = true;
+  try {
   const uma = () => fetchComTimeout(`${VANTORO_URL}${caminho}`, {
     ...opcoes,
     headers: {
@@ -4460,7 +4581,14 @@ async function chamarVantoro(caminho, opcoes = {}) {
     // do ar ou suspenso, e não tem nada a ver com token.
     corpo = { ok: false, erro: explicarRespostaNaoJson(r.status, texto) };
   }
+  // UMA RESPOSTA DE ERRO TAMBÉM É UMA RESPOSTA: ela chegou, e o tempo dela
+  // conta. `deuErro` aqui é só "não houve resposta nenhuma" — o caso em que a
+  // chamada estourou ou a conexão caiu, e que sai por baixo, no `catch`.
+  deuErro = false;
   return { status: r.status, corpo };
+  } finally {
+    anotarTempo(chaveDoCronometro, Date.now() - comecouTudo, { falhou: deuErro });
+  }
 }
 
 // Transforma uma resposta que não é JSON numa frase que diz o que houve.
@@ -4536,12 +4664,24 @@ function explicarFalhaDaChamada(e) {
 function rotaVantoro(handler) {
   return async (req, res) => {
     liberarCors(res);
+    // O PEDIDO INTEIRO, que é o que o navegador espera. Conferir a sessão
+    // entra na conta: se um dia ela passar a custar caro, é aqui que aparece —
+    // e a diferença para o tempo do `vantoro` é o que a ponte gasta sozinha.
+    //
+    // A RECUSA DE LOGIN NÃO ENTRA: ela nem chega a chamar o Vantoro, e contá-la
+    // encheria a mediana de pedidos rápidos que não são o que se quer medir.
+    const comecou = Date.now();
+    const anotar = (falhou) => anotarTempo(
+      chaveDoTempo('ponte', req.method, (req.route && req.route.path) || req.path),
+      Date.now() - comecou, { falhou });
     try {
       const usuario = await exigirLogin(req, res);
       if (!usuario) return;
       const { status, corpo } = await handler(req, usuario);
+      anotar(false);
       res.status(status).json(corpo);
     } catch (e) {
+      anotar(true);
       const erro = explicarFalhaDaChamada(e);
       console.error('vantoro:', erro, '|', (e && e.message) || e);
       res.status(502).json({ ok: false, erro });
@@ -4550,6 +4690,68 @@ function rotaVantoro(handler) {
 }
 
 app.options('/vantoro/*', (req, res) => { liberarCors(res); res.sendStatus(204); });
+
+// ------------------------------------------------------------
+//  A JANELA DO CRONÔMETRO — "demora quanto?", respondido com número
+//
+//  Pergunta de 14/09: a busca do painel demora a trazer o cadastro. A resposta
+//  honesta era "não sei" — o tempo não estava escrito em lugar nenhum.
+//
+//  Ela abre no NAVEGADOR, com o mesmo token das outras portas de manutenção,
+//  porque o plano gratuito da Render não tem terminal. E responde em TEXTO, e
+//  não em JSON, por quem vai lê-la: uma tabela alinhada se entende de olho;
+//  um JSON de trinta linhas, não.
+//
+//  DUAS LINHAS POR ROTA, e é nelas que está a resposta:
+//
+//    ponte   GET /vantoro/buscar   ← o que o navegador espera
+//    vantoro GET /clientes/buscar  ← o que o Vantoro leva, por dentro
+//
+//  Se as duas são parecidas, o tempo é do Vantoro e o conserto é lá. Se a de
+//  cima é muito maior, é a ponte — e aí é outro conserto.
+// ------------------------------------------------------------
+app.get('/vantoro/tempos', (req, res) => {
+  const recusa = recusaDaPortaAdmin(req, 'Tempos do Vantoro');
+  if (recusa) return res.status(recusa.status).send(recusa.texto);
+
+  const linhas = resumoDosTempos();
+  if (String(req.query.formato || '') === 'json') {
+    return res.json({ ok: true, desde: CRONOMETRO_DESDE.toISOString(),
+                      de_pe_ha: desdeQuandoEmPortugues(),
+                      lenta_a_partir_de_ms: VANTORO_LENTA_MS, linhas });
+  }
+
+  const cabecalho = ['onde', 'chamadas', 'típico', '9 em 10', 'pior', 'lentas', 'falhas'];
+  const corpo = linhas.map((l) => [
+    l.onde, String(l.chamadas), `${l.tipico_ms}ms`, `${l.nove_em_dez_ms}ms`,
+    `${l.pior_ms}ms`, String(l.lentas), String(l.falhas),
+  ]);
+  const largura = cabecalho.map((_, i) =>
+    Math.max(cabecalho[i].length, ...corpo.map((c) => c[i].length), 0));
+  const alinhar = (c) => c.map((v, i) => (i === 0 ? v.padEnd(largura[i]) : v.padStart(largura[i]))).join('  ');
+
+  const texto = [
+    `TEMPOS DAS IDAS AO VANTORO — desde que esta ponte subiu, há ${desdeQuandoEmPortugues()}.`,
+    '',
+    // O QUE A TABELA NÃO É. Sem isto, "12 chamadas" lido numa segunda-feira de
+    // manhã parece "o escritório quase não usa" — quando o que houve foi a
+    // Render reiniciar o serviço às 6h.
+    'Esta conta vive na memória do serviço e ZERA a cada reinício da Render —',
+    'publicar uma versão nova reinicia. Números pequenos podem só querer dizer',
+    'que a ponte subiu faz pouco.',
+    '',
+    '  ponte   = o pedido inteiro, que é o que o navegador espera',
+    '  vantoro = só a ida ao Vantoro, por dentro dele',
+    '',
+    `"típico" é a mediana das últimas ${AMOSTRAS_POR_LINHA} chamadas: quanto costuma levar.`,
+    `"lentas" são as que passaram de ${VANTORO_LENTA_MS}ms, e cada uma tem uma linha no log.`,
+    '',
+    linhas.length ? alinhar(cabecalho) : 'Nenhuma chamada ao Vantoro desde que a ponte subiu.',
+    ...(linhas.length ? [largura.map((n) => '-'.repeat(n)).join('  ')] : []),
+    ...corpo.map(alinhar),
+  ].join('\n');
+  res.type('text/plain; charset=utf-8').send(texto);
+});
 
 // Acha o cliente pelo número do WhatsApp da conversa aberta.
 app.get('/vantoro/cliente', rotaVantoro(async (req) => {

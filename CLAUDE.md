@@ -42,6 +42,32 @@ Variáveis de ambiente (no Render):
   quem tem direito de usá-la. Ela faltava nesta lista, e foi por isso que nunca foi
   criada no Render: em 02/09 o resgate do histórico de um grupo esbarrou aqui, e a
   resposta da época mandava procurar erro de digitação num token que estava certo.
+- `VANTORO_LENTA_MS` — a partir de quantos milissegundos uma ida ao Vantoro merece
+  uma linha no log. **Opcional**, padrão 3000. Ver "Quanto o Vantoro demora" abaixo.
+
+## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
+
+Relato de 14/09: "está demorando para aparecer o resultado do Vantoro". Demora
+quanto? Não estava escrito em lugar nenhum, e havia três explicações plausíveis à
+mão — o Vantoro hibernando, a consulta do cadastro, a própria ponte.
+
+A ponte cronometra cada ida ao Vantoro e guarda **duas** medidas por rota:
+
+- `ponte GET /vantoro/buscar` — o pedido inteiro, que é o que o navegador espera;
+- `vantoro GET /clientes/buscar` — só a ida ao Vantoro, por dentro dele.
+
+Se as duas são parecidas, o tempo é do Vantoro. Se a de cima é muito maior, é a
+ponte. A janela abre no navegador, com o mesmo `IMPORT_TOKEN` das outras portas de
+manutenção, e responde em texto (`&formato=json` para JSON).
+
+Duas coisas que valem lembrar antes de mexer nisso:
+
+- **o que foi perguntado não é guardado.** A busca vai na consulta do endereço
+  (`?q=NOME`, `?cpf=…`), e a chave guarda só o caminho, com os números virando
+  `:id`. Uma janela de diagnóstico que vaza cadastro é pior do que não existir;
+- **a conta vive na memória e zera a cada reinício da Render.** Publicar reinicia.
+  Números pequenos podem só querer dizer que a ponte subiu faz pouco — e a própria
+  janela diz isso.
 
 ## A entrada (login) — e por que ela tem dois caminhos
 

@@ -6166,5 +6166,210 @@ console.log("\n48. Desativar tem de desativar");
 }
 
 
+// ==================================================================
+//  49. QUANTO O VANTORO DEMORA — medido, e não adivinhado
+// ==================================================================
+//
+//  Relato de 14/09: "está demorando para aparecer o resultado do Vantoro.
+//  Demora, mas aparece."
+//
+//  Demora QUANTO? Ninguém sabia dizer. Havia três explicações plausíveis à
+//  mão — o Vantoro hibernando, a consulta do cadastro, a própria ponte — e
+//  escolher entre elas de olho é como se conserta o que não está quebrado.
+//  Neste projeto isso já custou uma rodada inteira: o "documento indisponível"
+//  teve dois consertos CERTOS antes de a medição mostrar que vinte dos trinta
+//  e cinco casos nunca tinham sido documentos.
+//
+//  O QUE ESTA SEÇÃO VIGIA, e a ordem é a da gravidade:
+//
+//    1. que o que foi PERGUNTADO não fique guardado. A busca vai na consulta
+//       do endereço — nome e CPF de cliente —, e uma janela de diagnóstico que
+//       vaza cadastro é pior do que não existir;
+//    2. que a conta seja de UMA rota, e não de um cliente: `/clientes/123` e
+//       `/clientes/456` são a mesma pergunta, e guardadas separadas fariam a
+//       tabela crescer sem fim, com o id de cada cliente dentro dela;
+//    3. que o número BATA com a demora de verdade — inclusive a espera do
+//       "acordando", que é tempo que quem procurou esperou;
+//    4. que a chamada que não voltou conte como falha em vez de sumir: uma
+//       média feita só do que deu certo diria "tudo rápido" justamente quando
+//       o que incomoda é a que não voltou;
+//    5. e que a porta seja do administrador.
+// ==================================================================
+console.log("\n49. Quanto o Vantoro demora");
+{
+  const SENHA = "senha-do-escritorio";
+  const comBilhete = { Authorization: "Bearer jwt-bom" };
+  const tempos = async (t, extra = "") => {
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}${extra}`);
+    return { status: r.status, texto: await r.text() };
+  };
+  const emJson = async (t) => {
+    const r = await tempos(t, "&formato=json");
+    return JSON.parse(r.texto);
+  };
+  const linhaDe = (json, onde) => (json.linhas || []).find((l) => l.onde === onde);
+
+  // ---- 49a. o que foi perguntado NÃO fica guardado ----
+  {
+    // A CONFERÊNCIA MAIS IMPORTANTE DA SEÇÃO. O termo da busca é o nome do
+    // cliente, e o outro caminho leva o CPF. Guardá-los para "ver os tempos
+    // depois" transformaria uma janela de manutenção num vazamento de cadastro
+    // — e ninguém iria procurar por ele ali.
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA }, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=ELIANA%20ALVES%20DA%20SILVA`,
+                { headers: comBilhete });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?cpf=52998224725`,
+                { headers: comBilhete });
+
+    const { texto } = await tempos(t);
+    const json = await emJson(t);
+    const tudo = texto + JSON.stringify(json) + t.registro.join("");
+    ok("o nome procurado não aparece na janela nem no log", !/ELIANA/i.test(tudo),
+       tudo.slice(0, 300));
+    ok("nem o CPF", !/52998224725/.test(tudo), tudo.slice(0, 300));
+    // E A MEDIÇÃO ACONTECEU MESMO ASSIM: sem isto, a conferência de cima
+    // passaria com o cronômetro inteiro arrancado — nada guardado, nada
+    // vazado, nada medido.
+    ok("e as duas chamadas foram medidas",
+       (linhaDe(json, "vantoro GET /clientes/buscar") || {}).chamadas === 2,
+       JSON.stringify(json.linhas));
+    await t.parar();
+  }
+
+  // ---- 49b. um cliente por linha não faz uma linha por cliente ----
+  {
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA }, { vantoro: {} });
+    for (const id of [123, 456, 789]) {
+      await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/${id}`, { headers: comBilhete });
+    }
+    const json = await emJson(t);
+    const daFicha = (json.linhas || []).filter((l) => /^vantoro GET \/clientes\//.test(l.onde));
+    ok("três fichas diferentes viram UMA linha só", daFicha.length === 1,
+       JSON.stringify(daFicha.map((l) => l.onde)));
+    ok("e ela conta as três", (daFicha[0] || {}).chamadas === 3, JSON.stringify(daFicha));
+    ok("com os ids fora da chave", /:id/.test((daFicha[0] || {}).onde || ""),
+       (daFicha[0] || {}).onde);
+    await t.parar();
+  }
+
+  // ---- 49c. o número bate com a demora de verdade ----
+  {
+    // O VANTORO DE MENTIRA DEMORA 400ms DE PROPÓSITO. Um cronômetro que
+    // sempre diz zero também "mede", e passaria em tudo o que confere só a
+    // existência da linha.
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA }, { vantoro: { demora: 400 } });
+    // TRÊS LETRAS, E NÃO DUAS: com menos que isso a rota responde "digite ao
+    // menos 3" sem chegar a falar com o Vantoro — e não haveria tempo nenhum
+    // para medir. Foi o que esta conferência fez na primeira vez que rodou.
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=abc`, { headers: comBilhete });
+    const json = await emJson(t);
+
+    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar");
+    ok("o tempo medido bate com a demora de verdade",
+       doVantoro && doVantoro.tipico_ms >= 350 && doVantoro.tipico_ms < 3000,
+       JSON.stringify(doVantoro));
+
+    // AS DUAS MEDIDAS, e é nisto que está a resposta da pergunta: a de cima é
+    // o que o navegador espera, a de baixo é o que o Vantoro leva por dentro.
+    // Com uma medida só não dá para saber de quem é o tempo.
+    const daPonte = linhaDe(json, "ponte GET /vantoro/buscar");
+    ok("e o pedido inteiro é medido separado", !!daPonte, JSON.stringify(json.linhas));
+    ok("valendo pelo menos o que a ida ao Vantoro valeu",
+       !!daPonte && !!doVantoro && daPonte.tipico_ms >= doVantoro.tipico_ms,
+       `ponte ${daPonte && daPonte.tipico_ms}ms / vantoro ${doVantoro && doVantoro.tipico_ms}ms`);
+
+    const { texto } = await tempos(t);
+    ok("a janela responde em texto que se lê de olho",
+       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar/.test(texto),
+       texto.slice(0, 300));
+    // ELA DIZ QUE ZERA. Sem esta frase, "12 chamadas" lido numa segunda de
+    // manhã parece "o escritório quase não usa" — quando o que houve foi a
+    // Render reiniciar o serviço.
+    ok("e avisa que a conta zera quando o serviço reinicia", /ZERA a cada reinício/.test(texto),
+       texto.slice(0, 400));
+    await t.parar();
+  }
+
+  // ---- 49d. a espera do "acordando" entra na conta ----
+  {
+    // O CASO QUE DÁ SENTIDO AO RESTO. Quando a Render devolve a página de
+    // "serviço subindo", a ponte espera 6s e tenta de novo. Um cronômetro em
+    // volta só dos `fetch` contaria "duas chamadas de 200ms" para uma espera
+    // de sete segundos — e diria que está tudo rápido enquanto a pessoa olha
+    // a tela parada.
+    //
+    // JANELA DE MANUTENÇÃO FECHADA (`VANTORO_ACORDADO_ATE: "0"`), como na
+    // seção que mede o reenvio: com ela aberta, o ping que mantém o Vantoro
+    // acordado absorve a primeira resposta "dormindo" e a espera nunca chega a
+    // acontecer — a conferência media uma chamada comum de 4ms e reprovava
+    // sem que houvesse nada errado no cronômetro. Foi o que ela fez na
+    // primeira rodada.
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA, VANTORO_ACORDADO_ATE: "0" },
+                              { vantoro: { dormeAsPrimeiras: 1 } });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                { headers: comBilhete });
+    const json = await emJson(t);
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar");
+    ok("a espera pelo Vantoro acordar é contada", linha && linha.pior_ms >= 6000,
+       JSON.stringify(linha));
+    ok("e a chamada é marcada como lenta", linha && linha.lentas >= 1, JSON.stringify(linha));
+    // A LINHA DIZ DE QUAL MEDIDA ELA É. Sem o `vantoro` no padrão, esta
+    // conferência passava com a espera arrancada do cronômetro da ida: o
+    // pedido inteiro é medido à parte, também passou dos 3s, e logou sozinho.
+    // Ela dizia "a ida lenta deixou rastro" e media "alguma coisa lenta
+    // deixou rastro" — foi a sabotagem que mostrou.
+    ok("com uma linha no log, dizendo que foi a ida ao Vantoro",
+       /Vantoro devagar: vantoro GET/.test(t.registro.join("")),
+       t.registro.join("").slice(-400));
+    await t.parar();
+  }
+
+  // ---- 49e. a chamada que não volta conta como falha ----
+  {
+    // Uma média feita só do que deu certo diz "tudo rápido" justamente quando
+    // o que incomoda é a chamada que não voltou. A falha tem coluna própria.
+    const morto = http.createServer(() => {});
+    await new Promise((r) => morto.listen(0, "127.0.0.1", r));
+    const porta = morto.address().port;
+    await new Promise((r) => morto.close(r));   // agora ninguém atende ali
+
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA,
+                                VANTORO_API_URL: `http://127.0.0.1:${porta}`,
+                                VANTORO_API_TOKEN: "tok" });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=abc`, { headers: comBilhete });
+    ok("a chamada realmente falhou", r.status >= 500, `veio ${r.status}`);
+
+    const json = await emJson(t);
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar");
+    ok("ela é contada", linha && linha.chamadas === 1, JSON.stringify(json.linhas));
+    ok("e marcada como falha, em vez de sumir da conta",
+       linha && linha.falhas === 1, JSON.stringify(linha));
+    await t.parar();
+  }
+
+  // ---- 49f. a porta é do administrador ----
+  {
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA }, { vantoro: {} });
+    const semToken = await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos`);
+    ok("sem o token, a janela não abre", semToken.status === 403, `veio ${semToken.status}`);
+    const errado = await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=quase`);
+    ok("com o token errado, também não", errado.status === 403, `veio ${errado.status}`);
+    const certo = await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}`);
+    ok("com o certo, abre", certo.status === 200, `veio ${certo.status}`);
+    await t.parar();
+  }
+
+  // ---- 49g. sem chamada nenhuma, ela diz isso ----
+  {
+    // Uma tabela vazia sem uma palavra parece defeito da janela. Ela tem de
+    // dizer que não houve chamada, que é outra coisa.
+    const t = await subirTudo({ IMPORT_TOKEN: SENHA }, { vantoro: {} });
+    const { texto } = await tempos(t);
+    ok("sem chamada nenhuma, a janela diz isso em vez de aparecer vazia",
+       /Nenhuma chamada ao Vantoro/.test(texto), texto.slice(0, 400));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
