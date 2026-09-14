@@ -534,7 +534,13 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // deveria expor.
                                     classificar = { frente: "DESCONHECIDA", cliente: null },
                                     // Os avisos de audiência que este Vantoro tem para entregar.
-                                    avisos = [] } = {}) {
+                                    avisos = [],
+                                    // OS CLIENTES QUE ELE ACHA, e o motivo de existirem aqui:
+                                    // enquanto `/clientes/buscar` caía no `{ok:true}` seco, nada
+                                    // que dependa da FORMA da resposta da busca podia ser provado
+                                    // — e é dela que o painel tira nome e telefone para oferecer
+                                    // "começar conversa".
+                                    clientes = [] } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -567,6 +573,22 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
+
+    // A BUSCA DE CLIENTES, com o recorte `leve` como o Vantoro de verdade faz.
+    //
+    // O leve devolve só id, nome, cpf, telefone, telefone2 e email, e MARCA
+    // cada ficha com `leve:true` — campo ausente ali quer dizer "não pedi", e
+    // nunca "o cliente não tem". Um falso que devolvesse tudo nos dois casos
+    // aprovaria uma ponte que pede o resumo curto e uma que não pede.
+    if (url.pathname === "/clientes/buscar") {
+      const leve = ["1", "true", "sim"].includes(url.searchParams.get("leve") || "");
+      const achados = clientes.map((c) => (leve
+        ? { id: c.id, nome: c.nome, cpf: c.cpf, telefone: c.telefone,
+            telefone2: c.telefone2, email: c.email, leve: true }
+        : c));
+      return res.end(JSON.stringify({ ok: true, encontrado: achados.length > 0,
+                                      total: achados.length, clientes: achados }));
+    }
 
     // OS AVISOS DE AUDIÊNCIA — o caminho AUTOMÁTICO.
     //

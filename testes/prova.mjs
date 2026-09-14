@@ -6237,8 +6237,10 @@ console.log("\n49. Quanto o Vantoro demora");
     // dono; a outra acha pelo telefone e devolve no máximo cinco. Somadas numa
     // linha só, o "típico" não é o típico de nenhuma das duas — foi o que a
     // primeira leitura de verdade mostrou, em 14/09.
+    // A CHAVE LEVA O `leve` JUNTO desde que a ponte passou a pedir o resumo
+    // curto — é o cronômetro contando a verdade, e não um detalhe de escrita.
     ok("a busca por nome tem a linha dela",
-       (linhaDe(json, "vantoro GET /clientes/buscar?q") || {}).chamadas === 1,
+       (linhaDe(json, "vantoro GET /clientes/buscar?leve&q") || {}).chamadas === 1,
        JSON.stringify(json.linhas));
     ok("e a busca por CPF, a dela",
        (linhaDe(json, "vantoro GET /clientes/buscar?cpf") || {}).chamadas === 1,
@@ -6274,7 +6276,7 @@ console.log("\n49. Quanto o Vantoro demora");
     await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=abc`, { headers: comBilhete });
     const json = await emJson(t);
 
-    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar?q");
+    const doVantoro = linhaDe(json, "vantoro GET /clientes/buscar?leve&q");
     ok("o tempo medido bate com a demora de verdade",
        doVantoro && doVantoro.tipico_ms >= 350 && doVantoro.tipico_ms < 3000,
        JSON.stringify(doVantoro));
@@ -6290,7 +6292,7 @@ console.log("\n49. Quanto o Vantoro demora");
 
     const { texto } = await tempos(t);
     ok("a janela responde em texto que se lê de olho",
-       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar\?q\b/.test(texto),
+       /TEMPOS DAS IDAS AO VANTORO/.test(texto) && /vantoro GET \/clientes\/buscar\?leve&q\b/.test(texto),
        texto.slice(0, 300));
     // ELA DIZ QUE ZERA. Sem esta frase, "12 chamadas" lido numa segunda de
     // manhã parece "o escritório quase não usa" — quando o que houve foi a
@@ -6350,7 +6352,7 @@ console.log("\n49. Quanto o Vantoro demora");
     ok("a chamada realmente falhou", r.status >= 500, `veio ${r.status}`);
 
     const json = await emJson(t);
-    const linha = linhaDe(json, "vantoro GET /clientes/buscar?q");
+    const linha = linhaDe(json, "vantoro GET /clientes/buscar?leve&q");
     ok("ela é contada", linha && linha.chamadas === 1, JSON.stringify(json.linhas));
     ok("e marcada como falha, em vez de sumir da conta",
        linha && linha.falhas === 1, JSON.stringify(linha));
@@ -6377,6 +6379,108 @@ console.log("\n49. Quanto o Vantoro demora");
     const { texto } = await tempos(t);
     ok("sem chamada nenhuma, a janela diz isso em vez de aparecer vazia",
        /Nenhuma chamada ao Vantoro/.test(texto), texto.slice(0, 400));
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  50. A BUSCA PEDE SÓ O QUE O PAINEL USA
+// ==================================================================
+//
+//  Medido em 14/09, com o cronômetro dos dois lados. A busca do cadastro
+//  custava 1532ms vista daqui, e o Vantoro gastava 1250ms disso esperando o
+//  banco — 99% do tempo dele.
+//
+//  E não era a consulta. Cada ida e volta ao Postgres custa ~180ms de lá, e a
+//  conta fecha rota por rota: uma ida 180ms, três idas 534ms, sete idas
+//  1261ms. Um pedido sem consulta nenhuma custa ZERO. Não é trabalho de banco,
+//  é distância — e o preço de um pedido é quantas idas ele faz.
+//
+//  Das sete da busca, quatro montavam processos, documentos, telefones e
+//  pendências de até vinte fichas. Os dois lugares do painel que leem esta
+//  resposta usam QUATRO campos: id, nome, telefone, telefone2.
+//
+//  Agora ela pede `leve=1`. Sobram duas idas.
+//
+//  O QUE ESTA SEÇÃO VIGIA:
+//
+//    1. que a ponte REALMENTE peça o resumo curto — sem isso o conserto está
+//       no Vantoro e ninguém o usa;
+//    2. que o painel continue recebendo os quatro campos de que vive;
+//    3. e que a FICHA INTEIRA continue vindo inteira: é ela que abre o cadastro
+//       na conversa, e cortá-la ali seria trocar um problema por outro bem
+//       pior.
+// ==================================================================
+console.log("\n50. A busca pede só o que o painel usa");
+{
+  const comBilhete = { Authorization: "Bearer jwt-bom" };
+
+  // ---- 50a. a ponte pede o resumo curto ----
+  {
+    const t = await subirTudo({}, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=eliana`, { headers: comBilhete });
+
+    const pedido = t.van.recebidas.find((c) => c.caminho === "/clientes/buscar");
+    ok("a ponte chegou a perguntar ao Vantoro", !!pedido,
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
+    // A CONFERÊNCIA DO CONSERTO. Sem ela, o `leve=1` pode cair do endereço numa
+    // edição e nada na bancada reclama: a resposta continua chegando, só que
+    // cinco viagens mais cara — e lentidão não quebra prova nenhuma.
+    ok("pedindo o resumo curto", /(^|[?&])leve=1(&|$)/.test(pedido?.busca || ""),
+       `foi com "${pedido?.busca}"`);
+    ok("e com o termo que veio da tela", /[?&]q=eliana/.test(pedido?.busca || ""),
+       pedido?.busca);
+    await t.parar();
+  }
+
+  // ---- 50b. e o painel continua recebendo os quatro campos de que vive ----
+  {
+    // O falso Vantoro faz o mesmo recorte do de verdade quando lhe pedem leve.
+    // Sem isso esta conferência mediria o falso: ele devolvia `{ok:true}` seco,
+    // e nada que dependa da FORMA da busca podia ser provado.
+    const t = await subirTudo({}, { vantoro: { clientes: [{
+      id: 7, nome: "ELIANA ALVES DA SILVA", cpf: "529.982.247-25",
+      telefone: "5511967973545", telefone2: "", email: "e@x.com",
+      processos: [{ numero: "1" }], telefones: [{ numero: "5511967973545" }],
+    }] } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/buscar?q=eliana`,
+                          { headers: comBilhete });
+    ok("a busca responde 200", r.status === 200, `veio ${r.status}`);
+    const cliente = ((await r.json().catch(() => ({}))).clientes || [])[0];
+
+    // OS QUATRO CAMPOS DE QUE O PAINEL VIVE. É com eles que a busca da lista
+    // casa telefone com conversa e que a agenda oferece começar conversa.
+    ok("o painel recebe id, nome e os dois telefones",
+       cliente && cliente.id === 7 && /ELIANA/.test(cliente.nome)
+       && cliente.telefone === "5511967973545" && "telefone2" in cliente,
+       JSON.stringify(cliente));
+    // E A RESPOSTA DIZ QUE É CURTA. Sem a marca, "sem processos" é o que se lê
+    // de uma ficha que não os pediu — e quem lê "não tem" decide coisas.
+    ok("e a ficha vem marcada como resumo", cliente && cliente.leve === true,
+       JSON.stringify(cliente));
+    ok("sem a carga que ninguém lê daqui", cliente && !("processos" in cliente),
+       JSON.stringify(cliente));
+    await t.parar();
+  }
+
+  // ---- 50c. a ficha inteira continua inteira ----
+  {
+    // A TRAVA CONTRA O CONSERTO QUE CORTA DEMAIS. É por esta rota que a ficha
+    // do cliente abre na conversa, com processos, documentos e as pendências da
+    // ordem de serviço. Pedir leve AQUI economizaria as mesmas viagens e
+    // esvaziaria a tela que existe para mostrar exatamente isso.
+    const t = await subirTudo({}, { vantoro: {} });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/77`, { headers: comBilhete });
+    await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente?telefone=5511999998888`,
+                { headers: comBilhete });
+
+    const daFicha = t.van.recebidas.filter((c) => /^\/clientes\//.test(c.caminho)
+                                                || c.caminho === "/clientes/buscar");
+    ok("a ficha e a busca por telefone foram pedidas", daFicha.length === 2,
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho + c.busca)));
+    ok("e NENHUMA delas pediu o resumo curto",
+       daFicha.every((c) => !/leve=1/.test(c.busca || "")),
+       JSON.stringify(daFicha.map((c) => c.caminho + c.busca)));
     await t.parar();
   }
 }
