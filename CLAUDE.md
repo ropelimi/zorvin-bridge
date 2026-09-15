@@ -321,6 +321,58 @@ sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Pro
 seção 51, que sobe um **Postgres de verdade** (a integração contínua traz um), e
 **reprova se ele faltar** em vez de se pular em silêncio.
 
+## A equipe sem Vantoro — a mesma tela, outra fonte
+
+`listarAtendentes` lê a lista de gente do Vantoro; `gravarAtendente` grava a
+permissão lá. Para o escritório isso é o certo: é lá que o cadastro de pessoa
+mora, e manter duas listas iguais é coisa que ninguém faz por muito tempo.
+
+Quem compra o Zorvin sem ter Vantoro já **entra** (script 001) e nasce
+administrador — e não tinha como cadastrar mais ninguém nem dizer o que cada
+pessoa alcança. Um sistema de atendimento em **equipe** com uma pessoa só.
+
+**O contrato com o painel não mudou, e essa é a decisão principal.** A tela
+recebe a mesma forma de sempre (`zorvin`, `zorvin_telefones`,
+`zorvin_so_telefones`, `zorvin_definido`) e manda os mesmos campos; só a FONTE
+muda. Uma tela paralela teria de ser mantida junto com a velha e divergiria dela
+na primeira mudança — e permissão é o lugar onde divergir significa alguém ver
+conversa que não devia. Pelo mesmo motivo `aplicarPermissoes` não mudou uma
+linha: ela recebe o mesmo objeto, montado a partir de `usuarios.acesso`.
+
+**A chave é a própria configuração** (`VANTORO_API_URL` + `VANTORO_API_TOKEN`),
+e não uma variável nova que poderia ser posta em desacordo com elas. A ponte
+devolve `com_vantoro` na lista, e é assim que a TELA sabe em qual mundo está —
+pela mesma razão.
+
+`usuarios.acesso` (jsonb) é a **intenção** de quem administra; as linhas de
+`permissoes` são o **efeito**. SQL: `sql/automaticos/002-a-equipe-mora-aqui.sql`.
+
+**`definido` não volta atrás.** Ele separa "não pode ver nada" de "ninguém
+decidiu ainda", e a segunda é a que faz a pessoa ver tudo. Desmarcar o último
+departamento não pode devolver a pessoa para "ninguém decidiu" — seria abrir o
+acesso em silêncio.
+
+**A porta de saída sem volta.** Sem Vantoro não há um "lá fora" de onde
+destrancar: quem perdesse o poder de administrar perderia junto a tela que o
+devolve. Ninguém se tira de administradora nem se desativa. (A terceira regra —
+"não tire a última" — é um **encosto inalcançável** hoje, e está escrito no
+código por quê; não há prova apontando para ela, de propósito.)
+
+**E `soAdmin` passou a exigir `admin` E `ativo`.** A porta do BANCO
+(`zorvin_admin()`) sempre exigiu as duas; a da ponte exigia só `admin`. Duas
+portas com réguas diferentes, latente enquanto nada desativava ninguém — e é
+esta tela que passa a desativar. A frase separa "não administra" de "foi
+desativada": pedem providências opostas de quem lê.
+
+`POST /permissoes/pessoa` cria a conta (só sem Vantoro; com ele, recusa — seria
+a segunda lista). Ela nasce com `email_confirm`, porque o escritório não tem
+serviço de e-mail e esperar uma confirmação que nunca chega é a pessoa não
+entrar no primeiro dia. A linha de `usuarios` é escrita **aqui também**, e não é
+desconfiança do gatilho do 001: ele desiste em silêncio de propósito, e a pessoa
+sem linha ficaria fora da lista da tela que acabou de cadastrá-la.
+
+Prova: seção 52.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),

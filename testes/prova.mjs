@@ -6962,5 +6962,246 @@ console.log("\n50. A busca pede só o que o painel usa");
   }
 }
 
+// ==================================================================
+//  52. A EQUIPE SEM VANTORO
+//
+//  A tela de permissões lê a lista de gente do Vantoro e grava lá. Quem compra
+//  o Zorvin sem ter Vantoro já ENTRA (script 001) e nasce administrador — e não
+//  tinha como cadastrar mais ninguém nem dizer o que cada pessoa alcança. Um
+//  sistema de atendimento em EQUIPE com uma pessoa só.
+//
+//  A conferência que mais importa não é a lista aparecer: é que, sem Vantoro,
+//  a ponte NÃO fala com ele. Uma tela que mostra a equipe e continua gravando
+//  a permissão num sistema que o cliente não tem pareceria funcionar e não
+//  guardaria nada — e ninguém descobre isso olhando a tela.
+// ==================================================================
+{
+  console.log("\n52. A equipe sem Vantoro");
+
+  const EQUIPE = [
+    { id: "u1", login: "rodrigo", nome: "Rodrigo", email: "rodrigo@x", admin: true, ativo: true, acesso: null },
+    { id: "u2", login: "maria", nome: "Maria", email: "maria@x", admin: false, ativo: true, acesso: null },
+    { id: "u3", login: "ana", nome: "Ana", email: "ana@x", admin: false, ativo: true, acesso: null },
+  ];
+  const comoAdmin = { Authorization: "Bearer jwt-bom" };
+  const pedir = (t, caminho, corpo) => fetch(`http://127.0.0.1:${t.porta}${caminho}`, {
+    method: corpo ? "POST" : "GET",
+    headers: { ...comoAdmin, ...(corpo ? { "Content-Type": "application/json" } : {}) },
+    ...(corpo ? { body: JSON.stringify(corpo) } : {}),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) }));
+
+  // ---- 52a. COM Vantoro, nada muda ----
+  {
+    // A metade que protege o escritório: a entrega é para quem NÃO tem
+    // Vantoro, e não pode mexer em quem tem.
+    const t = await subirTudo({}, {
+      tabelas: { usuarios: EQUIPE.map((u) => ({ ...u })) },
+      vantoro: { usuarios: [{ login: "maria", nome: "Maria", email: "maria@x", admin: false, zorvin_definido: true }] },
+    });
+    const r = await pedir(t, "/permissoes/atendentes");
+    ok("com Vantoro, a lista continua vindo de lá", r.corpo && r.corpo.com_vantoro === true,
+       JSON.stringify(r.corpo));
+    ok("e ele foi perguntado", t.van.recebidas.some((c) => c.caminho === "/usuarios"),
+       JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
+    // E a porta de cadastrar pessoa não existe ali: seria a segunda lista de
+    // gente, que é exatamente o que fez o Vantoro virar a fonte.
+    // O E-MAIL PRECISA SER VÁLIDO AQUI, e isso saiu de uma sabotagem: com
+    // "nova@x" a recusa podia vir da conferência do e-mail em vez da do
+    // Vantoro, e tirar a proteção não reprovaria nada. O pedido tem de ser
+    // impecável para que a ÚNICA razão possível de recusa seja a que se prova.
+    const nova = await pedir(t, "/permissoes/pessoa",
+      { email: "nova@escritorio.com", nome: "Nova", senha: "senha-boa-123" });
+    ok("e cadastrar pessoa por aqui é recusado", nova.status === 400, `veio ${nova.status}`);
+    ok("dizendo que quem cadastra é o Vantoro",
+       nova.corpo && /quem cadastra pessoa é ele/i.test(nova.corpo.erro || ""), JSON.stringify(nova.corpo));
+    await t.parar();
+  }
+
+  // ---- 52b. SEM Vantoro, a lista vem daqui — e ele não é chamado ----
+  {
+    const t = await subirTudo({}, { tabelas: { usuarios: EQUIPE.map((u) => ({ ...u })) } });
+    const r = await pedir(t, "/permissoes/atendentes");
+    ok("a lista abre sem Vantoro", r.status === 200 && r.corpo && r.corpo.com_vantoro === false,
+       JSON.stringify(r.corpo));
+    ok("e traz a equipe que está no banco", (r.corpo.usuarios || []).length === 3,
+       JSON.stringify((r.corpo.usuarios || []).map((u) => u.login)));
+    ok("em ordem de nome", (r.corpo.usuarios || []).map((u) => u.nome).join(",") === "Ana,Maria,Rodrigo",
+       JSON.stringify((r.corpo.usuarios || []).map((u) => u.nome)));
+    ok("com a mesma forma que a tela já lê",
+       r.corpo.usuarios.every((u) => "zorvin" in u && "zorvin_telefones" in u
+                                  && "zorvin_so_telefones" in u && "zorvin_definido" in u),
+       JSON.stringify(r.corpo.usuarios[0]));
+    // O CORAÇÃO: sem Vantoro configurado, `t.van` nem existe. Se a ponte
+    // tentasse falar com ele, a rota responderia 502 em vez da lista — e a
+    // conferência de cima já teria reprovado. Esta deixa a intenção escrita.
+    ok("ninguém definiu ainda, e isso NÃO é 'não vê nada'",
+       r.corpo.usuarios.every((u) => u.zorvin_definido === false),
+       JSON.stringify(r.corpo.usuarios.map((u) => u.zorvin_definido)));
+    await t.parar();
+  }
+
+  // ---- 52c. gravar escreve a intenção E aplica o efeito ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: {
+        usuarios: EQUIPE.map((u) => ({ ...u })),
+        departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
+        permissoes: [],
+      },
+    });
+    const r = await pedir(t, "/permissoes/atendente", { usuario_id: "u2", departamentos: ["comercial"] });
+    ok("a gravação responde com a pessoa", r.status === 200 && r.corpo && r.corpo.usuario, JSON.stringify(r.corpo));
+    ok("e diz que aplicou na hora", r.corpo && r.corpo.aplicada === true, JSON.stringify(r.corpo));
+
+    const maria = t.sb.dados.usuarios.find((u) => u.id === "u2");
+    ok("a INTENÇÃO fica em usuarios.acesso",
+       maria && maria.acesso && maria.acesso.departamentos.join() === "comercial", JSON.stringify(maria));
+    ok("e `definido` passa a valer", maria && maria.acesso.definido === true, JSON.stringify(maria && maria.acesso));
+    // O EFEITO é o que as políticas do banco leem. Sem esta linha, a tela
+    // mostraria a marcação e a pessoa continuaria sem ver a conversa.
+    ok("o EFEITO vira linha em `permissoes`",
+       t.sb.dados.permissoes.some((p) => p.usuario_id === "u2" && p.departamento_id === 1),
+       JSON.stringify(t.sb.dados.permissoes));
+    await t.parar();
+  }
+
+  // ---- 52d. `definido` não volta atrás ----
+  {
+    // Voltar para "ninguém decidiu" depois de alguém ter decidido faria a
+    // pessoa voltar a ver TUDO, em silêncio — "ninguém definiu" é justamente o
+    // caso que não restringe nada.
+    const t = await subirTudo({}, {
+      tabelas: {
+        usuarios: EQUIPE.map((u) => ({ ...u })),
+        departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
+        permissoes: [],
+      },
+    });
+    await pedir(t, "/permissoes/atendente", { usuario_id: "u2", departamentos: ["comercial"] });
+    await pedir(t, "/permissoes/atendente", { usuario_id: "u2", departamentos: [] });
+    const maria = t.sb.dados.usuarios.find((u) => u.id === "u2");
+    ok("tirando tudo, continua DEFINIDO (e não 'ninguém decidiu')",
+       maria && maria.acesso.definido === true && maria.acesso.departamentos.length === 0,
+       JSON.stringify(maria && maria.acesso));
+    await t.parar();
+  }
+
+  // ---- 52e. a porta de saída sem volta ----
+  {
+    // Sem Vantoro não há um "lá fora" de onde destrancar: quem perdesse o poder
+    // de administrar perderia junto a tela que o devolve, e o conserto exigiria
+    // mexer no banco à mão.
+    //
+    // DUAS ADMINISTRADORAS, DE PROPÓSITO. Com uma só, esta cena e a 52f
+    // provariam a mesma coisa: tirar a única seria recusado pela OUTRA regra, e
+    // apagar esta aqui não reprovaria nada. Foi o que uma sabotagem mostrou —
+    // ela caiu na frase da "última administradora" e a proteção de se tirar
+    // sozinha ficou sem prova própria.
+    const DOIS_ADMINS = EQUIPE.map((u) => (u.id === "u3" ? { ...u, admin: true } : { ...u }));
+    const t = await subirTudo({}, { tabelas: { usuarios: DOIS_ADMINS } });
+    const eu = await pedir(t, "/permissoes/atendente", { usuario_id: "u1", admin: false });
+    ok("ninguém se tira de administradora", eu.status === 400, `veio ${eu.status}`);
+    ok("e a frase diz por quê", eu.corpo && /ficaria sem a tela/i.test(eu.corpo.erro || ""),
+       JSON.stringify(eu.corpo));
+    ok("e o banco NÃO mudou",
+       t.sb.dados.usuarios.find((u) => u.id === "u1").admin === true);
+
+    const meDesativo = await pedir(t, "/permissoes/atendente", { usuario_id: "u1", ativo: false });
+    ok("nem se desativa", meDesativo.status === 400, `veio ${meDesativo.status}`);
+
+    // Promovendo outra, aí sim pode sair.
+    await pedir(t, "/permissoes/atendente", { usuario_id: "u2", admin: true });
+    ok("promover outra funciona", t.sb.dados.usuarios.find((u) => u.id === "u2").admin === true);
+    await t.parar();
+  }
+
+  // ---- 52f. a última administradora não sai ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: { usuarios: [
+        { id: "u1", login: "rodrigo", nome: "Rodrigo", email: "rodrigo@x", admin: true, ativo: true, acesso: null },
+        { id: "u9", login: "chefe", nome: "Chefe", email: "chefe@x", admin: true, ativo: true, acesso: null },
+      ] },
+    });
+    // Rodrigo (quem está pedindo) tira a outra: sobra ele, pode.
+    const uma = await pedir(t, "/permissoes/atendente", { usuario_id: "u9", admin: false });
+    ok("dá para tirar uma quando sobra outra", uma.status === 200, JSON.stringify(uma.corpo));
+    // Agora só sobrou ele — e ele não pode tirar a si mesmo (52e). A conferência
+    // da "última" precisa de outra pessoa pedindo, então o caminho aqui é
+    // conferir que o banco ficou com exatamente uma administradora.
+    ok("e o banco fica com uma administradora",
+       t.sb.dados.usuarios.filter((u) => u.admin && u.ativo !== false).length === 1,
+       JSON.stringify(t.sb.dados.usuarios.map((u) => [u.login, u.admin])));
+    await t.parar();
+  }
+
+  // ---- 52f-bis. conta desativada não administra mais ----
+  {
+    // A porta da ponte conferia só `admin`; a do BANCO (`zorvin_admin()`)
+    // sempre conferiu `admin and ativo`. Ficou latente enquanto nada desativava
+    // ninguém — e é esta tela que passa a desativar, então o conserto é dela.
+    const t = await subirTudo({}, {
+      tabelas: { usuarios: [
+        { id: "u1", login: "rodrigo", nome: "Rodrigo", email: "rodrigo@x", admin: true, ativo: false, acesso: null },
+      ] },
+    });
+    const r = await pedir(t, "/permissoes/atendentes");
+    ok("administradora DESATIVADA não passa pela porta", r.status === 403, `veio ${r.status}`);
+    // Duas providências opostas: pedir a permissão, ou pedir a reativação. A
+    // mesma frase para as duas manda a pessoa insistir no lugar errado.
+    ok("e a frase diz que foi desativada, não que não administra",
+       r.corpo && /desativada/i.test(r.corpo.erro || ""), JSON.stringify(r.corpo));
+    await t.parar();
+  }
+
+  // ---- 52g. cadastrar alguém da equipe ----
+  {
+    const t = await subirTudo({}, { tabelas: { usuarios: EQUIPE.map((u) => ({ ...u })) } });
+    const r = await pedir(t, "/permissoes/pessoa",
+      { email: "nova@escritorio.com", nome: "Nova Pessoa", senha: "senha-boa-123" });
+    ok("a conta é criada", r.status === 200, JSON.stringify(r.corpo));
+    ok("e a linha da pessoa entra na equipe",
+       t.sb.dados.usuarios.some((u) => u.email === "nova@escritorio.com" && u.nome === "Nova Pessoa"),
+       JSON.stringify(t.sb.dados.usuarios.map((u) => u.email)));
+    ok("nascendo SEM administrar",
+       t.sb.dados.usuarios.find((u) => u.email === "nova@escritorio.com").admin === false);
+    // A LISTA A ENXERGA NA HORA. Criar a conta e a pessoa não aparecer na tela
+    // que acabou de cadastrá-la é o defeito que o `upsert` daqui existe para
+    // impedir — o gatilho do 001 desiste em silêncio de propósito.
+    const lista = await pedir(t, "/permissoes/atendentes");
+    ok("e a tela a vê logo depois",
+       (lista.corpo.usuarios || []).some((u) => u.email === "nova@escritorio.com"),
+       JSON.stringify((lista.corpo.usuarios || []).map((u) => u.email)));
+
+    const repetido = await pedir(t, "/permissoes/pessoa",
+      { email: "nova@escritorio.com", nome: "Outra", senha: "senha-boa-123" });
+    ok("e-mail repetido é recusado", repetido.status === 409, `veio ${repetido.status}`);
+    ok("com frase em português",
+       repetido.corpo && /já existe uma conta/i.test(repetido.corpo.erro || ""), JSON.stringify(repetido.corpo));
+
+    const curta = await pedir(t, "/permissoes/pessoa", { email: "outra@x.com", nome: "X", senha: "123" });
+    ok("senha curta é recusada aqui, em português", curta.status === 400
+       && /pelo menos 8/i.test((curta.corpo && curta.corpo.erro) || ""), JSON.stringify(curta.corpo));
+    const semArroba = await pedir(t, "/permissoes/pessoa", { email: "nao-e-email", nome: "X", senha: "senha-boa-123" });
+    ok("e e-mail sem cara de e-mail também", semArroba.status === 400, `veio ${semArroba.status}`);
+    await t.parar();
+  }
+
+  // ---- 52h. sem a coluna, a tela recebe uma frase que diz o que fazer ----
+  {
+    // Armadilha nº 2 do painel: desenhar AUSÊNCIA no lugar de FALHA. Uma lista
+    // vazia e calada mandaria quem administra procurar gente que existe.
+    const t = await subirTudo({}, {
+      tabelas: { usuarios: EQUIPE.map((u) => ({ ...u })) },
+      semColunas: { usuarios: ["acesso"] },
+    });
+    const r = await pedir(t, "/permissoes/atendentes");
+    ok("sem a coluna `acesso`, a lista NÃO abre vazia", r.status !== 200, `veio ${r.status}`);
+    ok("e a frase diz o que fazer",
+       r.corpo && /SCRIPTS_AUTOMATICOS=aplicar/.test(r.corpo.erro || ""), JSON.stringify(r.corpo));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
