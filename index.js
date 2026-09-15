@@ -2059,6 +2059,64 @@ async function processarEventoDoWebhook(corpo) {
       else if (voltou && voltou.length) console.log(`Conversa ${conversa.id} saiu das arquivadas: o contato escreveu.`);
     }
 
+    // ------------------------------------------------------------
+    //  RESPONDEU PELO CELULAR? ENTÃO JÁ LEU.
+    //
+    //  RELATO DE 15/09: "quando enviamos mensagem pelo celular, a mensagem no
+    //  Zorvin não está ficando marcada como lida".
+    //
+    //  A conta não fechava: a mensagem do cliente soma no selo, e só o painel
+    //  zerava esse selo, ao abrir a conversa. Quem respondia pelo aparelho —
+    //  que é o que se faz fora do expediente, ou quando o advogado atende do
+    //  carro — deixava a conversa gritando "não lida" para a equipe inteira,
+    //  com a resposta já dada. O atendente abre, lê, não tem o que fazer, e
+    //  fecha. Um selo que mente assim ensina a equipe a ignorar o selo, e aí o
+    //  próximo cliente sem resposta passa batido junto.
+    //
+    //  ESTE CAMINHO É SÓ DO APARELHO. O eco do que o Zorvin mesmo enviou é
+    //  descartado bem antes daqui (`wasSentByApi === true`), e o painel já
+    //  zera o selo ao abrir a conversa. Quem chega aqui com `fromMe` é uma
+    //  pessoa que respondeu por fora — pelo celular ou pelo WhatsApp Web.
+    //
+    //  E SÓ ZERA SE NADA MAIS NOVO ESTIVER ESPERANDO.
+    //
+    //  Os eventos não chegam sempre em ordem: a caixa de entrada reprocessa o
+    //  que ficou pendente, e um `fromMe` atrasado pode entrar DEPOIS de uma
+    //  mensagem que o cliente mandou em seguida. Zerar às cegas apagaria o
+    //  aviso de uma mensagem de verdade, ainda por ler — que é exatamente o
+    //  estrago pelo qual o `nao_lidas: 0` da importação de histórico foi
+    //  removido (ver o comentário lá em cima). A pergunta certa não é "o
+    //  advogado respondeu?", e sim "sobrou alguma coisa depois da resposta?".
+    //
+    //  A HORA É A DO WHATSAPP, e não a da gravação. `base` não traz
+    //  `criado_em` — quem preenche é o banco, com `now()` —, então comparar
+    //  contra a hora da gravação responderia "chegou algo depois de AGORA?",
+    //  que é sempre não. O `fromMe` atrasado passaria por cima da mensagem de
+    //  cliente que ele deveria respeitar, e a guarda inteira seria enfeite.
+    //
+    //  Sem horário no evento, a guarda não tem como valer: aí é melhor zerar
+    //  (o caso comum, todo dia) do que não zerar nunca por causa de um caso
+    //  raro — e o pior desfecho vira uma conversa marcada como lida com uma
+    //  mensagem ainda por ler, que continua na lista, com a prévia visível.
+    if (origem === 'advogado') {
+      const quandoRespondeu = horarioDeQuemEnviou(m);
+      const { data: depois, error: erroDepois } = quandoRespondeu
+        ? await supabase.from('mensagens')
+            .select('id').eq('conversa_id', conversa.id).eq('origem', 'contato')
+            .gt('criado_em', quandoRespondeu).limit(1)
+        : { data: [], error: null };
+      if (erroDepois) {
+        // FALHA NÃO ZERA. Sem saber o que veio depois, mexer no selo é apostar
+        // contra a única coisa que este sistema não pode perder.
+        console.log('Não consegui conferir o que veio depois; deixo o selo como está:',
+                    erroDepois.message);
+      } else if (!depois || !depois.length) {
+        const { error: erroSelo } = await supabase.from('conversas')
+          .update({ nao_lidas: 0 }).eq('id', conversa.id).gt('nao_lidas', 0);
+        if (erroSelo) console.log('Não consegui zerar o selo:', erroSelo.message);
+      }
+    }
+
     console.log(`Recebida (${tipo}) de ${contatoNumero} p/ advogado ${advogadoNumero}.`);
     // A ponte está acordada agora: aproveita para despachar qualquer mensagem
     // que estava esperando na fila (não espera o próximo ciclo do setInterval).

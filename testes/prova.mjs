@@ -7203,5 +7203,104 @@ console.log("\n50. A busca pede só o que o painel usa");
   }
 }
 
+// ============================================================
+//  53. RESPONDEU PELO CELULAR? ENTÃO JÁ LEU.
+//
+//  RELATO DE 15/09: "quando enviamos mensagem pelo celular, a mensagem no
+//  Zorvin não está ficando marcada como lida".
+//
+//  A mensagem do cliente soma no selo de não lidas, e só o painel zerava esse
+//  selo, ao abrir a conversa. Quem respondia pelo aparelho — que é o que se faz
+//  fora do expediente — deixava a conversa gritando "não lida" para a equipe
+//  inteira, com a resposta já dada. O atendente abre, lê, não tem o que fazer,
+//  e fecha. Selo que mente assim ensina a equipe a ignorar o selo, e aí o
+//  próximo cliente sem resposta passa batido junto.
+// ============================================================
+console.log("\n53. Respondeu pelo celular, a conversa fica lida");
+{
+  const doCelular = (id, quando, fromMe = true) => ({
+    EventType: "messages",
+    owner: TELEFONE.numero,
+    // O `chat` É OBRIGATÓRIO AQUI, e descobri isso pela prova reprovando com a
+    // conversa vazia: numa mensagem `fromMe` o remetente é o ADVOGADO, então a
+    // ponte tira o número do contato SÓ do `chat` (ver `numeroRealDoContato`).
+    // Sem ele, a mensagem não tem conversa a que pertencer e é descartada — e
+    // a conferência falaria de um selo que nunca teve chance de mudar.
+    chat: { phone: "5511999998888", wa_name: "Cliente" },
+    message: {
+      id, messageid: id, chatid: "5511999998888@s.whatsapp.net",
+      sender: "5511999998888@s.whatsapp.net", fromMe, isGroup: false,
+      messageTimestamp: quando, wasSentByApi: false, type: "text",
+      text: fromMe ? "Respondi daqui do celular" : "Mais uma do cliente",
+    },
+  });
+  const comConversa = (naoLidas) => ({
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1,
+                    nao_lidas: naoLidas, ultima_atividade: new Date().toISOString() }],
+    },
+  });
+  const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+
+  // ---- 53a. o caso do relato
+  {
+    const t = await subirTudo({}, comConversa(4));
+    await mandar(t, doCelular("cel-1", Date.now()));
+    await espera(700);
+    const conv = t.sb.dados.conversas.find((c) => c.id === 1);
+    ok("respondendo pelo celular, o selo zera", conv && conv.nao_lidas === 0,
+       `ficou em ${conv && conv.nao_lidas}`);
+    // E A MENSAGEM ENTRA. Zerar o selo sem gravar a resposta seria trocar um
+    // defeito por outro — a conversa lida e sem a resposta na tela.
+    ok("e a resposta entra na conversa como nossa",
+       t.sb.dados.mensagens.some((m) => m.origem === "advogado"),
+       JSON.stringify(t.sb.dados.mensagens.map((m) => [m.origem, m.texto])));
+    await t.parar();
+  }
+
+  // ---- 53b. mensagem DO CLIENTE não zera nada
+  {
+    // A conferência que impede o conserto de virar o oposto: se qualquer
+    // webhook zerasse o selo, o cliente escrever marcaria a própria mensagem
+    // como lida — e ninguém no escritório saberia que ela chegou.
+    const t = await subirTudo({}, comConversa(4));
+    await mandar(t, doCelular("cli-1", Date.now(), false));
+    await espera(700);
+    const conv = t.sb.dados.conversas.find((c) => c.id === 1);
+    ok("mensagem do CLIENTE não mexe no selo", conv && conv.nao_lidas === 4,
+       `ficou em ${conv && conv.nao_lidas}`);
+    await t.parar();
+  }
+
+  // ---- 53c. o `fromMe` atrasado não apaga o que chegou depois
+  {
+    // Os eventos não chegam sempre em ordem: a caixa de entrada reprocessa o
+    // que ficou pendente. Um `fromMe` de dez minutos atrás, entrando agora,
+    // não pode apagar o aviso da mensagem que o cliente mandou em seguida —
+    // é o mesmo estrago pelo qual o `nao_lidas: 0` da importação foi removido.
+    const dezMinutosAtras = Date.now() - 10 * 60 * 1000;
+    const t = await subirTudo({}, {
+      tabelas: {
+        contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+        conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 2,
+                      ultima_atividade: new Date().toISOString() }],
+        mensagens: [{ id: 91, conversa_id: 1, origem: "contato", tipo: "texto",
+                      texto: "Mandei depois da sua resposta", id_uazapi: "depois-1",
+                      criado_em: new Date(Date.now() - 60 * 1000).toISOString() }],
+      },
+    });
+    await mandar(t, doCelular("cel-atrasado", dezMinutosAtras));
+    await espera(700);
+    const conv = t.sb.dados.conversas.find((c) => c.id === 1);
+    ok("o `fromMe` atrasado NÃO apaga o que o cliente mandou depois",
+       conv && conv.nao_lidas === 2, `ficou em ${conv && conv.nao_lidas}`);
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
