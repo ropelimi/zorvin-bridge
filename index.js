@@ -6304,10 +6304,32 @@ setInterval(() => { rodada().catch(() => {}); }, PERMISSOES_INTERVALO_MS).unref(
 // ============================================================
 
 // Só admin abre: as duas rotas contam e mudam quem enxerga o quê.
+// ============================================================
+//  A PORTA DE QUEM ADMINISTRA — `admin` E `ativo`, como no banco
+//
+//  Esta porta conferia só `admin`. A do BANCO — `zorvin_admin()`, que as
+//  políticas usam — sempre conferiu `admin and ativo`. Duas portas para a mesma
+//  decisão, com réguas diferentes: pela ponte, uma conta desativada continuava
+//  administrando.
+//
+//  Ficou latente enquanto nada desativava ninguém: o `ativo` era escrito como
+//  `true` a cada entrada e mais nada mexia nele. A tela da equipe sem Vantoro
+//  passa a desativar gente — é ela que torna isto alcançável, e por isso o
+//  conserto vem junto com ela e não depois.
+//
+//  A FRASE SEPARA OS DOIS CASOS. "Não administra" e "foi desativada" pedem
+//  providências opostas de quem lê: uma é pedir a permissão, a outra é pedir a
+//  reativação. A mesma frase para as duas manda a pessoa insistir no lugar
+//  errado.
+// ============================================================
 function soAdmin(handler) {
   return rotaVantoro(async (req, usuario) => {
     const { data: eu } = await supabase
-      .from('usuarios').select('admin').eq('id', usuario.id).maybeSingle();
+      .from('usuarios').select('admin, ativo').eq('id', usuario.id).maybeSingle();
+    if (eu && eu.admin && eu.ativo === false) {
+      return { status: 403, corpo: { ok: false,
+        erro: 'Esta conta foi desativada. Peça a quem administra para reativá-la.' } };
+    }
     if (!eu || !eu.admin) {
       return { status: 403, corpo: { ok: false, erro: 'Só quem administra pode mexer nas permissões.' } };
     }
@@ -6339,7 +6361,11 @@ async function listarAtendentes() {
     ja_entrou: conhecidos.has(String(u.login || '').toLowerCase())
             || conhecidos.has(String(u.email || '').toLowerCase()),
   }));
-  return { status: 200, corpo: { ok: true, usuarios } };
+  // A TELA PRECISA SABER EM QUAL DOS DOIS MUNDOS ESTÁ, e quem sabe é a ponte:
+  // é ela que tem as variáveis do Vantoro. Uma variável própria no painel
+  // poderia ser posta em desacordo com estas, e aí a tela ofereceria cadastrar
+  // gente num sistema que manda o cadastro para outro lugar.
+  return { status: 200, corpo: { ok: true, usuarios, com_vantoro: true } };
 }
 
 async function gravarAtendente(req) {
@@ -6375,10 +6401,258 @@ async function gravarAtendente(req) {
   return { status: 200, corpo: { ok: true, usuario: corpo.usuario, aplicada } };
 }
 
+// ============================================================
+//  A EQUIPE SEM VANTORO — a mesma tela, outra fonte
+//
+//  `listarAtendentes` lê a lista de gente do Vantoro; `gravarAtendente` grava a
+//  permissão lá. Para o escritório isso é o certo: é lá que o cadastro de
+//  pessoa mora, e manter duas listas iguais é coisa que ninguém faz por muito
+//  tempo.
+//
+//  Quem compra o Zorvin sem ter Vantoro já consegue ENTRAR (o script 001
+//  resolveu isso) e nasce administrador. Mas não tinha como cadastrar mais
+//  ninguém nem dizer o que cada pessoa alcança: um sistema de atendimento em
+//  EQUIPE com uma pessoa só.
+//
+//  ------------------------------------------------------------
+//  O CONTRATO COM O PAINEL NÃO MUDA, E ISSO É A DECISÃO PRINCIPAL
+//
+//  A tela recebe a mesma forma de sempre (`zorvin`, `zorvin_telefones`,
+//  `zorvin_so_telefones`, `zorvin_definido`) e manda os mesmos campos. Só a
+//  FONTE muda. Uma tela nova, paralela, teria de ser mantida junto com a velha
+//  e divergiria dela na primeira mudança — e a permissão é justamente o lugar
+//  onde divergir significa alguém ver conversa que não devia.
+//
+//  Pelo mesmo motivo, `aplicarPermissoes` não muda uma linha: ela recebe o
+//  mesmo objeto que recebia do Vantoro, montado a partir de `usuarios.acesso`.
+//  Ela é delicada (compara antes de escrever, para ninguém ficar cego no meio
+//  de uma rodada) e está provada; reescrevê-la seria arriscar o que funciona.
+//
+//  ------------------------------------------------------------
+//  A CHAVE É A PRÓPRIA CONFIGURAÇÃO, e não uma variável nova
+//
+//  `VANTORO_API_URL` + `VANTORO_API_TOKEN` já dizem se há Vantoro. Uma
+//  variável a mais poderia ser posta em desacordo com elas, e aí o sistema
+//  perguntaria a um serviço que não existe — ou ignoraria o que existe.
+// ============================================================
+const COM_VANTORO = Boolean(VANTORO_URL && VANTORO_TOKEN);
+
+/** O que está guardado em `usuarios.acesso`, com os buracos preenchidos. */
+function acessoGuardado(u) {
+  const a = (u && u.acesso && typeof u.acesso === 'object') ? u.acesso : {};
+  return {
+    definido: a.definido === true,
+    so_telefones: a.so_telefones === true,
+    departamentos: Array.isArray(a.departamentos) ? a.departamentos.filter(Boolean) : [],
+    telefones: Array.isArray(a.telefones) ? a.telefones.filter(Boolean) : [],
+  };
+}
+
+/** A linha de `usuarios` no formato que a tela (e `aplicarPermissoes`) esperam. */
+function comoOPainelEspera(u) {
+  const a = acessoGuardado(u);
+  return {
+    id: u.id,
+    login: u.login || u.email || String(u.id),
+    nome: u.nome || '',
+    email: u.email || '',
+    admin: Boolean(u.admin),
+    ativo: u.ativo !== false,
+    // SEM VANTORO, QUEM ESTÁ NA LISTA JÁ ENTROU — a linha de `usuarios` nasce
+    // com a conta. Lá, a lista vem do Vantoro e pode ter gente que nunca abriu
+    // o Zorvin; aqui isso não existe, e dizer "ainda não entrou" para todo
+    // mundo seria um aviso que nunca se resolve.
+    ja_entrou: true,
+    zorvin_definido: a.definido,
+    zorvin_so_telefones: a.so_telefones,
+    zorvin: a.departamentos,
+    zorvin_telefones: a.telefones,
+  };
+}
+
+async function listarAtendentesDaqui() {
+  const { data, error } = await lerTudo(
+    'usuarios', 'id, login, nome, email, admin, ativo, acesso');
+  if (error) {
+    // SEM A COLUNA, A TELA NÃO PODE ABRIR VAZIA E CALADA. É a armadilha nº 2 do
+    // painel: desenhar ausência no lugar de falha. Aqui ela vira uma frase que
+    // diz o que fazer.
+    if (semAColuna(error)) {
+      return { status: 503, corpo: { ok: false,
+        erro: 'Falta a coluna `usuarios.acesso` no banco. Publique a ponte com '
+            + 'SCRIPTS_AUTOMATICOS=aplicar para o script 002 rodar.' } };
+    }
+    return { status: 502, corpo: { ok: false, erro: `Não consegui ler a equipe (${error.message}).` } };
+  }
+  const usuarios = (data || [])
+    .map(comoOPainelEspera)
+    .sort((a, b) => (a.nome || a.login).localeCompare(b.nome || b.login, 'pt-BR'));
+  return { status: 200, corpo: { ok: true, usuarios, com_vantoro: false } };
+}
+
+async function gravarAtendenteDaqui(req, usuario) {
+  const c = req.body || {};
+  const quem = String(c.usuario_id || c.usuario || '').trim();
+  if (!quem) return { status: 400, corpo: { ok: false, erro: 'Informe de quem é a permissão.' } };
+
+  const { data: gente, error: erroLe } = await lerTudo(
+    'usuarios', 'id, login, nome, email, admin, ativo, acesso');
+  if (erroLe) {
+    if (semAColuna(erroLe)) {
+      return { status: 503, corpo: { ok: false,
+        erro: 'Falta a coluna `usuarios.acesso` no banco. Publique a ponte com '
+            + 'SCRIPTS_AUTOMATICOS=aplicar para o script 002 rodar.' } };
+    }
+    return { status: 502, corpo: { ok: false, erro: `Não consegui ler a equipe (${erroLe.message}).` } };
+  }
+  const alvo = (gente || []).find((u) => String(u.id) === quem
+                                      || String(u.login || '').toLowerCase() === quem.toLowerCase()
+                                      || String(u.email || '').toLowerCase() === quem.toLowerCase());
+  if (!alvo) return { status: 404, corpo: { ok: false, erro: 'Não achei essa pessoa.' } };
+
+  // ---- NINGUÉM SE TIRA DE ADMINISTRADOR, NEM TIRA O ÚLTIMO
+  //
+  // Sem Vantoro não há um "lá fora" de onde destrancar: a conta que perdesse o
+  // poder de administrar perderia junto a tela que o devolve. Um clique errado
+  // seria definitivo, e o conserto exigiria mexer no banco à mão.
+  const mexeNoAdmin = Object.prototype.hasOwnProperty.call(c, 'admin');
+  if (mexeNoAdmin && c.admin === false) {
+    if (String(alvo.id) === String(usuario.id)) {
+      return { status: 400, corpo: { ok: false,
+        erro: 'Você não pode tirar a si mesma de administradora — ficaria sem a tela que devolve isso. '
+            + 'Peça a outra pessoa que administra.' } };
+    }
+    // ESTA SEGUNDA REGRA É UM ENCOSTO, E HOJE NÃO TEM COMO SER ALCANÇADA —
+    // está escrito aqui porque descobrir isso de novo custaria o mesmo tempo.
+    // Quem pede passou por `soAdmin`, então é administradora E ativa; se ela
+    // não é o alvo, ela mesma sobra na conta e a lista nunca fica vazia. E se
+    // ela É o alvo, a regra de cima já recusou.
+    //
+    // Ela fica porque a inalcançabilidade vem do desenho das OUTRAS duas
+    // regras, e não desta: no dia em que existir um caminho que rebaixe alguém
+    // sem ser a pedido de uma administradora ativa (uma rotina, uma importação),
+    // é esta que impede o sistema de ficar sem dono. Não há prova apontando
+    // para ela, de propósito — prova que não pode reprovar é pior do que
+    // nenhuma.
+    const outros = (gente || []).filter(
+      (u) => u.admin && u.ativo !== false && String(u.id) !== String(alvo.id));
+    if (!outros.length) {
+      return { status: 400, corpo: { ok: false,
+        erro: 'Esta é a única pessoa que administra. Promova outra antes de tirar esta.' } };
+    }
+  }
+  // Desativar a si mesma dá no mesmo: é a porta de saída sem volta.
+  if (Object.prototype.hasOwnProperty.call(c, 'ativo') && c.ativo === false
+      && String(alvo.id) === String(usuario.id)) {
+    return { status: 400, corpo: { ok: false, erro: 'Você não pode desativar a si mesma.' } };
+  }
+
+  const antes = acessoGuardado(alvo);
+  const acesso = {
+    // `definido` vira true na primeira gravação e não volta atrás: é o que
+    // separa "não pode ver nada" de "ninguém decidiu ainda", e a segunda é a
+    // que faz a pessoa ver tudo. Voltar para "ninguém decidiu" depois de
+    // alguém ter decidido abriria o acesso em silêncio.
+    definido: true,
+    so_telefones: Object.prototype.hasOwnProperty.call(c, 'so_telefones')
+      ? Boolean(c.so_telefones) : antes.so_telefones,
+    departamentos: Array.isArray(c.departamentos) ? c.departamentos.filter(Boolean) : antes.departamentos,
+    telefones: Array.isArray(c.telefones) ? c.telefones.filter(Boolean) : antes.telefones,
+  };
+
+  const mudanca = { acesso };
+  if (mexeNoAdmin) mudanca.admin = Boolean(c.admin);
+  if (Object.prototype.hasOwnProperty.call(c, 'ativo')) mudanca.ativo = Boolean(c.ativo);
+
+  const { error: erroGrava } = await supabase
+    .from('usuarios').update(mudanca).eq('id', alvo.id);
+  if (erroGrava) {
+    return { status: 502, corpo: { ok: false, erro: `Não consegui salvar (${erroGrava.message}).` } };
+  }
+
+  const salvo = { ...alvo, ...mudanca };
+  const daTela = comoOPainelEspera(salvo);
+
+  // APLICAR AGORA, e não na próxima rodada. Falhando, a intenção continua
+  // gravada e a rodada seguinte aplica — por isso o erro daqui não desfaz nada.
+  let aplicada = false;
+  try {
+    await aplicarPermissoes(alvo.id, daTela);
+    aplicada = true;
+  } catch (e) {
+    console.log('Permissões: gravei mas não apliquei agora —', (e && e.message) || e);
+  }
+  return { status: 200, corpo: { ok: true, usuario: daTela, aplicada } };
+}
+
+/** Cria a conta de alguém da equipe. Só existe no caminho sem Vantoro: lá, quem
+ *  cadastra gente é o Vantoro, e uma segunda porta criaria a segunda lista. */
+async function criarPessoaDaqui(req) {
+  const c = req.body || {};
+  const email = String(c.email || '').trim().toLowerCase();
+  const nome = String(c.nome || '').trim();
+  const senha = String(c.senha || '');
+
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return { status: 400, corpo: { ok: false, erro: 'Informe um e-mail válido.' } };
+  }
+  // O MÍNIMO DO SUPABASE SÃO SEIS, e recusar aqui dá uma frase em português no
+  // lugar do erro em inglês que a tela mostraria.
+  if (senha.length < 8) {
+    return { status: 400, corpo: { ok: false, erro: 'A senha precisa de pelo menos 8 caracteres.' } };
+  }
+
+  const { data, error } = await supabase.auth.admin.createUser({
+    email, password: senha,
+    // O escritório não tem serviço de e-mail configurado, e esperar uma
+    // confirmação que nunca chega é a pessoa não conseguir entrar no primeiro
+    // dia. Quem administra digitou o e-mail: essa é a confirmação.
+    email_confirm: true,
+    user_metadata: { nome: nome || email.split('@')[0] },
+  });
+  if (error) {
+    const cru = String(error.message || '');
+    if (/already/i.test(cru) && /register|exist/i.test(cru)) {
+      return { status: 409, corpo: { ok: false, erro: 'Já existe uma conta com esse e-mail.' } };
+    }
+    return { status: 502, corpo: { ok: false, erro: `Não consegui criar a conta (${cru}).` } };
+  }
+  const id = data && data.user && data.user.id;
+
+  // O GATILHO DO SCRIPT 001 JÁ CRIA A LINHA, e mesmo assim ela é escrita aqui.
+  // Não é desconfiança do gatilho: ele desiste em silêncio de propósito (para
+  // nunca impedir a conta de nascer), e neste caminho a pessoa SEM linha ficaria
+  // fora da lista da tela que acabou de cadastrá-la. Aqui o nome também é o que
+  // quem administra digitou, e não o pedaço do e-mail.
+  const { error: erroLinha } = await supabase.from('usuarios').upsert({
+    id, login: email.split('@')[0], nome: nome || email.split('@')[0], email,
+    admin: false, ativo: true,
+  }, { onConflict: 'id' });
+  if (erroLinha) {
+    console.log(`Equipe: conta criada, mas não gravei a linha de ${email} (${erroLinha.message}).`);
+  }
+
+  return { status: 200, corpo: { ok: true, usuario: comoOPainelEspera({
+    id, login: email.split('@')[0], nome: nome || email.split('@')[0], email,
+    admin: false, ativo: true, acesso: null,
+  }) } };
+}
+
+app.options('/permissoes/pessoa', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.post('/permissoes/pessoa', soAdmin(async (req) => {
+  if (COM_VANTORO) {
+    return { status: 400, corpo: { ok: false,
+      erro: 'Com o Vantoro ligado, quem cadastra pessoa é ele — é lá que o cadastro mora.' } };
+  }
+  return criarPessoaDaqui(req);
+}));
+
 app.options('/permissoes/atendentes', (req, res) => { liberarCors(res); res.sendStatus(204); });
-app.get('/permissoes/atendentes', soAdmin(listarAtendentes));
+app.get('/permissoes/atendentes', soAdmin((req, usuario) =>
+  (COM_VANTORO ? listarAtendentes(req, usuario) : listarAtendentesDaqui(req, usuario))));
 app.options('/permissoes/atendente', (req, res) => { liberarCors(res); res.sendStatus(204); });
-app.post('/permissoes/atendente', soAdmin(gravarAtendente));
+app.post('/permissoes/atendente', soAdmin((req, usuario) =>
+  (COM_VANTORO ? gravarAtendente(req, usuario) : gravarAtendenteDaqui(req, usuario))));
 
 
 // ============================================================
