@@ -4,11 +4,12 @@
 --  ------------------------------------------------------------
 --  O QUE ELE CONSERTA
 --
---  O painel diz "advogado" em oito frases: "ADVOGADO (dono destas conversas)",
---  "Escolha o advogado…", "QUAL NOME É VOCÊ (o advogado) NAS CONVERSAS?". Para
---  o escritório está certo. Para uma clínica, uma imobiliária ou uma equipe de
---  vendas, o programa passa a falar de uma profissão que não é a deles — na
---  primeira tela, no lugar mais visível.
+--  O painel diz "advogado" em NOVE frases, medidas: "ADVOGADO (dono destas
+--  conversas)", "Escolha o advogado…", "QUAL NOME É VOCÊ (o advogado) NAS
+--  CONVERSAS?", "No celular do advogado: …". Elas ficam em Configurações →
+--  Importar histórico e Configurações → Contatos (NÃO na primeira tela, que
+--  diz "ATENDENDO COMO"). Para o escritório está certo; para uma clínica ou
+--  uma imobiliária, o programa fala de uma profissão que não é a deles.
 --
 --  Esta tabela é onde a palavra passa a morar.
 --
@@ -42,8 +43,9 @@
 --  As frases concordam: "o advogado" / "a médica", "um advogado" / "uma
 --  médica", "dono" / "dona", "selecionado" / "selecionada". Deduzir o gênero
 --  da terminação erraria em "gerente", "assistente", "representante" — e erro
---  de concordância na primeira tela é o tipo de coisa que faz um comprador
---  achar que o programa é amador.
+--  de concordância é o tipo de coisa que faz um comprador achar que o programa
+--  é amador. (Medido: a prova do painel PASSOU com o gênero deduzido, porque
+--  as duas palavras que ela usava obedeciam à regra por acaso.)
 --
 --  ------------------------------------------------------------
 --  QUEM LÊ E QUEM ESCREVE

@@ -6524,6 +6524,22 @@ console.log("\n50. A busca pede só o que o painel usa");
       u.pathname = `/${nome}`;
       u.searchParams.set("sslmode", "disable");
       const url = u.toString();
+      // OS PAPÉIS QUE O SUPABASE TEM, e um Postgres pelado não.
+      //
+      // O alvo destes scripts é o Supabase, onde `anon`, `authenticated` e
+      // `service_role` existem desde sempre — toda política escreve `to
+      // authenticated`. Aqui a integração contínua sobe um Postgres cru, e o
+      // primeiro script com política reprovou com "role authenticated does not
+      // exist": um erro do BANCO DE PROVA, não do script.
+      //
+      // Sem isto, todo script futuro que criasse política esbarraria aqui, e a
+      // saída fácil seria escrever SQL diferente do que roda em produção — que
+      // é o oposto do que esta prova existe para garantir.
+      for (const papel of ["anon", "authenticated", "service_role"]) {
+        await falarCom(url, `do $$ begin
+          if not exists (select 1 from pg_roles where rolname = '${papel}')
+            then create role ${papel} nologin; end if; end $$;`);
+      }
       return {
         url,
         consultar: (sql, args) => falarCom(url, sql, args),
@@ -6880,13 +6896,31 @@ console.log("\n50. A busca pede só o que o painel usa");
       // Vale para todo script futuro: um erro de digitação em SQL passa por
       // revisão de código sem ninguém notar, e só aparece na hora de instalar.
       const b = await bancoNovo();
-      // O mínimo que o script 001 toca. Não é o banco inteiro do Zorvin: é a
-      // conta no Auth e a tabela de gente, que é sobre o que ele fala.
+      // O MÍNIMO QUE OS SCRIPTS TOCAM. Não é o banco inteiro do Zorvin: é a
+      // conta no Auth, a tabela de gente, e `zorvin_admin()` — a função que
+      // TODA política do Zorvin usa para dizer quem administra.
+      //
+      // Ela entrou aqui quando o 003 reprovou com "function public.zorvin_admin()
+      // does not exist": ele é o primeiro script automático que cria POLÍTICA,
+      // e política sem essa função não existe neste sistema. A saída fácil
+      // seria o script trazer a própria definição de "quem administra" — e aí
+      // haveria DUAS, para divergirem no primeiro conserto, com a diferença
+      // aparecendo como "fulano não consegue salvar" meses depois.
+      //
+      // A definição abaixo é a mesma de `sql/2026-07-departamentos-grupos-
+      // permissoes.sql`, que é a que roda em produção.
       await b.consultar(`
         create schema if not exists auth;
         create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb);
         create table public.usuarios (id uuid primary key, login text, nome text, email text,
                                       admin boolean, ativo boolean, visto_em timestamptz);
+        create or replace function auth.uid() returns uuid
+          language sql stable as $fn$ select null::uuid $fn$;
+        create or replace function public.zorvin_admin() returns boolean
+          language sql stable security definer set search_path = public, auth as $fn$
+            select coalesce((select u.admin and u.ativo from usuarios u
+                              where u.id = auth.uid()), false);
+          $fn$;
       `);
       // Pasta vazia = a pasta padrão do repositório, que é o ponto.
       const t = await pontOuNada(b, "", { SCRIPTS_AUTOMATICOS: "aplicar" });
