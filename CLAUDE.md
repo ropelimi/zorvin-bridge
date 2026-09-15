@@ -373,6 +373,33 @@ sem linha ficaria fora da lista da tela que acabou de cadastrá-la.
 
 Prova: seção 52.
 
+## As palavras da casa
+
+O painel dizia "advogado" em nove frases. Para o escritório está certo; para
+uma clínica ou uma imobiliária, o programa fala de uma profissão que não é a
+deles. `sql/automaticos/003-as-palavras-da-casa.sql` cria
+`zorvin_palavras` — **uma linha só**, garantida por `check (id)`: duas linhas de
+configuração viram a pergunta "qual delas vale", sempre respondida tarde.
+
+**Tabela, e não variável de ambiente.** Variável só muda com nova publicação, e
+quem compra o programa não publica nada — ele abre a tela e escreve.
+
+**O gênero é coluna.** "o advogado" / "a médica", "dono" / "dona". Deduzir da
+terminação erraria em "gerente", "assistente", "representante".
+
+**Lê quem entrou, escreve quem administra** (`zorvin_admin()`, que já exige
+`admin E ativo`). A política vai junto com a tabela — armadilha nº 1. E são
+DUAS políticas, não uma `for all`: `for all` daria DELETE junto, e apagar a
+única linha é o jeito de esta tabela ficar num estado que nenhum código
+descreve.
+
+**"Processo" NÃO entrou**, e isso foi medido em 15/09: toda frase visível com
+essa palavra está atrás de uma porta do Vantoro, que é o sistema do próprio
+escritório — onde a palavra é sempre "processo". Um botão para trocá-la seria
+um botão que ninguém pode usar.
+
+Prova: `o-vocabulario`, no repo do painel.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
