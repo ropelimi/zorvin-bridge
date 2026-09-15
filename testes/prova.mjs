@@ -6871,6 +6871,74 @@ console.log("\n50. A busca pede só o que o painel usa");
       await t.parar();
     }
 
+    // ---- 51l-bis. OS SCRIPTS DE VERDADE, num banco limpo ----
+    {
+      // As cenas acima provam o MOTOR com scripts de mentira. Esta aponta para
+      // a pasta de verdade do repositório — a mesma que vai rodar no banco de
+      // um cliente — e confere que o que está escrito lá aplica e faz o que diz.
+      //
+      // Vale para todo script futuro: um erro de digitação em SQL passa por
+      // revisão de código sem ninguém notar, e só aparece na hora de instalar.
+      const b = await bancoNovo();
+      // O mínimo que o script 001 toca. Não é o banco inteiro do Zorvin: é a
+      // conta no Auth e a tabela de gente, que é sobre o que ele fala.
+      await b.consultar(`
+        create schema if not exists auth;
+        create table auth.users (id uuid primary key, email text, raw_user_meta_data jsonb);
+        create table public.usuarios (id uuid primary key, login text, nome text, email text,
+                                      admin boolean, ativo boolean, visto_em timestamptz);
+      `);
+      // Pasta vazia = a pasta padrão do repositório, que é o ponto.
+      const t = await pontOuNada(b, "", { SCRIPTS_AUTOMATICOS: "aplicar" });
+      ok("a ponte fica de pé aplicando os scripts de verdade", t !== null && t.filho.exitCode === null);
+
+      const aplicados = await b.consultar(
+        "select nome, sucesso, erro from zorvin_scripts_aplicados order by nome");
+      ok("todos os scripts da pasta aplicaram sem falha",
+         aplicados.rows.length > 0 && aplicados.rows.every((r) => r.sucesso === true),
+         JSON.stringify(aplicados.rows));
+
+      // ---- e o 001 faz o que promete
+      await b.consultar(
+        "insert into auth.users (id, email, raw_user_meta_data) values "
+        + "('11111111-1111-1111-1111-111111111111', 'dono@escritorio.com', '{}'::jsonb)");
+      const primeiro = await b.consultar(
+        "select nome, email, admin, ativo from public.usuarios "
+        + "where id = '11111111-1111-1111-1111-111111111111'");
+      ok("quem entra vira gente: a linha nasce junto com a conta",
+         primeiro.rows.length === 1, JSON.stringify(primeiro.rows));
+      ok("o PRIMEIRO do banco administra (senão ninguém nunca administraria)",
+         primeiro.rows[0] && primeiro.rows[0].admin === true, JSON.stringify(primeiro.rows));
+
+      await b.consultar(
+        "insert into auth.users (id, email, raw_user_meta_data) values "
+        + "('22222222-2222-2222-2222-222222222222', 'atendente@escritorio.com', "
+        + "'{\"nome\": \"Maria\"}'::jsonb)");
+      const segundo = await b.consultar(
+        "select nome, admin from public.usuarios "
+        + "where id = '22222222-2222-2222-2222-222222222222'");
+      ok("o segundo NÃO nasce administrador",
+         segundo.rows[0] && segundo.rows[0].admin === false, JSON.stringify(segundo.rows));
+      ok("e o nome vem do cadastro quando ele existe",
+         segundo.rows[0] && segundo.rows[0].nome === "Maria", JSON.stringify(segundo.rows));
+
+      // ---- A PROPRIEDADE QUE MAIS IMPORTA: o gatilho nunca tranca a porta.
+      //
+      // No caminho COM Vantoro é a ponte que cria a conta no Auth na primeira
+      // entrada da vida de alguém. Um gatilho que estoure ali faz a criação
+      // inteira falhar — e o sintoma é "fulano não entra de jeito nenhum", no
+      // dia em que fulano foi contratado. Aqui a tabela some debaixo dele.
+      await b.consultar("drop table public.usuarios");
+      let contaCriada = true;
+      try {
+        await b.consultar(
+          "insert into auth.users (id, email, raw_user_meta_data) values "
+          + "('33333333-3333-3333-3333-333333333333', 'depois@escritorio.com', '{}'::jsonb)");
+      } catch (_e) { contaCriada = false; }
+      ok("o gatilho falhando NÃO impede a conta de ser criada", contaCriada);
+      if (t) await t.parar();
+    }
+
     // ---- 51l. sem a marca, o mesmo script é recusado ----
     {
       // A metade que prova que a marca faz alguma coisa. Sem esta, 51k passaria
