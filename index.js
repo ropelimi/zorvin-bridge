@@ -3186,30 +3186,124 @@ function segundosDaMidia(m, tipo) {
   return null;
 }
 
-// ------------------------------------------------------------
-//  Detecta se uma mensagem recebida é RESPOSTA (citação) a outra.
-//  O formato exato da Uazapi ainda não foi confirmado, então
-//  tentamos vários campos comuns; se não achar, retorna null.
-// ------------------------------------------------------------
+// ============================================================
+//  A CITAÇÃO, COMO A UAZAPI MANDA DE VERDADE
+//
+//  RELATO DE 15/09, com foto dos dois lados: uma resposta citando outra
+//  mensagem aparecia no WhatsApp com a citação, e no Zorvin como bolha solta.
+//
+//  Este trecho dizia, por escrito, que estava chutando: "o formato exato da
+//  Uazapi ainda não foi confirmado, então tentamos vários campos comuns". Ele
+//  tentava cinco nomes, e NENHUM acertava. MEDIDO no evento cru do relato:
+//
+//      "quoted": "3AE7DBB44DDDD3B8A1E8",          <- uma STRING
+//      "content": { "contextInfo": {
+//          "stanzaID":      "3AE7DBB44DDDD3B8A1E8",   <- "ID" maiúsculo
+//          "participant":   "271145613971676@lid",
+//          "quotedMessage": { "conversation": "Eu" }
+//      }}
+//
+//  ------------------------------------------------------------
+//  ERAM DOIS ERROS, E O PRIMEIRO ENVENENAVA TUDO
+//
+//  `ctx = m.quoted || ...` — e `m.quoted` é uma string PREENCHIDA, portanto
+//  verdadeira. `ctx` virava a string, e a busca parava ali: `ctx.stanzaId`,
+//  `ctx.text` e `ctx.quotedMessage` são todos indefinidos numa string. A
+//  função devolvia `null` e a citação sumia sem uma palavra em lugar nenhum.
+//
+//  O segundo: o campo é `stanzaID`, com D MAIÚSCULO, e o código procurava
+//  `stanzaId`. Mesmo com o objeto certo, o id não seria achado.
+//
+//  As colunas já existiam no banco — conferido em 15/09. O encanamento inteiro
+//  estava pronto, esperando uma leitura que nunca acertava o formato.
+//
+//  ------------------------------------------------------------
+//  A REGRA QUE FICA: `ctx` TEM DE SER OBJETO
+//
+//  Um `||` encadeado entre campos de tipos diferentes escolhe o primeiro
+//  verdadeiro, e não o primeiro ÚTIL. Foi assim que uma string entrou onde se
+//  esperava um objeto. Ao acrescentar candidato novo aqui, some à lista de
+//  objetos — e, se ele for um id solto, à lista de ids.
+// ============================================================
+function ehObjeto(v) { return v && typeof v === 'object' && !Array.isArray(v); }
+
 function extrairResposta(m) {
-  const ctx =
-    m.quoted || m.quotedMsg || m.contextInfo ||
-    (m.content && (m.content.contextInfo || m.content.quotedMessage)) || null;
-  if (!ctx) return null;
+  if (!m) return null;
+  // SÓ OBJETOS. `m.quoted` fica de fora desta lista de propósito: neste
+  // servidor ele é o ID da mensagem citada, e entra mais abaixo.
+  const ctx = [
+    m.content && m.content.contextInfo,
+    m.contextInfo,
+    m.quotedMsg,
+    m.content && m.content.quotedMessage,
+    ehObjeto(m.quoted) ? m.quoted : null,
+  ].find(ehObjeto) || null;
+
+  const citada = ctx && ehObjeto(ctx.quotedMessage) ? ctx.quotedMessage : null;
+
+  // O ID DA MENSAGEM CITADA. `stanzaID` é o nome medido neste servidor; os
+  // outros ficam porque não custam nada e cobrem um formato diferente sem
+  // precisar de outra rodada de diagnóstico.
   const idCitada =
-    ctx.stanzaId || ctx.quotedId || ctx.id || (ctx.key && ctx.key.id) ||
-    m.quotedMessageId || null;
+    (ctx && (ctx.stanzaID || ctx.stanzaId || ctx.quotedId || ctx.id
+             || (ehObjeto(ctx.key) && ctx.key.id)))
+    || (typeof m.quoted === 'string' ? m.quoted : null)
+    || m.quotedMessageId || null;
+
   const texto =
-    ctx.text || ctx.body || ctx.caption ||
-    (ctx.quotedMessage && (ctx.quotedMessage.conversation || ctx.quotedMessage.text)) ||
-    (typeof ctx.quotedMessage === 'string' ? ctx.quotedMessage : null);
+    (citada && (citada.conversation || citada.text || citada.caption))
+    || (ctx && (ctx.text || ctx.body || ctx.caption))
+    || (typeof (ctx && ctx.quotedMessage) === 'string' ? ctx.quotedMessage : null)
+    || null;
+
   if (!idCitada && !texto) return null;
+
+  // ------------------------------------------------------------
+  //  DE QUEM ERA A MENSAGEM CITADA
+  //
+  //  `ctx.fromMe` não existe neste formato — o antigo o consultava e recebia
+  //  `undefined`, o que fazia TODA citação virar 'contato' por descarte. Aqui
+  //  quase sempre acertava, e erraria calado justamente no caso de alguém do
+  //  escritório responder à própria mensagem: a tela diria o nome do cliente
+  //  onde devia dizer "Você".
+  //
+  //  Quem diz é `participant`: o autor da mensagem citada. E ele NÃO se compara
+  //  com o `owner` — no evento medido `participant` é um LID
+  //  ("271145613971676@lid") e `owner` é um telefone ("5511969401932"): os dois
+  //  nunca casariam, e a conta daria "é do cliente" sempre.
+  //
+  //  A comparação que fecha é com o REMETENTE DESTA mensagem. Se a citada é do
+  //  mesmo remetente, ela é do mesmo lado que esta; se é de outro, é do lado
+  //  oposto. Cruzando com `fromMe`, os quatro casos se resolvem sem precisar
+  //  saber que número pertence a quem:
+  //
+  //      esta é nossa (fromMe) + citada do mesmo remetente -> nossa
+  //      esta é nossa          + citada de outro           -> do cliente
+  //      esta é do cliente     + citada do mesmo remetente -> do cliente
+  //      esta é do cliente     + citada de outro           -> nossa
+  const deQuem = so(ctx && ctx.participant);
+  const desta = so(m.sender_lid || m.sender || m.sender_pn);
+  const estaEhNossa = m.fromMe === true;
+  let autor;
+  if (deQuem && desta) {
+    const mesmoLado = deQuem === desta;
+    autor = (mesmoLado === estaEhNossa) ? 'advogado' : 'contato';
+  } else {
+    // SEM `participant`, fica o palpite menos arriscado — o mesmo que o código
+    // fazia antes. Dizer o nome do cliente onde caberia "Você" incomoda; dizer
+    // "Você" numa mensagem do cliente faz a equipe ler a conversa ao contrário.
+    autor = (ctx && ctx.fromMe === true) ? 'advogado' : 'contato';
+  }
+
   return {
     responder_id_uazapi: idCitada || null,
     resposta_previa: texto ? String(texto).slice(0, 120) : null,
-    resposta_autor: ctx.fromMe === true ? 'advogado' : 'contato',
+    resposta_autor: autor,
   };
 }
+
+/** Só os dígitos, para comparar "5511969401932" com "5511969401932@lid". */
+function so(v) { return v ? String(v).split('@')[0].replace(/\D/g, '') : ''; }
 
 // ------------------------------------------------------------
 //  REAÇÃO: o emoji que alguém prende NUMA MENSAGEM QUE JÁ EXISTE.

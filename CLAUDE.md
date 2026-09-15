@@ -400,6 +400,66 @@ um botão que ninguém pode usar.
 
 Prova: `o-vocabulario`, no repo do painel.
 
+## A citação — o formato que a Uazapi manda de verdade
+
+Relato de 15/09, com foto dos dois lados: uma resposta citando outra mensagem
+aparecia no WhatsApp com a citação, e no Zorvin como **bolha solta**.
+
+`extrairResposta` dizia, por escrito, que estava chutando: *"o formato exato da
+Uazapi ainda não foi confirmado, então tentamos vários campos comuns"*. Tentava
+cinco nomes, e **nenhum acertava**. MEDIDO no evento cru do relato:
+
+```jsonc
+"quoted": "3AE7DBB44DDDD3B8A1E8",            // uma STRING, não um objeto
+"content": { "contextInfo": {
+    "stanzaID":      "3AE7DBB44DDDD3B8A1E8", // "ID" MAIÚSCULO
+    "participant":   "271145613971676@lid",  // um LID, não um telefone
+    "quotedMessage": { "conversation": "Eu" }
+}}
+```
+
+**Eram três erros, e o primeiro envenenava tudo.**
+
+1. `ctx = m.quoted || …` — e `m.quoted` é uma string **preenchida**, portanto
+   verdadeira. `ctx` virava a string, e `ctx.stanzaId`, `ctx.text` e
+   `ctx.quotedMessage` são todos indefinidos numa string. A função devolvia
+   `null` e a citação sumia sem uma palavra em lugar nenhum.
+2. O campo é `stanzaID`, com **D maiúsculo**; o código procurava `stanzaId`.
+3. O autor da citada saía de `ctx.fromMe`, que **não existe** neste formato:
+   toda citação virava `'contato'` por descarte. Acertava quase sempre, e
+   erraria calado justamente quando alguém do escritório respondesse à própria
+   mensagem — a tela diria o nome do cliente onde devia dizer "Você".
+
+**As colunas já existiam** (`resposta_previa`, `resposta_autor`,
+`responder_id_uazapi`) — conferido no banco em 15/09. O encanamento inteiro
+estava pronto, esperando uma leitura que nunca acertava o formato.
+
+**A regra que fica:** `ctx` tem de ser **objeto**. Um `||` encadeado entre
+campos de tipos diferentes escolhe o primeiro **verdadeiro**, e não o primeiro
+**útil** — foi assim que uma string entrou onde se esperava um objeto. Ao
+acrescentar candidato, some à lista de objetos; se for um id solto, à lista de
+ids.
+
+**E o autor não se compara com `owner`:** `participant` vem como **LID**
+(`271145613971676@lid`) e `owner` é telefone (`5511969401932`) — nunca casariam,
+e a conta daria "é do cliente" sempre. A comparação que fecha é com o
+**remetente desta mensagem**, cruzada com `fromMe`: quatro casos resolvidos sem
+saber que número pertence a quem.
+
+Prova: seção 54, seis conferências, **quatro delas sobre o evento de verdade**,
+copiado de `eventos_recebidos`. Quatro sabotagens, quatro pegas.
+
+**Uma delas só existe porque a sabotagem a exigiu:** "nós respondendo à NOSSA
+própria mensagem" é o único caso em que a resposta é `'advogado'`. Sem ela,
+todas as conferências de autor esperavam `'contato'` — e a sabotagem que fazia
+tudo virar `'contato'` (o defeito antigo, exatamente) **passava**. Prova em que
+todas as respostas certas são iguais não separa o certo do errado.
+
+**Em aberto, e é empírico:** há **uma** amostra, de resposta a **texto**. Uma
+citação de foto ou áudio deve trazer outra forma em `quotedMessage`, e a prévia
+pode sair vazia — a bolha então não mostra a citação, que é o comportamento de
+hoje (sem piora). Fechar isso depende de um evento real desse caso.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
