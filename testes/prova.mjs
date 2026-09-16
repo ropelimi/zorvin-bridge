@@ -7336,5 +7336,187 @@ console.log("\n53. Respondeu pelo celular, a conversa fica lida");
   }
 }
 
+// ============================================================
+//  54. A CITAÇÃO, COMO A UAZAPI MANDA DE VERDADE
+//
+//  RELATO DE 15/09, com foto dos dois lados: uma resposta citando outra
+//  mensagem aparecia no WhatsApp com a citação, e no Zorvin como bolha solta.
+//
+//  O EVENTO ABAIXO É O DE VERDADE, tirado de `eventos_recebidos` no banco do
+//  escritório. Ele existe aqui porque o código que ele exercita dizia, por
+//  escrito, que estava chutando o formato — e chutava errado.
+// ============================================================
+console.log("\n54. A citação que a Uazapi manda");
+{
+  // Copiado do evento cru, com os campos que não importam removidos.
+  const RESPOSTA_DE_VERDADE = {
+    id: "5511969401932:3A93F4B97D991D88BE17",
+    messageid: "3A93F4B97D991D88BE17",
+    text: "Onde",
+    type: "text",
+    owner: "5511969401932",
+    chatid: "5511970598987@s.whatsapp.net",
+    fromMe: false,
+    // A ARMADILHA: uma STRING preenchida, portanto verdadeira. Era ela que
+    // envenenava o `ctx = m.quoted || ...` e fazia a busca parar numa string.
+    quoted: "3AE7DBB44DDDD3B8A1E8",
+    sender: "271145613971676@lid",
+    sender_pn: "5511970598987@s.whatsapp.net",
+    sender_lid: "271145613971676@lid",
+    senderName: "Rodrigo",
+    content: {
+      text: "Onde",
+      contextInfo: {
+        // "ID" MAIÚSCULO. O código procurava `stanzaId`.
+        stanzaID: "3AE7DBB44DDDD3B8A1E8",
+        quotedType: 0,
+        participant: "271145613971676@lid",
+        quotedMessage: { conversation: "Eu" },
+      },
+    },
+    messageType: "ExtendedTextMessage",
+    wasSentByApi: false,
+    messageTimestamp: 1789500309000,
+  };
+
+  const t = await subirTudo({}, {
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511970598987", nome: "Rodrigo" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 0,
+                    ultima_atividade: new Date().toISOString() }],
+    },
+  });
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      EventType: "messages",
+      owner: TELEFONE.numero,
+      chat: { phone: "5511970598987", wa_name: "Rodrigo" },
+      message: { ...RESPOSTA_DE_VERDADE, owner: TELEFONE.numero },
+    }),
+  });
+  await espera(800);
+
+  const msg = t.sb.dados.mensagens.find((m) => m.texto === "Onde");
+  ok("a resposta entra na conversa", !!msg,
+     JSON.stringify(t.sb.dados.mensagens.map((m) => m.texto)));
+  // A CONFERÊNCIA DO RELATO: sem isto, a bolha nasce solta e quem lê não sabe
+  // a que o cliente está respondendo.
+  ok("e ela traz o TEXTO da mensagem citada",
+     msg && msg.resposta_previa === "Eu", JSON.stringify(msg && msg.resposta_previa));
+  // O ID É O QUE LIGA UMA BOLHA À OUTRA. Com o texto e sem o id, a tela mostra
+  // a citação mas não leva até ela.
+  ok("e o ID dela, de `stanzaID` (com D maiúsculo)",
+     msg && msg.responder_id_uazapi === "3AE7DBB44DDDD3B8A1E8",
+     JSON.stringify(msg && msg.responder_id_uazapi));
+  // NESTE EVENTO a citada é do MESMO remetente desta, e esta é do cliente —
+  // então a citada é do cliente. Dizer "Você" aqui faria a equipe ler a
+  // conversa ao contrário.
+  ok("e diz que a citada é do cliente, não nossa",
+     msg && msg.resposta_autor === "contato", JSON.stringify(msg && msg.resposta_autor));
+  await t.parar();
+}
+
+{
+  // A MESMA RESPOSTA, MAS NOSSA — e esta cena é DERIVADA, não medida.
+  //
+  // Não há evento real deste caso em mãos. A primeira versão dela trocava só
+  // `fromMe` e deixava o `sender_lid` do CLIENTE, e reprovou com razão: o
+  // evento se contradizia (se fomos nós que enviamos, o remetente não é o
+  // cliente), e o código respondeu de forma coerente ao dado impossível.
+  //
+  // A ÚNICA SUPOSIÇÃO QUE ELA CARREGA é definição, e não palpite sobre a
+  // Uazapi: quando quem envia somos nós, o remetente não é o cliente. O
+  // identificador exato do nosso lado não importa aqui — importa ser OUTRO.
+  //
+  // Sem esta cena, "sempre 'contato'" passaria igual, que era exatamente o
+  // defeito antigo: `ctx.fromMe` não existe neste formato, então TODA citação
+  // virava 'contato' por descarte — e erraria calado justamente quando alguém
+  // do escritório respondesse à própria mensagem.
+  const t = await subirTudo({}, {
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511970598987", nome: "Rodrigo" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 0,
+                    ultima_atividade: new Date().toISOString() }],
+    },
+  });
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      EventType: "messages",
+      owner: TELEFONE.numero,
+      chat: { phone: "5511970598987", wa_name: "Rodrigo" },
+      message: {
+        id: "x2", messageid: "x2", text: "Respondi do celular", type: "text",
+        owner: TELEFONE.numero, fromMe: true, wasSentByApi: false,
+        quoted: "3AE7DBB44DDDD3B8A1E8",
+        // O NOSSO lado: outro identificador, que é o que a realidade garante.
+        sender: "999888777666555@lid", sender_lid: "999888777666555@lid",
+        sender_pn: "5511970598987@s.whatsapp.net",
+        messageTimestamp: Date.now(),
+        content: { text: "Respondi do celular", contextInfo: {
+          stanzaID: "3AE7DBB44DDDD3B8A1E8",
+          // O MESMO remetente da mensagem citada de antes: o cliente.
+          participant: "271145613971676@lid",
+          quotedMessage: { conversation: "Eu" },
+        } },
+      },
+    }),
+  });
+  await espera(800);
+  const msg = t.sb.dados.mensagens.find((m) => m.texto === "Respondi do celular");
+  ok("respondendo NÓS a uma mensagem do cliente, a citada é do cliente",
+     msg && msg.resposta_autor === "contato", JSON.stringify(msg && msg.resposta_autor));
+  await t.parar();
+}
+
+{
+  // NÓS RESPONDENDO À NOSSA PRÓPRIA MENSAGEM — e esta cena existe porque a
+  // SABOTAGEM mostrou que ela faltava.
+  //
+  // As duas cenas acima esperam 'contato'. Sabotei o cálculo do autor para
+  // devolver 'contato' SEMPRE — que é o defeito antigo, `ctx.fromMe` num
+  // formato onde esse campo não existe — e as duas passaram. Uma prova em que
+  // todas as respostas certas são iguais não separa o certo do errado.
+  //
+  // É também o único caso em que a tela escreve "Você", e o que o comentário
+  // do conserto aponta como o erro calado: mostrar o nome do cliente onde
+  // devia dizer "Você".
+  const t = await subirTudo({}, {
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511970598987", nome: "Rodrigo" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 0,
+                    ultima_atividade: new Date().toISOString() }],
+    },
+  });
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      EventType: "messages",
+      owner: TELEFONE.numero,
+      chat: { phone: "5511970598987", wa_name: "Rodrigo" },
+      message: {
+        id: "x3", messageid: "x3", text: "Complementando o que falei", type: "text",
+        owner: TELEFONE.numero, fromMe: true, wasSentByApi: false,
+        quoted: "NOSSA-ANTERIOR",
+        sender: "999888777666555@lid", sender_lid: "999888777666555@lid",
+        sender_pn: "5511970598987@s.whatsapp.net",
+        messageTimestamp: Date.now(),
+        content: { text: "Complementando o que falei", contextInfo: {
+          stanzaID: "NOSSA-ANTERIOR",
+          // O MESMO remetente desta mensagem: fomos nós as duas vezes.
+          participant: "999888777666555@lid",
+          quotedMessage: { conversation: "Bom dia, doutor" },
+        } },
+      },
+    }),
+  });
+  await espera(800);
+  const msg = t.sb.dados.mensagens.find((m) => m.texto === "Complementando o que falei");
+  ok("respondendo NÓS à NOSSA própria mensagem, a citada é nossa",
+     msg && msg.resposta_autor === "advogado", JSON.stringify(msg && msg.resposta_autor));
+  await t.parar();
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
