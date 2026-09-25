@@ -1107,6 +1107,25 @@ app.get('/importar-historico', async (req, res) => {
       }).eq('id', conv.id);
     }
 
+    // E RECONTA A ESPERA DESTA CONVERSA, DO ZERO.
+    //
+    // O gatilho `zorvin_espera` é incremental, e incremental depende da ORDEM
+    // em que as mensagens entram. Aqui elas entram fora de ordem por desenho:
+    // o histórico é o passado chegando depois do presente. O gatilho já se
+    // defende dos dois enganos piores (não põe na fila quem já foi respondido,
+    // não tira da fila quem não foi), mas a conta certa, depois de um lote
+    // inteiro, é a que recalcula tudo.
+    //
+    // FALHAR AQUI NÃO DERRUBA A IMPORTAÇÃO. A função só existe depois do
+    // script 004; sem ele, a coluna também não existe e não há o que recontar.
+    // É a mesma régua de sempre: sem o script, tudo como antes.
+    try {
+      const { error: erroEspera } = await supabase.rpc('zorvin_recontar_espera', { p_conversa: conv.id });
+      if (erroEspera) console.log('Histórico: não recontei a espera —', erroEspera.message);
+    } catch (e) {
+      console.log('Histórico: não recontei a espera —', e.message);
+    }
+
     console.log(`Histórico: ${importadas} novas de ${vistas} vistas (contato ${contatoNumero}).`);
     const sobreArquivos = comArquivo || semArquivo
       ? ` Guardei ${comArquivo} arquivo(s)`
