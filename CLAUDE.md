@@ -525,6 +525,66 @@ num cliente novo, cujo banco ainda não tem esquema nenhum.
 
 Prova do lado do painel: `a-espera-comeca-na-primeira`.
 
+## "Já tratei" — a fila precisa de uma saída que não seja mandar mensagem
+
+A fila do script 004 nasceu com **813 conversas**, e perguntar ao banco o que
+elas são mudou o desenho:
+
+| | quantas |
+|---|---|
+| nós respondemos e o cliente escreveu de volta | **601** |
+| nunca respondemos nada | 214 |
+
+E o que o cliente escreveu por último, nas 601: **`[anexo]` em 99** — o maior
+grupo de todos —, "ok" em 42, "boa tarde" em 22, "bom dia" em 12, "obrigada"
+em 9.
+
+**A suposição de quem escreveu isto estava errada, e a medição corrigiu.** Eu
+imaginava a fila entupida de agradecimentos. Somando as vinte frases mais
+comuns, ~140 são espera **de verdade** (o anexo é documento de cliente sem
+confirmação de recebimento; "bom dia" é uma conversa que começou e ninguém
+atendeu) contra ~94 despedidas. A fila estava certa; o que faltava era **uma
+saída para as 94**.
+
+### `conversas.tratada_em` é "a nossa última ação", e não uma segunda fila
+
+O script 004 define a espera como *"a primeira mensagem do cliente depois da
+NOSSA ÚLTIMA RESPOSTA"*. "Já tratei" é isso mesmo — nós agimos, sem mandar
+mensagem. Então ele **não ganha conta própria**: entra por um `greatest` ao
+lado da última mensagem nossa. `greatest` ignora nulos no Postgres, e é disso
+que a conta vive.
+
+**A tela apagar `esperando_desde` e pronto NÃO funcionaria**, e é o motivo de
+existir uma coluna: `zorvin_recontar_espera()` recalcula do zero, e depois de
+uma importação de histórico devolveria à fila tudo o que a equipe tratou —
+semanas de trabalho desfeitas sem nada na tela dizendo por quê.
+
+### Desfazer não é luxo
+
+Marcar por engano faz um cliente **sumir da fila em silêncio**, que é o pior
+desfecho deste sistema com outra roupa. Então `tratada_em` volta a nulo, a
+recontagem recoloca a conversa com a espera **original** (medido: 21/09 09h, e
+não "agora"), e a linha do tratamento ganha `desfeito_em` **em vez de sumir** —
+quem desfez e quando é justamente o que se pergunta depois.
+
+### Duas decisões pequenas que evitam buraco no relatório
+
+- **Assunto não se apaga, desativa-se.** Não existe política de DELETE em
+  `zorvin_assuntos`, e não é esquecimento: apagar deixaria tratamentos antigos
+  apontando para o nada. O índice único é sobre `lower(nome) where ativo`, e
+  não sobre todos — reaproveitar um nome desativado é legítimo.
+- **Desfazer é `grant update (desfeito_em, desfeito_por)`**, por COLUNA. A
+  política libera a linha; só o grant por coluna impede reescrever o assunto ou
+  a data de um tratamento antigo.
+
+E **responder limpa o tratamento junto**: sem isso um `tratada_em` de agosto
+continuaria valendo como "a nossa última ação" e seguraria fora da fila uma
+mensagem de setembro.
+
+SQL: `sql/automaticos/005-ja-tratei.sql`. Conferido num Postgres 16 de verdade
+— sete cenas, mais banco vazio, reaplicação, e o assunto desativado que **não
+ressuscita** ao rodar o script de novo.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
