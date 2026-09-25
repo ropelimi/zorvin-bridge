@@ -460,6 +460,71 @@ citação de foto ou áudio deve trazer outra forma em `quotedMessage`, e a pré
 pode sair vazia — a bolha então não mostra a citação, que é o comportamento de
 hoje (sem piora). Fechar isso depende de um evento real desse caso.
 
+## A espera do cliente — a coluna que o gatilho mantém
+
+Pedido de 25/09: as atendentes do SAC trabalham de baixo para cima numa lista
+ordenada pela **última** mensagem, e é isso que erra. O cliente que escreveu
+21/09 e de novo 24/09 aparece como "24/09", no meio dos que acabaram de chegar
+— quando está esperando há quatro dias.
+
+`conversas.esperando_desde` guarda a **primeira** mensagem do cliente depois da
+nossa última resposta. Escrever de novo não reinicia a espera de ninguém — e é
+por isso que existe uma coluna, em vez de a tela fazer a conta com
+`ultima_atividade`. SQL: `sql/automaticos/004-a-espera-comeca-na-primeira.sql`.
+
+**Dois casos foram conferidos no código antes de escrever o gatilho**: a nota
+interna mora em `notas` e não em `mensagens`, então ele nunca a vê (e o cliente
+também não); e a resposta que **falhou** não zera a espera, porque
+`salvarMensagem` só grava depois que o WhatsApp aceita — a bolha vermelha vive
+em `fila_envio`.
+
+### O gatilho é incremental, e a importação de histórico é o passado chegando depois
+
+**MEDIDO em 25/09, num Postgres de verdade:** sem a pergunta *"esta mensagem já
+foi respondida?"*, uma conversa **já atendida** que recebesse histórico
+importado de 2024 passava a esperar desde 2024 — **630 dias** — e ia para o
+**topo** da fila do SAC. A fila existe para dizer quem está mais abandonado, e o
+primeiro lugar dela seria um cliente já atendido.
+
+Isso não é caso raro: a importação grava o horário de **quando a mensagem foi
+enviada** (`horarioDeQuemEnviou`), e não o de agora. Mensagem de cliente com
+data velha entrando hoje é o caso comum dela.
+
+São **duas** perguntas, e a segunda é o espelho da primeira:
+
+| o que entra | o gatilho |
+|---|---|
+| mensagem de cliente **anterior** a uma resposta nossa | não põe na fila |
+| resposta nossa **anterior** à espera em curso | não tira da fila |
+
+O erro do segundo seria o pior dos dois: a conversa **sumiria** da fila, em vez
+de aparecer errada nela.
+
+**E `/importar-historico` reconta a espera do lote inteiro no fim**
+(`zorvin_recontar_espera(conversa_id)`, por RPC). O gatilho se defende dos dois
+enganos piores, mas a conta certa depois de um lote é a que recalcula tudo do
+zero. **Falhar ali não derruba a importação**: sem o script 004 a função não
+existe, e a coluna também não — a régua de sempre.
+
+**Só `'advogado'` limpa**, e está escrito assim de propósito: um `else` faria
+qualquer origem futura (`'sistema'`, aviso automático) zerar a espera de um
+cliente que continua sem resposta.
+
+**O corpo inteiro do gatilho vive num `exception when others`**, como o do
+script 001 e pelo mesmo motivo: um gatilho que estoura derruba o `INSERT` da
+mensagem. Perder a ordem da fila é incômodo; perder a mensagem do cliente é o
+pior desfecho deste sistema.
+
+**O script inteiro vive dentro de um bloco guardado**, e foi a prova 51l-bis que
+exigiu: ela aplica `sql/automaticos/` num banco **limpo**, onde `conversas` não
+existe — as tabelas do Zorvin estão nos 37 scripts de `sql/`, que são história.
+A saída fácil seria a prova criar aquelas tabelas, o que é escrever uma **segunda
+definição** delas, para divergir da de produção no primeiro conserto. Então o
+script desiste em silêncio quando as tabelas não existem — que também é o certo
+num cliente novo, cujo banco ainda não tem esquema nenhum.
+
+Prova do lado do painel: `a-espera-comeca-na-primeira`.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
