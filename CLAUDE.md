@@ -626,6 +626,48 @@ automação de `sql/automaticos/` está escrita, provada e desligada em produç�
 enquanto for assim, todo script novo é um pedido ao Rodrigo, e vale o que está
 escrito acima.
 
+## As provas rodavam duas vezes, e a franquia da conta acabou
+
+**MEDIDO em 28/09**, com a página de cobrança do GitHub aberta: **2.000 de
+2.000 minutos usados**, com reposição em 3 dias. E o efeito não foi um aviso —
+foi as provas **pararem de rodar nos dois repositórios desde 25/09**, com os
+trabalhos falhando em 5 segundos, **sem log e sem passo nenhum**.
+
+**Aquilo tem cara de defeito de código, e eu cheguei a procurar defeito no
+código.** O que resolveu foi comparar horários: às 21:00 uma rodada do painel
+fechou verde em 30 minutos; às **21:44:49** a da ponte falhou em 5s e às
+**21:44:57** a do painel falhou em 4s. Dois repositórios diferentes parando no
+mesmo minuto é conta, não código — e trabalho sem passo nenhum é trabalho que
+nunca foi despachado.
+
+A conta que estourou:
+
+| | tempo |
+|---|---|
+| painel, na PR | ~29 min |
+| painel, **de novo** depois do merge | ~29 min |
+| ponte, na PR | ~7 min |
+| ponte, **de novo** depois do merge | ~7 min |
+| **por entrega** | **~72 min** → 28 entregas/mês |
+
+**A rodada do `push: main` saiu.** Ela existia por uma razão verdadeira — duas
+PRs verdes separadas podem se somar numa `main` vermelha —, mas testava de
+novo, minutos depois, o mesmo código que a PR tinha acabado de aprovar. E uma
+proteção que se desliga sozinha por falta de minutos protege menos do que uma
+que roda. Agora são ~36 min por entrega, ou ~55 entregas.
+
+**O risco que ela cobria não ficou descoberto.** Entrou uma **rodada semanal**
+(segunda de manhã) mais o disparo à mão. Neste repositório o caso que ela pega
+não é hipótese: foi a estreia deste arquivo que descobriu que **a ponte não
+sobe no Node 20**, e o `package-lock.json` está no `.gitignore` — `npm install`
+traz o que houver no dia, então a `main` parada pode quebrar sozinha.
+
+**A lição maior é a de sempre nesta casa, com outra roupa:** o alarme ficou
+três dias desligado e ninguém soube. Ao mexer em qualquer coisa que AVISA,
+pergunte quanto ela custa para continuar de pé — e o que se vê no dia em que
+ela parar. Aqui o que se via era um X vermelho igual ao de um defeito de
+verdade.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
