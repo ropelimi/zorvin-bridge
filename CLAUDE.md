@@ -585,6 +585,47 @@ SQL: `sql/automaticos/005-ja-tratei.sql`. Conferido num Postgres 16 de verdade
 — sete cenas, mais banco vazio, reaplicação, e o assunto desativado que **não
 ressuscita** ao rodar o script de novo.
 
+## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
+
+Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
+delas era defeito de SQL. A causa, medida no fim: **o editor do Supabase
+mostra só o resultado do ÚLTIMO comando**, e eu vinha mandando o script numa
+mensagem e a conferência em outra. O Rodrigo rodava ora uma, ora outra — e a
+parte que criava as tabelas nunca chegou a rodar inteira, enquanto a
+conferência dizia, corretamente, que nada existia.
+
+Pior: cada resposta parecia um defeito novo, e eu chutei duas causas erradas
+(`zorvin_admin()` que não existia, a guarda do bloco `do`) antes de perceber
+que o problema era **o formato do pedido**, não o conteúdo dele.
+
+**A régua, daqui para a frente:**
+
+1. **Um bloco só por mensagem.** Nunca o script e a conferência separados —
+   ele não sabe, e não tem por que saber, que o editor só mostra o último
+   resultado.
+2. **A conferência é a ÚLTIMA LINHA do próprio script**, um `select` com uma
+   coluna por coisa que deveria existir. Assim o que aparece na tela ao apertar
+   Run já é a resposta de *"deu certo?"* — sem um segundo passo, sem depender
+   de ele copiar o aviso verde, que some.
+3. **O script vai no texto da mensagem**, em bloco de código. Saída de
+   ferramenta não chega a ele.
+4. **Diga que pode rodar de novo sem medo**, e garanta que é verdade
+   (`if not exists`, `create or replace`, `drop policy if exists`).
+
+**E uma coisa que o editor faz e assusta:** ele roda tudo numa transação só.
+Um comando que falha no meio desfaz os anteriores — então "a tabela não existe"
+depois de um erro **não** quer dizer que a criação falhou; quer dizer que algo
+depois dela falhou e levou a criação junto. Ao diagnosticar, peça a mensagem de
+erro **inteira** antes de formular hipótese: as duas que formulei sem ela
+estavam erradas.
+
+**Fato lateral medido no mesmo dia:** `zorvin_scripts_aplicados` **não existe**
+no banco do escritório, ou seja, `DATABASE_URL` não está no Render e a ponte
+**nunca aplicou script sozinha**. Tudo o que está lá foi colado à mão. A
+automação de `sql/automaticos/` está escrita, provada e desligada em produção —
+enquanto for assim, todo script novo é um pedido ao Rodrigo, e vale o que está
+escrito acima.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
