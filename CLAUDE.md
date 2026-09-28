@@ -585,6 +585,82 @@ SQL: `sql/automaticos/005-ja-tratei.sql`. Conferido num Postgres 16 de verdade
 — sete cenas, mais banco vazio, reaplicação, e o assunto desativado que **não
 ressuscita** ao rodar o script de novo.
 
+### A espera não começa no rabicho da conversa já atendida
+
+Relato de 28/09, com foto: a conversa da ANDREIA dizia **"esperando há 6
+dias"**. O que houve nela:
+
+| quando | quem | o quê |
+|---|---|---|
+| 22/09 13:36 | **nós** | "Estamos trabalhando para que dê certo!" |
+| 22/09 13:37 | ela | "Tomara a Deus" |
+| 28/09 14:40 | ela | "Boa tarde" / "Temos alguma movimentação" |
+
+Pela regra do 004 — *a primeira mensagem do cliente depois da nossa última
+resposta* — a espera começa às 13:37, **um minuto** depois da resposta. Isso é
+o **rabicho** de uma conversa atendida, e não uma espera. **Reproduzido num
+Postgres de verdade antes de escrever o conserto:** o gatilho devolvia
+exatamente 22/09 13:37. O defeito não era do gatilho, era da definição.
+
+**A regra nova:** a espera começa na primeira mensagem do cliente que chega
+**mais de 30 minutos** depois da nossa última ação (resposta ou "já tratei").
+**E tem um encosto:** se NENHUMA mensagem dela chegar depois desses 30
+minutos, vale a regra de antes. Sem ele, quem pergunta cinco minutos depois da
+nossa resposta e some **sairia da fila para sempre**, calado — o pior desfecho
+deste sistema. Com ele, o pior caso da mudança é uma conversa continuar como
+está hoje.
+
+**Os 30 minutos foram MEDIDOS, e contra a sugestão de 48 horas.** Sobre as 832
+conversas da fila, testando quatro janelas:
+
+| janela | mudariam | ficam como hoje | dias a menos, em média |
+|---|---|---|---|
+| **30 min** | **93** | 311 | **4,6** |
+| 2 h | 96 | 405 | 5,9 |
+| 12 h | 92 | 452 | 6,6 |
+| 48 h | 74 | 497 | 9,8 |
+
+**Quantas conversas mudam quase não depende da janela; quanto tempo é apagado,
+sim.** Janela grande não conserta mais casos — apaga mais dias de cada um. E
+na amostra de 48 h os textos pulados incluíam *"Porfavor avisa ao financeiro
+que minha c…"* e *"E agr qual o próximo passo pois já fazem…"*, que são
+pedidos de verdade. A régua da casa decide: janela curta demais deixa ruído
+**visível**, com saída pronta ("Já tratei"); janela longa demais apaga espera
+**em silêncio**.
+
+**O número mora em `zorvin_carencia_da_espera()`**, uma função só. Trocá-lo é
+um `create or replace` de uma linha mais `select zorvin_recontar_espera();` —
+sem script novo. Escrito assim porque é palpite calibrado por medição, e não
+lei da natureza.
+
+**E o gatilho precisou de uma espera PROVISÓRIA**, que é a parte não óbvia.
+Ele vê uma mensagem por vez e não sabe o futuro: quando o "Tomara a Deus"
+chega, o "Boa tarde" de seis dias depois ainda não existe, e pelo encosto ele
+TEM de entrar na fila. Então a espera nascida **dentro** da carência é
+provisória, e a primeira mensagem que chega **fora** dela a substitui; a
+nascida fora é definitiva e aí vale o `least` de sempre (escrever de novo não
+reinicia). Como se sabe qual é qual sem coluna nova: a provisória é a que cabe
+dentro de `nossa última ação + carência`.
+
+SQL: `sql/automaticos/006-a-espera-nao-comeca-no-rabicho.sql`. **Ele reconta a
+fila inteira ao instalar** — sem isso a regra nova valeria só para o que
+chegasse depois, e a tela seguiria dizendo "6 dias" na conversa do relato.
+
+**A conferência do fim virou tabela temporária, e foi uma medição que exigiu:**
+um `select count(*) from public.conversas` solto no fim **estoura num banco
+limpo**, porque o Postgres confere o nome da tabela ao PREPARAR a consulta —
+um script que deveria desistir em silêncio derrubaria a prova 51l-bis. Com a
+tabela temporária o arquivo continua sendo **um só**: o que vai para o Rodrigo
+é byte por byte o que está no repositório.
+
+Conferido num Postgres 16 de verdade: 10 cenas (inclusive a recontagem tendo
+de concordar com o gatilho), banco vazio, reaplicação, e **5 sabotagens com 5
+pegas**. Uma delas vazou primeiro e ensinou de novo a régua de sempre: a
+sabotagem que tirava a recontagem da instalação passava, porque a bancada
+aplicava o script num banco **vazio** e só depois inseria as mensagens — um
+caminho que o cenário não exercitava. Entrou a cena da migração (fila já
+cheia, com a data velha) e ela pegou.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
