@@ -19,10 +19,36 @@ name: Provas
 on:
   # Toda PR, antes do merge: é aqui que o defeito é barato.
   pull_request:
-  # E também no que já entrou na `main`. Duas PRs verdes separadas podem se
-  # somar numa `main` vermelha, e sem isto ninguém ficaria sabendo.
-  push:
-    branches: [main]
+
+  # A RODADA DEPOIS DO MERGE SAIU, E O MOTIVO FOI MEDIDO EM 28/09.
+  #
+  # Ela existia porque duas PRs verdes separadas podem se somar numa `main`
+  # vermelha — o que é verdade, e continua sendo. O que ficou claro é o PREÇO:
+  # ela dobrava o consumo, testando de novo, minutos depois, o mesmo código que
+  # a PR tinha acabado de aprovar.
+  #
+  # Medido: ~29 min por rodada do painel e ~7 desta, duas vezes cada = ~72 min
+  # por entrega. A franquia da conta é de 2.000 min/mês, então dava 28
+  # entregas. Em 25/09 ela acabou, e as provas PARARAM DE RODAR nos dois
+  # repositórios por três dias — sem que ninguém percebesse, porque o trabalho
+  # falhava em 5 segundos, sem log, com cara de defeito de código.
+  #
+  # Uma proteção que se desliga sozinha por falta de minutos protege menos do
+  # que uma que roda. Com o corte são ~36 min por entrega, ou ~55 entregas.
+  #
+  # E O RISCO QUE ELA COBRIA NÃO FICOU DESCOBERTO: aqui é uma pessoa mesclando
+  # uma PR de cada vez, então a soma de duas PRs é rara — e a rodada semanal
+  # abaixo a pega, além de pegar o que a rodada de PR nunca pegaria, que é uma
+  # versão nova de dependência quebrando a `main` parada. Neste repositório
+  # isso não é hipótese: foi assim que a estreia deste arquivo descobriu que a
+  # ponte NÃO SOBE no Node 20 (ver o comentário do `node-version` abaixo), e o
+  # `package-lock.json` está no `.gitignore`, então `npm install` traz o que
+  # houver no dia.
+  schedule:
+    - cron: '17 9 * * 1'
+
+  # E à mão, para quando alguém quiser conferir a `main` sem esperar segunda.
+  workflow_dispatch:
 
 # Empurrou de novo antes de a rodada anterior terminar? A velha é cancelada.
 # Sem isto, três correções seguidas numa PR viram três rodadas na fila, e a
