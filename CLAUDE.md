@@ -661,6 +661,59 @@ aplicava o script num banco **vazio** e só depois inseria as mensagens — um
 caminho que o cenário não exercitava. Entrou a cena da migração (fila já
 cheia, com a data velha) e ela pegou.
 
+## A linha que voltou não fica caída
+
+Relato de 29/09, com foto: a faixa vermelha do painel dizia *"A linha de SAC
+está desconectada do WhatsApp. Nada sai por ela até alguém reconectar o
+aparelho."* — **e o aparelho já tinha sido reconectado e testado**. Pedido
+dele: *"Remova a mensagem, pois ela nos atrapalha a usar o sistema."*
+
+**A frase era falsa, e por isso ela saiu — não por incomodar.** O sinal
+`linhas_caidas` de `zorvin_saude()` deduzia "está caída" olhando **só para o
+passado**: mensagens que falharam com erro de desconexão nos últimos 30
+minutos. Não havia pergunta nenhuma sobre o presente, então a única saída do
+aviso era o **relógio** — meia hora de faixa vermelha depois de o problema ter
+acabado.
+
+**O script original já previa isto e escolheu conviver:** *"mais longo
+manteria o aviso na tela depois de o aparelho voltar"*. A escolha estava
+errada. Alarme que não pede ação de quem lê se aprende a ignorar, e aí o
+próximo passa batido junto.
+
+**Agora a linha só conta como caída se não deu SINAL DE VIDA depois do último
+erro**, e são dois, os dois fatos do banco:
+
+| prova de vida | por que vale |
+|---|---|
+| uma mensagem que **saiu** por ela (`fila_envio` = `enviada`) | a ponte só marca assim depois de a Uazapi aceitar — é o contrário exato do que a faixa afirma |
+| uma mensagem que **chegou** por ela | o webhook só dispara com o aparelho conectado |
+
+A segunda é mais fraca (receber não é enviar) **e entra assim mesmo**, por
+duas razões: é a que aparece primeiro numa linha de SAC, e o erro dela se
+conserta sozinho — se a linha recebe e não envia, o próximo envio falha, grava
+um erro NOVO, e o aviso volta. O que não se conserta sozinho é o alarme de pé
+sem ter o que pedir a quem lê.
+
+**A janela de 30 minutos FICA**, como teto: a prova de vida é a saída rápida.
+Tirá-la deixaria sem aviso a linha que caiu de madrugada e não teve movimento
+nenhum até de manhã.
+
+SQL: `sql/automaticos/007-a-linha-que-voltou-nao-fica-caida.sql`. Conferido num
+**Postgres 16 de verdade**: 9 cenas, banco vazio, reaplicação, e **5 sabotagens
+com 5 pegas**.
+
+**E uma cena minha nasceu mentindo.** "Voltou e caiu de novo" tinha o erro novo
+em `now() - 1 minute` e o envio bom em `now()` — ou seja, na linha do tempo o
+envio era o evento MAIS RECENTE, e a faixa sumir estava certo. Eu ia consertar
+a consulta por causa de um cenário que dizia uma coisa e media outra. **Cena
+que não expressa o que o nome dela promete é pior do que cena nenhuma:** ela
+manda consertar o que não está quebrado.
+
+**E a conferência do fim nasce ANTES da guarda**, e isso é a lição do 006
+repetida: criando a tabela temporária só depois, o `select` da última linha
+estoura num banco limpo — um script que deveria desistir em silêncio derrubaria
+a prova 51l-bis. Aconteceu na primeira escrita deste arquivo.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
