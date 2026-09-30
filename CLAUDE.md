@@ -607,6 +607,39 @@ por si, e a 51l-bis passa. Conferido num Postgres 16 de verdade: primeira
 rodada, reaplicação com a marca desligada, "Outros" pré-existente e o teto
 recusando 501 caracteres.
 
+### O relatório do "Já tratei" (script 010, 30/09)
+
+`sql/automaticos/010-o-relatorio-do-ja-tratei.sql` cria
+`zorvin_relatorio_tratados(p_desde, p_ate, p_quem, p_fuso, p_telefone,
+p_departamento, p_limite)`, que devolve num `jsonb` só as somas do período,
+o "por assunto", o "por pessoa", o "por dia" e os registros. A tela é uma
+seção do Painel de números (ver o CLAUDE.md do painel).
+
+**Um "Já tratei" é um clique**: as linhas de um mesmo `insert` têm a mesma
+conversa, a mesma pessoa e o mesmo `quando` (`now()` é o da transação), e é
+por aí que a função agrupa. **O desfeito não soma** e é contado à parte.
+
+**Quem não administra recebe só o próprio** (`auth.uid()`, a régua de
+`painel_dashboard`) — menos o "por pessoa", que é para comparar. **E ela é
+`security invoker`**: enxerga só as conversas de quem chama.
+
+**Três cuidados que vieram das lições anteriores:**
+
+- **apaga as versões antigas antes de criar**: `create or replace` com outra
+  lista de argumentos cria uma segunda função, e a chamada do painel morreria
+  com "could not choose the best candidate";
+- **o texto do OUTROS vem por `to_jsonb(t) ->> 'observacao'`**, e não pelo
+  nome da coluna: num banco sem o script 009 a função continua de pé;
+- **a função nasce sempre**, mesmo num banco limpo — é `plpgsql`, e os nomes
+  de dentro só são resolvidos ao rodar. A 51l-bis passa, e a conferência diz
+  "rode o 005 antes".
+
+Conferido num Postgres 16 de verdade: administradora vendo tudo (2 cliques, e
+não 3 linhas; o desfeito à parte; a mediana da espera), atendente pedindo os
+números de outra pessoa e recebendo só os dela, os filtros de telefone e
+departamento, fuso inválido, o limite da lista, banco sem o 009, banco limpo e
+reaplicação.
+
 ### A espera não começa no rabicho da conversa já atendida
 
 Relato de 28/09, com foto: a conversa da ANDREIA dizia **"esperando há 6
