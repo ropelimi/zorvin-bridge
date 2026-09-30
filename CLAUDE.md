@@ -585,6 +585,28 @@ SQL: `sql/automaticos/005-ja-tratei.sql`. Conferido num Postgres 16 de verdade
 — sete cenas, mais banco vazio, reaplicação, e o assunto desativado que **não
 ressuscita** ao rodar o script de novo.
 
+### O "OUTROS" (script 009, 30/09)
+
+`sql/automaticos/009-o-assunto-outros.sql`. "OUTROS" sozinho não diz nada no
+relatório, então ele vem com texto obrigatório:
+
+- `zorvin_assuntos.pede_descricao` — a marca que faz o painel pedir texto.
+  **Uma coluna, e não o nome "OUTROS"**: quem compra pode chamá-lo de outra
+  coisa, ou querer descrição em mais de um assunto. Troca-se na tela;
+- `zorvin_tratamentos.observacao` — o texto, com **teto de 500** (`check`),
+  para o relatório continuar sendo relatório.
+
+**Rodar de novo não desfaz escolha de ninguém.** O OUTROS nasce com a marca
+ligada só na rodada que CRIA a coluna; se alguém desligar pela tela, a
+reaplicação não religa. E um "Outros" feito à mão é aproveitado, em vez de
+nascer um segundo.
+
+**Duas guardas, uma por metade:** num banco limpo `zorvin_assuntos` existe (o
+005 a cria fora do bloco) e `zorvin_tratamentos` não — cada uma é conferida
+por si, e a 51l-bis passa. Conferido num Postgres 16 de verdade: primeira
+rodada, reaplicação com a marca desligada, "Outros" pré-existente e o teto
+recusando 501 caracteres.
+
 ### A espera não começa no rabicho da conversa já atendida
 
 Relato de 28/09, com foto: a conversa da ANDREIA dizia **"esperando há 6
