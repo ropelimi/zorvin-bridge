@@ -714,6 +714,34 @@ repetida: criando a tabela temporária só depois, o `select` da última linha
 estoura num banco limpo — um script que deveria desistir em silêncio derrubaria
 a prova 51l-bis. Aconteceu na primeira escrita deste arquivo.
 
+## O responsável pela conversa
+
+Pedido de 30/09, como primeiro passo do Zorvin para CRM: toda conversa ganha
+um dono. `sql/automaticos/008-o-responsavel-pela-conversa.sql` acrescenta
+três colunas a `conversas` — `responsavel_id` (quem é o dono agora),
+`responsavel_em` (desde quando) e `responsavel_por` (quem pôs ele ali: ele
+mesmo ao assumir, ou o colega que passou a conversa).
+
+**Uma coluna, e não uma tabela de histórico:** a tela precisa da resposta
+de agora em toda linha da lista, e uma segunda tabela seria uma segunda
+consulta por página. O histórico de passes fica para o dia em que alguém
+pedir o relatório.
+
+**O dono é `usuarios.id`**, com `on delete set null`: apagada a conta, a
+conversa volta a "sem responsável" em vez de apontar para ninguém.
+
+**A permissão não muda:** quem já edita a conversa muda o dono. Travar "só o
+dono passa adiante" prenderia a conversa de quem saiu de férias.
+
+**A ponte não faz nada com isso**, e é de propósito: quem assume ao
+responder é o PAINEL, com `.is("responsavel_id", null)` na gravação — ver o
+CLAUDE.md dele. A resposta pelo celular (sem painel) não assume ninguém,
+porque o celular não sabe quem da equipe está segurando o aparelho.
+
+Conferido num Postgres 16 de verdade: banco limpo (desiste em silêncio, e a
+51l-bis passa), banco com as tabelas, reaplicação, e a conta apagada
+devolvendo a conversa a "sem responsável".
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
