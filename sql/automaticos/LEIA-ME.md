@@ -17,7 +17,7 @@ O número manda na ordem, e a ordem importa: um script quase sempre supõe que o
 anterior passou. O nome em português é para o arquivo dizer sozinho o que faz —
 é o que o log vai repetir quando algo der errado às sete da manhã.
 
-## Três regras ao escrever um
+## Quatro regras ao escrever um
 
 1. **Rodável duas vezes sem estrago.** `create table if not exists`,
    `add column if not exists`, `drop policy if exists` antes de `create policy`.
@@ -31,6 +31,13 @@ anterior passou. O nome em português é para o arquivo dizer sozinho o que faz 
 3. **Não se edita script já aplicado.** A ponte guarda a impressão digital
    (`sha256`) do que aplicou; mudando o arquivo depois, ela **para** e diz qual
    foi. Conserto de script aplicado é o próximo número, nunca uma edição.
+
+4. **Função que o painel chama é conferida NO PAPEL de quem atende.** A
+   conferência roda como dona do banco, que alcança todas as colunas; o painel
+   roda como `authenticated`, que não alcança a chave da Uazapi em
+   `advogados`. O 011 passou na conferência e morreu na tela com
+   `permission denied for table advogados` por causa de um `to_jsonb(a)`. Ver
+   como o 012 chama a função com `set_config('role', 'authenticated', true)`.
 
 Quem precisar de algo que não roda dentro de transação (`create index
 concurrently`) escreve `-- sem-transacao` na **primeira linha** do arquivo.

@@ -822,6 +822,28 @@ telefone desativado fora, filtros de telefone e departamento, quem não
 administra, fuso inválido, banco sem o 008, banco limpo e reaplicação — e
 três sabotagens, três pegas.
 
+**E chegou à tela quebrado** — *"permission denied for table advogados
+(código 42501)"*, para todo mundo. A causa era `to_jsonb(a)`: ele lê a linha
+INTEIRA do telefone, e em `advogados` quem entrou não alcança `token`,
+`servidor` nem `instancia` (a chave da Uazapi, fechada em
+`sql/2026-09-a-chave-da-uazapi-fica-guardada.sql`). Não é a coluna que fica de
+fora: é a consulta inteira que morre, e a função é `security invoker`, então
+herda a trava. `sql/automaticos/012-o-relatorio-por-responsavel-sem-ler-a-chave.sql`
+troca por `a.ativo`, pelo nome.
+
+**Passou nas provas por dois motivos, e os dois são a mesma lição:** o banco
+de teste não tinha a trava de coluna, e a conferência do 011 rodava como
+**dona** do banco, que alcança tudo. O 012 confere **chamando a função no
+papel `authenticated`** — a sabotagem que devolve o `to_jsonb(a)` faz a
+conferência dizer "NÃO — permission denied…", e a mesma sabotagem conferida
+como dona dizia "sim". **A régua que fica:**
+
+- **`to_jsonb(linha)` só em tabela sem coluna fechada.** Em `advogados`,
+  sempre pelo nome — e só as colunas liberadas (`id, nome, numero, foto_url,
+  departamento_id, ativo, setor`).
+- **Função nova que quem atende chama: a conferência a CHAMA como
+  `authenticated`**, e não só pergunta se ela existe.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
