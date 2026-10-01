@@ -797,6 +797,31 @@ Conferido num Postgres 16 de verdade: banco limpo (desiste em silêncio, e a
 51l-bis passa), banco com as tabelas, reaplicação, e a conta apagada
 devolvendo a conversa a "sem responsável".
 
+### O relatório por responsável (script 011, 01/10)
+
+`sql/automaticos/011-o-relatorio-por-responsavel.sql` cria
+`zorvin_relatorio_responsaveis(p_telefone, p_departamento, p_fuso)`: a
+carteira de cada responsável **agora** — conversas, quantas esperam, quantas
+há 3 dias ou mais (dias de calendário no fuso do escritório, a régua do
+vermelho da lista), a espera mais antiga e as não lidas —, mais a linha de
+"sem responsável". A tela é uma seção do Painel de números.
+
+**Sem datas, de propósito:** o banco guarda só o dono de hoje. **Arquivadas e
+telefones desativados ficam fora** (`ativo` por `to_jsonb`: só o `false`
+explícito desativa, e base sem a coluna não derruba a função).
+
+**Quem não administra recebe a própria linha e a sem dono**, recorte feito
+aqui. `security invoker`, como o 010.
+
+**Sem a coluna do 008 ela responde `{"falta": "008"}`**, e não uma lista
+vazia — que a tela leria como "ninguém tem conversa". As colunas de scripts
+posteriores (espera, arquivada, não lidas) entram por `to_jsonb`.
+
+Conferido num Postgres 16 de verdade: carteiras e a sem dono, arquivada e
+telefone desativado fora, filtros de telefone e departamento, quem não
+administra, fuso inválido, banco sem o 008, banco limpo e reaplicação — e
+três sabotagens, três pegas.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
