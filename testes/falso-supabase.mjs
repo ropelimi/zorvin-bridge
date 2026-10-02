@@ -133,7 +133,7 @@ const COLUNAS_DO_BANCO = {
   permissoes: ["id", "usuario_id", "departamento_id", "telefone_id"],
   departamentos: ["id", "nome", "slug", "cor", "ordem", "ativo"],
   fila_envio: ["id", "conversa_id", "texto", "estado", "criado_em", "enviando_em",
-               "tentativas", "erro", "tentar_em"],
+               "tentativas", "erro", "tentar_em", "agendada_para"],
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],

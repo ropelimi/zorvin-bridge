@@ -7518,5 +7518,141 @@ console.log("\n54. A citação que a Uazapi manda");
   await t.parar();
 }
 
+// ============================================================
+//  55. A MENSAGEM AGENDADA SAI NA HORA, E NÃO ANTES
+//
+//  Pedido de 02/10: agendar mensagem (texto e anexo). O painel grava o item
+//  na fila com `agendada_para` e, junto, `tentar_em` na mesma hora — então a
+//  leitura de sempre já o deixa de fora. Esta seção prova que a ponte tem a
+//  SUA guarda também: `esperaDesligada` liga sozinho e não desliga até a
+//  ponte reiniciar, e sem uma segunda guarda a mensagem marcada para amanhã
+//  sairia agora. Mensagem que sai antes da hora não tem desfazer.
+// ============================================================
+console.log("\n55. A mensagem agendada sai na hora, e não antes");
+{
+  const enfileirar = (t, item) => {
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    t.sb.dados.fila_envio.push({
+      id: 1, conversa_id: 1, tipo: "texto", texto: "Lembrete da audiência",
+      status: "pendente", tentativas: 0, criado_em: new Date().toISOString(), ...item,
+    });
+  };
+  const enviou = (t) => t.uaz.recebidas.filter((c) => /\/send\//.test(c.caminho)).length;
+  const daqui10 = () => new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  // ---- 55a. marcada para daqui a dez minutos: não sai ----
+  {
+    const t = await subirTudo({});
+    enfileirar(t, { agendada_para: daqui10(), tentar_em: daqui10() });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("a mensagem agendada para mais tarde NÃO sai antes da hora", enviou(t) === 0,
+       `enviou ${enviou(t)} vez(es)`);
+    ok("e continua pendente, sem gastar tentativa",
+       t.sb.dados.fila_envio[0].status === "pendente" && t.sb.dados.fila_envio[0].tentativas === 0,
+       JSON.stringify(t.sb.dados.fila_envio[0]));
+    await t.parar();
+  }
+
+  // ---- 55b. a guarda é DELA, e não só do `tentar_em` ----
+  //
+  // Uma base sem `tentar_em` liga `esperaDesligada`, e aí a leitura deixa de
+  // filtrar pela espera. A mensagem agendada tem de continuar esperando.
+  {
+    const t = await subirTudo({}, { semColunas: { fila_envio: ["tentar_em"] } });
+    enfileirar(t, { agendada_para: daqui10() });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("mesmo sem a espera ligada, a agendada não sai antes da hora", enviou(t) === 0,
+       `enviou ${enviou(t)} vez(es)`);
+    await t.parar();
+  }
+
+  // ---- 55c. a regra da agenda vale sozinha, sem o `tentar_em` ----
+  //
+  // O item tem só a hora marcada: quem o segura é a parte `agendada_para` da
+  // leitura. (A conferência item a item do laço, `aindaNaoEhAHora`, é um
+  // encosto que esta cena NÃO separa — a leitura já o barra antes. Está
+  // escrito para ninguém contar esta cena como prova dele.)
+  {
+    const t = await subirTudo({});
+    enfileirar(t, { agendada_para: daqui10() });
+    // Uma leitura que IGNORA a regra da agenda: o falso devolve o item.
+    t.sb.dados.fila_envio[0].tentar_em = null;
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("a agendada sem `tentar_em` também espera a hora", enviou(t) === 0,
+       `enviou ${enviou(t)} vez(es)`);
+    await t.parar();
+  }
+
+  // ---- 55d. chegada a hora, sai ----
+  {
+    const t = await subirTudo({});
+    const passou = new Date(Date.now() - 1000).toISOString();
+    enfileirar(t, { agendada_para: passou, tentar_em: passou });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("passada a hora marcada, a mensagem sai",
+       t.sb.dados.fila_envio[0].status === "enviada", JSON.stringify(t.sb.dados.fila_envio[0]));
+    ok("e entra no histórico da conversa",
+       (t.sb.dados.mensagens || []).some((m) => m.texto === "Lembrete da audiência"));
+    await t.parar();
+  }
+
+  // ---- 55e. dez agendadas para amanhã não param a fila de hoje ----
+  //
+  // A leitura pega dez itens por vez, os mais antigos primeiro. Se as
+  // agendadas entrassem na leitura e só fossem puladas no laço, dez delas
+  // ocupariam os dez lugares e a resposta que alguém acabou de escrever
+  // ficaria esperando o dia seguinte.
+  {
+    const t = await subirTudo({}, { semColunas: { fila_envio: ["tentar_em"] } });
+    t.sb.dados.contatos.push({ id: 1, numero: "5511999998888", nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    const antes = Date.now() - 60 * 60 * 1000;
+    for (let i = 1; i <= 12; i++) {
+      t.sb.dados.fila_envio.push({
+        id: i, conversa_id: 1, tipo: "texto", texto: `Agendada ${i}`, status: "pendente",
+        tentativas: 0, criado_em: new Date(antes + i * 1000).toISOString(),
+        agendada_para: daqui10(),
+      });
+    }
+    t.sb.dados.fila_envio.push({
+      id: 99, conversa_id: 1, tipo: "texto", texto: "Resposta de agora", status: "pendente",
+      tentativas: 0, criado_em: new Date().toISOString(),
+    });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    const agora = t.sb.dados.fila_envio.find((x) => x.id === 99);
+    ok("a resposta de agora sai mesmo com doze agendadas na frente",
+       agora?.status === "enviada", JSON.stringify(agora));
+    ok("e nenhuma agendada saiu junto",
+       t.sb.dados.fila_envio.filter((x) => x.id !== 99).every((x) => x.status === "pendente"));
+    await t.parar();
+  }
+
+  // ---- 55f. base sem o script 013: tudo como antes ----
+  {
+    const t = await subirTudo({}, { semColunas: { fila_envio: ["agendada_para"] } });
+    enfileirar(t, {});
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await espera(1600);
+    ok("sem a coluna da agenda, a fila segue enviando",
+       t.sb.dados.fila_envio[0].status === "enviada", JSON.stringify(t.sb.dados.fila_envio[0]));
+    const registro = t.registro.join("");
+    ok("e o log diz qual script liga o agendamento",
+       /013-a-mensagem-agendada\.sql/.test(registro), registro.slice(-400));
+    // A FALTA DA AGENDA NÃO PODE DESLIGAR A RETENTATIVA: a primeira escrita
+    // deixava o bloco do `tentar_em` pegar qualquer coluna que faltasse, e a
+    // retentativa ficava desligada até a ponte reiniciar — sem a coluna dela
+    // faltar. Foi uma sabotagem que mostrou.
+    ok("e NÃO conclui que falta a coluna da retentativa",
+       !/tentar_em.*n[ãa]o existe/s.test(registro), registro.slice(-400));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

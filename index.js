@@ -3724,6 +3724,22 @@ const semAColuna = (erro) => Boolean(erro) && (
   || /column .* does not exist|could not find the .* column/i.test(String(erro.message || '')));
 
 let esperaDesligada = false;  // a coluna `tentar_em` não existe: segue como antes
+// A coluna `agendada_para` não existe (script 013 não rodou): nada pode estar
+// agendado, então a fila segue como antes.
+let agendaDesligada = false;
+
+/** A mensagem AGENDADA ainda não é da vez? O painel grava a hora marcada em
+ *  `agendada_para` E em `tentar_em`, e a leitura da fila já filtra pelas duas —
+ *  esta conferência é a terceira guarda. É um ENCOSTO: hoje a leitura já
+ *  barra a agendada antes de ela chegar aqui (a prova 55 não tem como separar
+ *  esta guarda da leitura, e diz isso). Fica porque o custo é uma comparação,
+ *  e o dia em que a leitura mudar é o dia em que uma mensagem marcada para
+ *  amanhã sairia agora — e mensagem que sai antes da hora não tem desfazer. */
+function aindaNaoEhAHora(item, agora = Date.now()) {
+  if (!item || !item.agendada_para) return false;
+  const quando = new Date(item.agendada_para).getTime();
+  return Number.isFinite(quando) && quando > agora;
+}
 
 /**
  * Esta falha permite tentar de novo sem risco de o cliente receber duas vezes?
@@ -3850,29 +3866,51 @@ async function processarFilaDeEnvio() {
     // ele é pendente mas não é da vez. Item que nunca falhou não tem a marca, e
     // por isso o `is.null` faz parte da regra — sem ele, a fila normal pararia.
     const agora = new Date().toISOString();
-    const lerPendentes = (comEspera) => {
+    //
+    // A MENSAGEM AGENDADA também não entra antes da hora marcada
+    // (`agendada_para`, script 013). Sem ela na regra, dez agendadas para
+    // amanhã ocupariam os dez lugares da leitura e a fila do dia pararia.
+    const lerPendentes = (comEspera, comAgenda = !agendaDesligada) => {
       let q = supabase.from('fila_envio').select('*').eq('status', 'pendente');
       if (comEspera) q = q.or(`tentar_em.is.null,tentar_em.lte.${agora}`);
+      if (comAgenda) q = q.or(`agendada_para.is.null,agendada_para.lte.${agora}`);
       return q.order('criado_em', { ascending: true }).limit(10);
     };
 
     let { data: pendentes, error } = await lerPendentes(!esperaDesligada);
+    // BASE SEM O SCRIPT 013: sem a coluna, nada pode estar agendado — lê de
+    // novo sem esta parte da regra, em vez de a fila inteira parar.
+    if (error && semAColuna(error) && /agendada_para/.test(String(error.message || ''))) {
+      agendaDesligada = true;
+      console.warn('Fila: a coluna "fila_envio.agendada_para" não existe — o agendamento '
+        + 'de mensagens fica desligado até rodar sql/automaticos/013-a-mensagem-agendada.sql.');
+      ({ data: pendentes, error } = await lerPendentes(!esperaDesligada));
+    }
     // BASE SEM A COLUNA: lê de novo sem o filtro, em vez de a fila inteira
     // parar. Uma fila que não é lida é o escritório todo sem enviar nada — bem
     // pior do que ficar sem a retentativa automática.
-    if (error && semAColuna(error)) {
+    // SÓ QUANDO A QUE FALTA É A `tentar_em`. A recusa por `agendada_para`
+    // (tratada logo acima) desligaria a retentativa por engano, e ela só
+    // volta quando a ponte reinicia.
+    if (error && semAColuna(error) && !/agendada_para/.test(String(error.message || ''))) {
       esperaDesligada = true;
       console.warn(
         'ATENÇÃO: a coluna "fila_envio.tentar_em" não existe, então a retentativa '
         + 'automática está DESLIGADA e a ponte segue como antes. '
         + 'Rode sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql.');
       ({ data: pendentes, error } = await lerPendentes(false));
+      if (error && semAColuna(error) && /agendada_para/.test(String(error.message || ''))) {
+        agendaDesligada = true;
+        ({ data: pendentes, error } = await lerPendentes(false));
+      }
     }
 
     if (error) { console.error('Erro ao ler fila:', error.message); return; }
     if (!pendentes || pendentes.length === 0) return;
 
     for (const item of pendentes) {
+      // AGENDADA PARA MAIS TARDE: não é da vez. Ver `aindaNaoEhAHora`.
+      if (aindaNaoEhAHora(item)) continue;
       // Trava de segurança: se o item já tentou demais (ex.: ficou preso e foi
       // devolvido para 'pendente' várias vezes), para de reenviar e marca erro.
       // Evita um laço infinito que reentregaria a mesma mensagem sem parar.
