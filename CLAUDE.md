@@ -192,6 +192,23 @@ Conferido num Postgres 16 de verdade: banco limpo, banco com as tabelas,
 reaplicação, e a política no papel `authenticated` (cancela a agendada, não
 cancela a comum, não devolve a cancelada à fila). Prova: seção 55.
 
+**E o banco do escritório recusava 'cancelada'.** A conferência do 013
+perguntou e respondeu `false`: há em `fila_envio` uma regra (CHECK) com a
+lista fechada de status, feita à mão no começo do projeto e que não está em
+arquivo nenhum. `sql/automaticos/014-a-fila-aceita-cancelada.sql` refaz cada
+regra dessas com a MESMA lista mais 'cancelada' — **só se ela for apenas uma
+lista**; com qualquer outra coisa dentro, não mexe e mostra a regra na
+conferência. O 013 não foi editado: script aplicado não se edita.
+
+**Duas armadilhas da primeira escrita, pegas num Postgres de verdade antes de
+ir ao Rodrigo:** o Postgres escreve a lista de dois jeitos (`ARRAY['a'::text,
+…]` e `'{a,b}'::text[]`), e a regra refeita no segundo jeito não tinha
+`'cancelada'` entre aspas — a conferência dizia `false` logo depois de
+consertar, e a segunda rodada corrompia a lista. Hoje a leitura abre os dois
+jeitos, a regra é refeita no primeiro, e "já tem cancelada" se pergunta pela
+PALAVRA, não pelas aspas. **Script que se diz "rode de novo sem medo" se
+testa rodando duas vezes.**
+
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
 MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve
