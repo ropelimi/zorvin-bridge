@@ -165,6 +165,33 @@ SQL: `sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql` (coluna
 `fila_envio.tentar_em`). **Sem ela tudo funciona como antes** — a ponte descobre
 sozinha, avisa uma vez no log, e a fila continua enviando.
 
+### A mensagem agendada (script 013, 02/10)
+
+Pedido do Rodrigo: agendar mensagem, texto e anexo, que sai na hora marcada
+mesmo que o cliente escreva antes. `sql/automaticos/013-a-mensagem-agendada.sql`
+acrescenta `fila_envio.agendada_para` (mais `cancelada_em`/`cancelada_por`) e a
+política que deixa quem entrou virar uma agendada pendente em `cancelada` — e
+nenhuma outra passagem.
+
+**É um item da fila como qualquer outro.** O painel grava a hora em
+`agendada_para` E em `tentar_em`, então a leitura de sempre já o deixa de
+fora, e o `fila_parada` de `zorvin_saude()` também. A ponte tem **a sua
+guarda por cima**, e não é redundância: `esperaDesligada` liga sozinho e não
+desliga até a ponte reiniciar, e sem a guarda própria a mensagem de amanhã
+sairia agora. São duas: a leitura filtra `agendada_para` (senão dez agendadas
+ocupariam os dez lugares da leitura e a fila do dia pararia) e o laço confere
+item a item (`aindaNaoEhAHora`).
+
+**Cancelar e a ponte pegar o item na mesma hora se resolve sozinho**: as duas
+gravações exigem `status = 'pendente'`, e só a primeira acha a linha assim.
+
+**Sem a coluna, tudo como antes**: a ponte avisa uma vez no log e lê sem a
+regra; o painel não oferece agendar.
+
+Conferido num Postgres 16 de verdade: banco limpo, banco com as tabelas,
+reaplicação, e a política no papel `authenticated` (cancela a agendada, não
+cancela a comum, não devolve a cancelada à fila). Prova: seção 55.
+
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
 MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve
