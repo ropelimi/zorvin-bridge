@@ -209,6 +209,29 @@ jeitos, a regra é refeita no primeiro, e "já tem cancelada" se pergunta pela
 PALAVRA, não pelas aspas. **Script que se diz "rode de novo sem medo" se
 testa rodando duas vezes.**
 
+## Transcrever um áudio — `POST /transcrever` (02/10)
+
+Pedido da equipe: transcrição dos áudios. Decidido com o Rodrigo: pelo
+**Groq** (Whisper `whisper-large-v3-turbo`, ~US$ 0,04 por hora de áudio) e
+**ao clicar** — nada é transcrito sozinho. A chave é `GROQ_API_KEY`, na
+Render; `GROQ_API_URL` e `GROQ_MODELO` são opcionais (a bancada aponta para um
+Groq de mentira).
+
+**A mensagem é lida COMO QUEM PEDIU** (`bancoComo(jwt)`: a chave de serviço no
+`apikey`, o bilhete da pessoa no `Authorization`), então a regra de acesso do
+banco decide — ninguém lê pela transcrição o áudio de um telefone que não
+atende. "Não achei" e "não é sua" são a mesma resposta, de propósito.
+
+**O texto fica guardado** em `mensagens.transcricao`
+(`sql/automaticos/015-a-transcricao-do-audio.sql`): a segunda pessoa recebe o
+guardado, sem nova ida ao Groq. Sem a coluna, transcreve e não guarda. **Dois
+cliques juntos são uma ida só** (`transcricoesEmVoo`). A língua vai dita
+(`pt`): sem ela um "alô" curto vira espanhol.
+
+Prova: seção 56, 24 conferências, **6 sabotagens e 6 pegas** (ler com a chave
+da ponte; sem a língua; sem devolver o guardado; sem juntar os cliques; sem a
+chave no cabeçalho; sem guardar).
+
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
 MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve

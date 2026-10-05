@@ -7249,6 +7249,171 @@ app.post('/contato/foto', rotaVantoro(async (req) => {
 //  Só admin abre: a resposta conta quem enxerga o quê.
 // ------------------------------------------------------------
 app.options('/permissoes/diagnostico', (req, res) => { liberarCors(res); res.sendStatus(204); });
+// ============================================================
+//  TRANSCREVER UM ÁUDIO (pedido da equipe, 02/10)
+//
+//  "Colocar transcrição de áudio no Zorvin." Decidido com o Rodrigo: pelo
+//  GROQ (Whisper, ~US$ 0,04 por hora de áudio), e AO CLICAR num botão — nada
+//  é transcrito sozinho. Transcrever todo áudio que chega pagaria pelos que
+//  ninguém precisou ler.
+//
+//  O TEXTO FICA GUARDADO NA MENSAGEM (`mensagens.transcricao`, script 015):
+//  a segunda pessoa que clicar no mesmo áudio recebe o guardado, sem nova ida
+//  ao Groq. Sem a coluna, transcreve assim mesmo e só não guarda — a régua de
+//  sempre: o recurso funciona antes do script, e o script só o deixa barato.
+//
+//  QUEM PODE: quem ENXERGA a conversa. A mensagem é lida com a identidade de
+//  quem pediu (o bilhete dele, e não a chave da ponte), então a regra de
+//  acesso do banco decide — e uma pessoa não lê pela transcrição o áudio de um
+//  telefone que ela não atende. A chave da ponte só entra para GUARDAR o texto
+//  de uma mensagem que a pessoa já provou enxergar.
+//
+//  A CHAVE DO GROQ MORA SÓ AQUI (`GROQ_API_KEY`, na Render). O navegador nunca
+//  a vê. Sem ela, a rota diz o que falta, com o nome da variável.
+// ============================================================
+const GROQ_URL = (process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+const GROQ_MODELO = process.env.GROQ_MODELO || 'whisper-large-v3-turbo';
+// O teto do Groq no plano gratuito é 25 MB por arquivo. Áudio de WhatsApp de
+// meia hora tem uns 3 MB; passar disto é anexo que não é recado de voz.
+const TRANSCRICAO_TETO_BYTES = 25 * 1024 * 1024;
+let semColunaDaTranscricao = false;
+// O MESMO ÁUDIO PEDIDO DUAS VEZES AO MESMO TEMPO vai ao Groq uma vez só: duas
+// pessoas abrindo a mesma conversa e clicando juntas pagariam duas vezes.
+const transcricoesEmVoo = new Map();
+
+/** O cliente do banco COM A IDENTIDADE DE QUEM PEDIU: a regra de acesso vale. */
+function bancoComo(jwt) {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+/** A extensão que o Groq usa para reconhecer o formato. Ele olha o NOME do
+ *  arquivo, e o áudio do WhatsApp vem como `ogg` (opus). */
+function extensaoDoAudio(mime) {
+  const m = String(mime || '').toLowerCase();
+  if (m.includes('ogg') || m.includes('opus')) return 'ogg';
+  if (m.includes('webm')) return 'webm';
+  if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
+  if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
+  if (m.includes('wav')) return 'wav';
+  if (m.includes('flac')) return 'flac';
+  return 'ogg';
+}
+
+/** A frase de cada recusa do Groq — dita para quem atende, com o que fazer. */
+function explicarFalhaDoGroq(status, corpo) {
+  const detalhe = String((corpo && corpo.error && corpo.error.message) || '').slice(0, 160);
+  if (status === 401 || status === 403) {
+    return 'O Groq recusou a chave. Confira a variável GROQ_API_KEY na Render (serviço da ponte).';
+  }
+  if (status === 429) return 'O limite de uso do Groq foi atingido agora. Tente de novo em um minuto.';
+  if (status === 413) return 'Este áudio é grande demais para transcrever.';
+  return `O Groq não transcreveu (código ${status})${detalhe ? `: ${detalhe}` : '.'}`;
+}
+
+async function transcreverNoGroq(msg) {
+  const baixou = await fetchComTimeout(msg.midia_url, {}, 30000);
+  if (!baixou.ok) {
+    return { status: 502, corpo: { ok: false, erro: `Não consegui baixar o áudio (código ${baixou.status}).` } };
+  }
+  const bytes = Buffer.from(await baixou.arrayBuffer());
+  if (!bytes.length) return { status: 502, corpo: { ok: false, erro: 'O arquivo do áudio veio vazio.' } };
+  if (bytes.length > TRANSCRICAO_TETO_BYTES) {
+    return { status: 413, corpo: { ok: false, erro: 'Este áudio é grande demais para transcrever (mais de 25 MB).' } };
+  }
+  const mime = msg.midia_mime || baixou.headers.get('content-type') || 'audio/ogg';
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: mime }), `audio.${extensaoDoAudio(mime)}`);
+  form.append('model', GROQ_MODELO);
+  // A LÍNGUA VAI DITA: sem ela o Whisper adivinha pelos primeiros segundos, e
+  // um "alô" curto vira espanhol ou galego. O escritório atende em português.
+  form.append('language', 'pt');
+  form.append('response_format', 'json');
+  form.append('temperature', '0');
+  const r = await fetchComTimeout(`${GROQ_URL}/audio/transcriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: form,
+  }, 90000);
+  let corpo = null;
+  try { corpo = await r.json(); } catch (_) { /* resposta sem JSON: fica nulo */ }
+  if (!r.ok) {
+    console.error(`transcrição: o Groq respondeu ${r.status}`, JSON.stringify(corpo || {}).slice(0, 300));
+    return { status: 502, corpo: { ok: false, erro: explicarFalhaDoGroq(r.status, corpo) } };
+  }
+  const texto = String((corpo && corpo.text) || '').trim();
+  return { status: 200, corpo: { ok: true, texto, guardada: false } };
+}
+
+app.options('/transcrever', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.post('/transcrever', async (req, res) => {
+  liberarCors(res);
+  try {
+    const usuario = await exigirLogin(req, res);
+    if (!usuario) return;
+    const id = String((req.body && req.body.mensagem_id) || '').trim();
+    if (!id) return res.status(400).json({ ok: false, erro: 'Informe a mensagem.' });
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ ok: false, erro:
+        'A transcrição ainda não está ligada: falta a variável GROQ_API_KEY na Render (serviço da ponte).' });
+    }
+
+    // LIDA COMO QUEM PEDIU. `*`, e não as colunas pelo nome: num banco sem o
+    // script 015, pedir `transcricao` derrubaria a leitura inteira.
+    const jwt = String(req.headers.authorization || '').slice(7).trim();
+    const { data: linhas, error } = await bancoComo(jwt)
+      .from('mensagens').select('*').eq('id', id).limit(1);
+    if (error) {
+      console.error('transcrição: não consegui ler a mensagem', error.message);
+      return res.status(502).json({ ok: false, erro: `Não consegui ler a mensagem${error.code ? ` (código ${error.code})` : ''}.` });
+    }
+    const msg = (linhas || [])[0];
+    // NÃO ACHOU E NÃO PODE VER são a mesma resposta, de propósito: dizer "existe,
+    // mas não é sua" já contaria a quem não enxerga a conversa que ela existe.
+    if (!msg) return res.status(404).json({ ok: false, erro: 'Não achei este áudio.' });
+    if (msg.tipo !== 'audio') return res.status(400).json({ ok: false, erro: 'Esta mensagem não é um áudio.' });
+    if (msg.transcricao) return res.json({ ok: true, texto: msg.transcricao, guardada: true });
+    if (!msg.midia_url) {
+      return res.status(409).json({ ok: false, erro: 'O arquivo deste áudio ainda não chegou — não há o que transcrever.' });
+    }
+
+    let promessa = transcricoesEmVoo.get(id);
+    if (!promessa) {
+      promessa = transcreverNoGroq(msg).finally(() => transcricoesEmVoo.delete(id));
+      transcricoesEmVoo.set(id, promessa);
+    }
+    const resposta = await promessa;
+    if (resposta.status !== 200) return res.status(resposta.status).json(resposta.corpo);
+
+    // GUARDAR é um extra: falhando, a pessoa recebe o texto do mesmo jeito, e
+    // a próxima vai ao Groq de novo — mais caro, e nada some.
+    let guardada = false;
+    if (!semColunaDaTranscricao && resposta.corpo.texto) {
+      const { error: erroGuardar } = await supabase.from('mensagens')
+        .update({ transcricao: resposta.corpo.texto, transcrita_em: new Date().toISOString() })
+        .eq('id', id);
+      if (erroGuardar && ['42703', 'PGRST204'].includes(String(erroGuardar.code))) {
+        semColunaDaTranscricao = true;
+        console.warn('transcrição: a coluna "mensagens.transcricao" não existe — o texto vai '
+          + 'para a tela mas não fica guardado. Rode sql/automaticos/015-a-transcricao-do-audio.sql.');
+      } else if (erroGuardar) {
+        console.error('transcrição: não consegui guardar o texto', erroGuardar.message);
+      } else {
+        guardada = true;
+      }
+    }
+    return res.json({ ok: true, texto: resposta.corpo.texto, guardada });
+  } catch (e) {
+    const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
+      ? 'O Groq demorou demais para responder. Tente de novo.'
+      : `Não consegui transcrever: ${String((e && e.message) || e).slice(0, 160)}`;
+    console.error('transcrição:', (e && e.message) || e);
+    return res.status(502).json({ ok: false, erro: motivo });
+  }
+});
+
 app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
   const { data: eu } = await supabase
     .from('usuarios').select('admin').eq('id', usuario.id).maybeSingle();
