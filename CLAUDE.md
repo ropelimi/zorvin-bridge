@@ -209,6 +209,19 @@ jeitos, a regra é refeita no primeiro, e "já tem cancelada" se pergunta pela
 PALAVRA, não pelas aspas. **Script que se diz "rode de novo sem medo" se
 testa rodando duas vezes.**
 
+**Editar a agendada (script 016, 05/10).** Pedido do Rodrigo: mudar o texto
+(ou a legenda) e a hora de uma agendada. `016-editar-a-mensagem-agendada.sql`
+cria `editada_em`/`editada_por` e a política `fila_envio_editar_agendada`:
+mexe só na agendada **pendente cuja hora ainda não chegou**, e ela tem de
+continuar pendente e no futuro. **A primeira metade fecha a corrida com a
+ponte sem mudar uma linha dela:** a fila só lê a agendada depois da hora, e a
+partir da hora a edição é recusada — não há instante em que a ponte mande o
+texto antigo enquanto alguém grava o novo. A segunda impede usar a edição para
+mandar agora (hora no passado) ou tirar da fila por fora. **Recusada, a
+edição dá ERRO (42501), e não zero linhas**: a regra do cancelar alcança a
+mesma linha, e a checagem de saída de nenhuma das duas passa. Conferido num
+Postgres 16.
+
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
 MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve
