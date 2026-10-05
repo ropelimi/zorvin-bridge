@@ -125,7 +125,8 @@ const COLUNAS_DO_BANCO = {
               "id_uazapi", "status", "midia_url", "midia_mime", "midia_nome",
               "midia_segundos", "enviado_por", "enviado_por_id",
               "enviado_por_foto", "apagada", "apagada_pelo_contato", "reacoes",
-              "resposta_previa", "resposta_autor", "responder_id_uazapi"],
+              "resposta_previa", "resposta_autor", "responder_id_uazapi",
+              "transcricao", "transcrita_em"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
           "vantoro_atividade_id", "atualizado_em"],
   advogados: ["id", "nome", "numero", "departamento_id", "foto_url", "ativo", "token"],
@@ -228,7 +229,11 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     let corpo = "";
     for await (const p of req) corpo += p;
     const json = corpo ? (() => { try { return JSON.parse(corpo); } catch (_) { return null; } })() : null;
-    chamadas.push({ metodo: req.method, caminho, busca: url.search, corpo: json });
+    // `autorizacao` vai junto: há rotas que leem COMO QUEM PEDIU (o bilhete da
+    // pessoa, e não a chave da ponte), e é por ele que se prova que a regra de
+    // acesso do banco foi consultada.
+    chamadas.push({ metodo: req.method, caminho, busca: url.search, corpo: json,
+                    autorizacao: req.headers.authorization || null });
 
     // `.single()` e `.maybeSingle()` pedem UM OBJETO, e não uma lista: o
     // cliente manda `Accept: application/vnd.pgrst.object+json` e espera o

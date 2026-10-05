@@ -7654,5 +7654,142 @@ console.log("\n55. A mensagem agendada sai na hora, e não antes");
   }
 }
 
+// ============================================================
+//  56. TRANSCREVER UM ÁUDIO, AO CLICAR
+//
+//  A ponte é quem fala com o Groq (a chave mora aqui, na Render). O que esta
+//  seção guarda:
+//    - a mensagem é lida COMO QUEM PEDIU (o bilhete dela), para a regra de
+//      acesso do banco decidir quem transcreve o áudio de qual conversa;
+//    - a língua vai dita (pt) e a chave vai no cabeçalho;
+//    - o texto fica guardado, e a segunda vez não vai ao Groq;
+//    - dois cliques juntos são UMA ida ao Groq;
+//    - cada recusa diz o que fazer, e sem a coluna transcreve e não guarda.
+// ============================================================
+console.log("\n56. Transcrever um áudio, ao clicar");
+{
+  const http = await import("node:http");
+  // O GROQ DE MENTIRA, que também serve o arquivo do áudio. Guarda cada pedido
+  // de transcrição inteiro (cabeçalho e corpo) para as conferências lerem.
+  async function subirGroq({ status = 200, texto = "Bom dia, doutor, mandei o comprovante.", demora = 0 } = {}) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      if (req.url.startsWith("/audios/")) {
+        res.writeHead(200, { "Content-Type": "audio/ogg" });
+        return res.end(Buffer.from("OggS-audio-de-mentira"));
+      }
+      let corpo = Buffer.alloc(0);
+      for await (const p of req) corpo = Buffer.concat([corpo, p]);
+      pedidos.push({ caminho: req.url, autorizacao: req.headers.authorization, corpo: corpo.toString("latin1") });
+      if (demora) await espera(demora);
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(status === 200 ? { text: ` ${texto} ` } : { error: { message: "nope" } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const url = `http://127.0.0.1:${srv.address().port}`;
+    return { url, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const tabelas = (groq) => ({
+    contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+    conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }],
+    mensagens: [
+      { id: 501, conversa_id: 1, origem: "contato", tipo: "audio", midia_url: `${groq.url}/audios/a.ogg`, midia_mime: "audio/ogg; codecs=opus" },
+      { id: 502, conversa_id: 1, origem: "contato", tipo: "audio", midia_url: `${groq.url}/audios/b.ogg`, midia_mime: "audio/ogg" },
+      { id: 503, conversa_id: 1, origem: "contato", tipo: "texto", texto: "oi" },
+      { id: 504, conversa_id: 1, origem: "contato", tipo: "audio", midia_url: null },
+    ],
+  });
+  const pedir = (t, id, jwt = "jwt-bom") => fetch(`http://127.0.0.1:${t.porta}/transcrever`, {
+    method: "POST",
+    headers: { ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}), "Content-Type": "application/json" },
+    body: JSON.stringify({ mensagem_id: id }),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json() }));
+  const daGroq = (groq) => ({ GROQ_API_KEY: "gsk-de-mentira", GROQ_API_URL: `${groq.url}/openai/v1` });
+
+  // ---- 56a. sem a chave, diz qual variável falta ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo({}, { tabelas: tabelas(groq) });
+    const r = await pedir(t, 501);
+    ok("sem a chave, a rota recusa e diz o nome da variável",
+       r.status === 503 && /GROQ_API_KEY/.test(r.corpo.erro || ""), JSON.stringify(r));
+    ok("e não foi ao Groq", groq.pedidos.length === 0);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 56b. o caminho inteiro ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(daGroq(groq), { tabelas: tabelas(groq) });
+    const semLogin = await pedir(t, 501, null);
+    ok("sem login, recusa", semLogin.status === 401, JSON.stringify(semLogin));
+
+    const r = await pedir(t, 501);
+    ok("transcreve e devolve o texto, sem os espaços das pontas",
+       r.status === 200 && r.corpo.texto === "Bom dia, doutor, mandei o comprovante.", JSON.stringify(r));
+    ok("e diz que guardou", r.corpo.guardada === true, JSON.stringify(r.corpo));
+    const leitura = t.sb.chamadas.find((c) => c.metodo === "GET" && /mensagens/.test(c.caminho) && /id=eq\.501/.test(c.busca));
+    ok("a mensagem foi lida COMO QUEM PEDIU (o bilhete da pessoa)",
+       leitura && leitura.autorizacao === "Bearer jwt-bom", JSON.stringify(leitura && leitura.autorizacao));
+    const p = groq.pedidos[0] || {};
+    ok("a chave do Groq foi no cabeçalho", p.autorizacao === "Bearer gsk-de-mentira", String(p.autorizacao));
+    ok("pela rota de transcrição", /\/openai\/v1\/audio\/transcriptions$/.test(p.caminho || ""), String(p.caminho));
+    ok("com a língua dita (pt)", /name="language"\r\n\r\npt\r\n/.test(p.corpo || ""));
+    ok("com o modelo", /name="model"\r\n\r\nwhisper-large-v3-turbo\r\n/.test(p.corpo || ""));
+    ok("com o arquivo como .ogg (o Groq olha o nome)", /filename="audio\.ogg"/.test(p.corpo || ""));
+    ok("o texto ficou guardado na mensagem",
+       t.sb.dados.mensagens.find((m) => m.id === 501)?.transcricao === "Bom dia, doutor, mandei o comprovante.");
+
+    // ---- 56c. a segunda vez não vai ao Groq ----
+    const de2 = await pedir(t, 501);
+    ok("a segunda vez devolve o guardado", de2.status === 200 && de2.corpo.texto && de2.corpo.guardada === true);
+    ok("e não vai ao Groq de novo", groq.pedidos.length === 1, `foram ${groq.pedidos.length}`);
+
+    // ---- 56d. recusas que dizem o que fazer ----
+    const texto = await pedir(t, 503);
+    ok("mensagem que não é áudio: recusa", texto.status === 400 && /não é um áudio/.test(texto.corpo.erro || ""));
+    const nada = await pedir(t, 999);
+    ok("mensagem que não existe (ou não é dela): 'não achei'", nada.status === 404, JSON.stringify(nada));
+    const semArquivo = await pedir(t, 504);
+    ok("áudio sem arquivo: diz que o arquivo não chegou", semArquivo.status === 409, JSON.stringify(semArquivo));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 56e. dois cliques juntos, uma ida ao Groq ----
+  {
+    const groq = await subirGroq({ demora: 400 });
+    const t = await subirTudo(daGroq(groq), { tabelas: tabelas(groq) });
+    const [a, b] = await Promise.all([pedir(t, 502), pedir(t, 502)]);
+    ok("os dois recebem o texto", a.status === 200 && b.status === 200 && a.corpo.texto === b.corpo.texto,
+       JSON.stringify([a, b]));
+    ok("e o Groq foi chamado uma vez só", groq.pedidos.length === 1, `foram ${groq.pedidos.length}`);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 56f. o Groq recusando a chave ----
+  {
+    const groq = await subirGroq({ status: 401 });
+    const t = await subirTudo(daGroq(groq), { tabelas: tabelas(groq) });
+    const r = await pedir(t, 501);
+    ok("chave recusada: a frase manda conferir a GROQ_API_KEY",
+       r.status === 502 && /recusou a chave/.test(r.corpo.erro || "") && /GROQ_API_KEY/.test(r.corpo.erro || ""),
+       JSON.stringify(r));
+    ok("e nada é guardado", !t.sb.dados.mensagens.find((m) => m.id === 501)?.transcricao);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 56g. sem o script 015: transcreve e não guarda ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(daGroq(groq), { tabelas: tabelas(groq),
+      semColunas: { mensagens: ["transcricao", "transcrita_em"] } });
+    const r = await pedir(t, 501);
+    ok("sem a coluna, a pessoa recebe o texto assim mesmo", r.status === 200 && Boolean(r.corpo.texto), JSON.stringify(r));
+    ok("e a resposta diz que não guardou", r.corpo.guardada === false, JSON.stringify(r.corpo));
+    ok("e o log diz qual script falta", /015-a-transcricao-do-audio\.sql/.test(t.registro.join("")));
+    await t.parar(); await groq.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
