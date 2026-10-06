@@ -972,6 +972,37 @@ quebrado sem derrubar a conversa, reaplicação (a etapa desativada continua
 desativada) e banco limpo (a 51l-bis passa). **A conferência do fim CHAMA a
 leitura no papel `authenticated`** — a régua do 012.
 
+## Tarefas e lembretes (script 018, 06/10)
+
+Terceiro passo para CRM, depois do responsável e do funil: o "quando agir de
+novo". Decidido com o Rodrigo: **a tarefa é de uma conversa**, quem vê a
+conversa vê as tarefas dela (a equipe do telefone), e **só quem recebeu é
+avisado** na hora.
+
+`sql/automaticos/018-tarefas-e-lembretes.sql`, uma tabela só,
+`zorvin_tarefas`: `conversa_id`, `texto` (1 a 500), `vence_em`, `para_quem`
+(`usuarios.id`, `on delete set null`), `criada_por`/`criada_em` e
+`feita_em`/`feita_por`.
+
+**Quem criou e quem concluiu são do gatilho** (`zorvin_tarefa_quem`), e não
+da tela: `criada_por` é sempre quem entrou, não muda depois, e reabrir limpa
+`feita_por`. **Apagar é permitido**, e é decisão: tarefa criada por engano não
+é histórico, e "concluída" no lugar de "apagada" contaria como trabalho feito.
+
+**Quem vê é quem vê a conversa**: as políticas perguntam a `conversas` numa
+subconsulta, e a regra de acesso de `conversas` vale lá dentro, no papel de
+quem pergunta. Nenhuma segunda escrita da permissão.
+
+**O aviso na hora é do PAINEL**, e não do banco nem da ponte — a ponte não
+faz nada com isso.
+
+Conferido num Postgres 16 de verdade, 12 cenas (quem criou mesmo mandando
+outro; criar e ver só no telefone que atende; concluir e reabrir; quem criou
+não muda; apagar só o que vê; texto vazio recusado; pessoa apagada vira sem
+dono; conversa apagada leva as tarefas), reaplicação, banco limpo, e **3
+sabotagens com 3 pegas** (leitura aberta, `criada_por` da tela, reabrir sem
+limpar). A conferência do fim lê a tabela como `authenticated`.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
