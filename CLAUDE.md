@@ -924,6 +924,54 @@ como dona dizia "sim". **A régua que fica:**
 - **Função nova que quem atende chama: a conferência a CHAMA como
   `authenticated`**, e não só pergunta se ela existe.
 
+## O funil de etapas (script 017, 06/10)
+
+Pedido do Rodrigo como segundo passo para CRM, depois do responsável. Decidido
+com ele: **um funil por departamento**, as etapas sugeridas (Novo contato → Em
+atendimento → Aguardando cliente → Proposta/acordo enviado → Acordo fechado →
+Em execução → Encerrado) editáveis na administração, e **o cartão é o
+cliente** — que, enquanto o Zorvin não tem ficha própria, é o CONTATO: a
+mesma pessoa por dois números são dois cartões, e isso foi dito a ele antes.
+
+`sql/automaticos/017-o-funil-de-etapas.sql`, três tabelas:
+
+| tabela | o que guarda |
+|---|---|
+| `zorvin_etapas` | as colunas de cada funil (`departamento_id`, `ordem`, `cor`, `ativo`) |
+| `zorvin_cartoes` | em que etapa está cada cliente — **um** por (contato, departamento) |
+| `zorvin_movimentos` | de qual etapa para qual, quem e quando |
+
+**Etapa não se apaga, desativa-se** — a régua dos assuntos do "Já tratei":
+não há política de DELETE. **O histórico é escrito por gatilho**
+(`security definer`), e quem entrou só o LÊ: não há como mover sem deixar
+rastro, nem escrever rastro falso. **A etapa tem de ser do mesmo
+departamento do cartão** — um gatilho confere e recusa com 23514, senão um
+cartão do SAC poderia parar numa coluna do SDC e sumir dos dois funis.
+
+**Quem vê um cartão é quem vê as conversas daquele cliente naquele
+departamento**: a regra (`zorvin_ve_no_funil`, `security invoker`) pergunta
+às próprias `conversas` e herda a permissão de telefones e departamentos que
+já existe.
+
+**O cliente novo entra sozinho** na primeira etapa ATIVA, por gatilho em
+`conversas` — grupo não entra, telefone sem departamento não entra, e o corpo
+vive num `exception when others`: funil quebrado não pode derrubar a conversa
+nova (perder mensagem de cliente é o pior desfecho deste sistema). **O que
+já existia não entra sozinho**: quem administra traz pela tela, por
+`zorvin_funil_trazer(p_departamento, p_dias)`, que devolve quantos entraram.
+
+**A ponte não faz nada com isso**, como no responsável: é banco e painel.
+
+Conferido num Postgres 16 de verdade, 20 cenas: o cliente novo entrando, o
+grupo de fora, o cartão nos dois departamentos, o trazer só de quem
+administra (e 0 na segunda vez), a atendente vendo só o SAC, o movimento com
+quem moveu, a etapa de outro funil recusada, a atendente sem alcançar o SDC
+nem escrever movimento, criar ou apagar etapa, o cartão apagado deixando
+rastro, a primeira etapa desativada mandando o novo para a seguinte, o funil
+quebrado sem derrubar a conversa, reaplicação (a etapa desativada continua
+desativada) e banco limpo (a 51l-bis passa). **A conferência do fim CHAMA a
+leitura no papel `authenticated`** — a régua do 012.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
