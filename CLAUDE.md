@@ -972,6 +972,33 @@ quebrado sem derrubar a conversa, reaplicação (a etapa desativada continua
 desativada) e banco limpo (a 51l-bis passa). **A conferência do fim CHAMA a
 leitura no papel `authenticated`** — a régua do 012.
 
+### O relatório do funil (script 019, 07/10)
+
+`sql/automaticos/019-o-relatorio-do-funil.sql` cria
+`zorvin_relatorio_funil(p_desde, p_ate, p_departamento, p_telefone)`: por
+departamento e por etapa, quantos cartões estão nela AGORA (com a mediana de
+há quanto tempo e o mais parado), e NO PERÍODO quantos entraram, quantos
+saíram e quanto tempo ficaram os que saíram (mediana e média). A tela é uma
+seção do Painel de números.
+
+**O tempo numa etapa sai dos movimentos**: a saída é o movimento com
+`de_etapa` = a etapa, a chegada é o último com `para_etapa` = a etapa ANTES
+dela. **Só quem saiu conta** — o "até agora" de quem ficou vai à parte.
+
+**`security invoker`**, como o 010 e o 011, e **só aparecem os departamentos
+em que quem chama vê alguma conversa**. Sem o 017 responde
+`{"falta": "017"}`. De `advogados` só `departamento_id`, pelo nome — a régua
+do 012; **e a conferência do fim chama a função como `authenticated` COM um
+telefone**, porque é o caminho com filtro que lê `advogados`: chamada sem
+telefone, a sabotagem do `to_jsonb(a)` passava. Entraram também dois índices
+em `zorvin_movimentos` para a conta da chegada.
+
+Conferido num Postgres 16 de verdade (as contas batidas à mão: 4 entradas, 3
+saídas, mediana de 2 dias de (4, 2, 1) e média 2,33; o cliente que VOLTA a
+uma etapa; o período curto; o filtro de telefone; quem não administra só no
+departamento que atende; etapa desativada vazia some e com cartão fica;
+banco limpo; reaplicação) e **5 sabotagens com 5 pegas**.
+
 ## Tarefas e lembretes (script 018, 06/10)
 
 Terceiro passo para CRM, depois do responsável e do funil: o "quando agir de
