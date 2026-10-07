@@ -39,6 +39,18 @@ anterior passou. O nome em português é para o arquivo dizer sozinho o que faz 
    `permission denied for table advogados` por causa de um `to_jsonb(a)`. Ver
    como o 012 chama a função com `set_config('role', 'authenticated', true)`.
 
+5. **"Pode rodar de novo sem medo" vale para a pasta INTEIRA, na ordem — não
+   para um script velho sozinho.** Medido na auditoria de 07/10: o 004 e o 005
+   fazem `create or replace` das funções da espera nas versões DELES; rodar o
+   004 de novo, sozinho, depois do 006, desfaz a carência de 30 minutos e
+   devolve à fila toda conversa tirada pelo "Já tratei". O 009 rodado de novo
+   recria o "OUTROS" se alguém o renomeou ou desativou. Se for preciso rodar um
+   antigo, rode **todos daquele em diante, na ordem**. E daqui para a frente:
+   **a versão de referência de uma função compartilhada mora só no script
+   mais novo que a recria** (o gatilho da espera, hoje, é o do 020), e um
+   script que semeia linha (como o "OUTROS") só semeia na rodada que CRIA a
+   coluna ou a tabela.
+
 Quem precisar de algo que não roda dentro de transação (`create index
 concurrently`) escreve `-- sem-transacao` na **primeira linha** do arquivo.
 
