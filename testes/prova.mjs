@@ -2360,7 +2360,11 @@ console.log("\n18. O anexo não fica vazio");
 //  `console.error` genérico e a mensagem ia embora sem nada dizer que era
 //  mensagem de cliente — e sem aparecer em lugar nenhum que alguém consultasse.
 {
-  console.log("\nA busca do advogado falhando");
+  // COM A CAIXA DE ENTRADA (auditoria de 07/10): a falha SOBE, e o evento
+  // fica pendente na caixa para a rodada seguinte — a regra 2 da caixa. Antes
+  // era `return`: a caixa marcava o evento como resolvido com a mensagem do
+  // cliente fora do banco, para sempre.
+  console.log("\nA busca do advogado falhando — com a caixa de entrada");
   const t = await subirTudo({}, {
     quebrar: (metodo, tabela) => (metodo === "GET" && tabela.startsWith("advogados"))
       ? "banco fora do ar" : null,
@@ -2371,6 +2375,34 @@ console.log("\n18. O anexo não fica vazio");
     body: JSON.stringify(mensagemDaUazapi("Oi", "falha-1")),
   });
   await espera(900);
+
+  const caixa = t.sb.dados.eventos_recebidos || [];
+  ok("o evento fica guardado na caixa", caixa.length === 1, JSON.stringify(caixa.length));
+  ok("e NÃO é dado como resolvido — a rodada seguinte tenta de novo",
+     caixa.length === 1 && !caixa[0].processado_em, JSON.stringify(caixa[0] || null));
+  ok("e o log não diz que a mensagem se perdeu, porque não se perdeu",
+     !/MENSAGEM DE CLIENTE PERDIDA/.test(t.registro.join("")));
+
+  await t.parar();
+}
+{
+  // SEM A CAIXA, a perda é de verdade, e o diagnóstico é o único rastro.
+  console.log("\nA busca do advogado falhando — sem a caixa de entrada");
+  const t = await subirTudo({}, {
+    semTabelas: ["eventos_recebidos"],
+    quebrar: (metodo, tabela) => (metodo === "GET" && tabela.startsWith("advogados"))
+      ? "banco fora do ar" : null,
+  });
+
+  // A PRIMEIRA mensagem é a que descobre que a caixa não existe; a SEGUNDA já
+  // sabe, e é nela que o diagnóstico tem de sair.
+  for (const id of ["falha-0", "falha-1"]) {
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mensagemDaUazapi("Oi", id)),
+    });
+    await espera(600);
+  }
 
   const log = t.registro.join("");
   ok("o aviso diz que é mensagem de cliente sendo perdida",
@@ -7788,6 +7820,105 @@ console.log("\n56. Transcrever um áudio, ao clicar");
     ok("e a resposta diz que não guardou", r.corpo.guardada === false, JSON.stringify(r.corpo));
     ok("e o log diz qual script falta", /015-a-transcricao-do-audio\.sql/.test(t.registro.join("")));
     await t.parar(); await groq.parar();
+  }
+}
+
+// ==================================================================
+//  57. A AUDITORIA DE 07/10
+// ==================================================================
+//  Uma conferência para cada conserto da varredura que não tinha prova
+//  própria. A da busca do advogado (a mensagem que se perdia) está na seção
+//  "A busca do advogado falhando", lá em cima.
+{
+  console.log("\n57. A auditoria de 07/10");
+  const comoAdmin = { Authorization: "Bearer jwt-bom" };
+  const pedirJson = (t, caminho, corpo) => fetch(`http://127.0.0.1:${t.porta}${caminho}`, {
+    method: "POST", headers: { ...comoAdmin, "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) }));
+
+  // ---- 57a. "Tirar este número" da ficha: o navegador precisa poder DELETE ----
+  {
+    const t = await subirTudo();
+    const r = await fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/telefones/9`, {
+      method: "OPTIONS",
+      headers: { Origin: "https://zorvin.example", "Access-Control-Request-Method": "DELETE" },
+    });
+    ok("a consulta prévia do navegador libera DELETE",
+       /DELETE/.test(r.headers.get("access-control-allow-methods") || ""),
+       r.headers.get("access-control-allow-methods"));
+    await t.parar();
+  }
+
+  // ---- 57b. conta desativada perde o acesso; reativada, recupera ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: {
+        usuarios: [
+          { id: "u1", login: "rodrigo", nome: "Rodrigo", email: "rodrigo@x", admin: true, ativo: true, acesso: null },
+          { id: "u2", login: "maria", nome: "Maria", email: "maria@x", admin: false, ativo: true, acesso: null },
+        ],
+        departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
+        permissoes: [],
+      },
+    });
+    const linhasDaMaria = () => (t.sb.dados.permissoes || []).filter((p) => p.usuario_id === "u2").length;
+    await pedirJson(t, "/permissoes/atendente", { usuario_id: "u2", departamentos: ["comercial"] });
+    ok("com acesso dado, a Maria tem a linha de permissão", linhasDaMaria() === 1, String(linhasDaMaria()));
+    const r = await pedirJson(t, "/permissoes/atendente", { usuario_id: "u2", ativo: false });
+    ok("desativar responde certo", r.status === 200, JSON.stringify(r));
+    ok("e TIRA o acesso: nenhuma linha de permissão sobra", linhasDaMaria() === 0, String(linhasDaMaria()));
+    await pedirJson(t, "/permissoes/atendente", { usuario_id: "u2", ativo: true });
+    ok("reativada, o acesso de antes volta", linhasDaMaria() === 1, String(linhasDaMaria()));
+    await t.parar();
+  }
+
+  // ---- 57c. juntar conversas leva junto as tarefas e o "Já tratei" ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: {
+        usuarios: [{ id: "u1", login: "rodrigo", nome: "Rodrigo", email: "rodrigo@x", admin: true, ativo: true }],
+        contatos: [{ id: "ct1", numero: "5511999990001", nome: "Cliente" }],
+        conversas: [
+          { id: "cv-de", advogado_id: TELEFONE.id, contato_id: "ct1", nao_lidas: 0 },
+          { id: "cv-para", advogado_id: TELEFONE.id, contato_id: "ct1", nao_lidas: 0 },
+        ],
+        zorvin_tarefas: [{ id: "tf1", conversa_id: "cv-de", texto: "ligar", vence_em: "2026-10-10T12:00:00Z" }],
+        zorvin_tratamentos: [{ id: "tr1", conversa_id: "cv-de", assunto_id: "a1", quem: "u1", quando: "2026-10-01T12:00:00Z" }],
+      },
+    });
+    const r = await pedirJson(t, "/conversas/juntar", { de: "cv-de", para: "cv-para" });
+    ok("a junção responde", r.status === 200, JSON.stringify(r));
+    ok("a tarefa da conversa que sai vai para a que fica",
+       (t.sb.dados.zorvin_tarefas || []).every((x) => x.conversa_id === "cv-para"),
+       JSON.stringify(t.sb.dados.zorvin_tarefas));
+    ok("e o registro do “Já tratei” também",
+       (t.sb.dados.zorvin_tratamentos || []).every((x) => x.conversa_id === "cv-para"),
+       JSON.stringify(t.sb.dados.zorvin_tratamentos));
+    await t.parar();
+  }
+
+  // ---- 57d. "entregue" atrasado não rebaixa "lida" ----
+  {
+    const t = await subirTudo({}, {
+      tabelas: {
+        mensagens: [
+          { id: 1, conversa_id: "c", origem: "advogado", id_uazapi: "M-LIDA", status: "lida" },
+          { id: 2, conversa_id: "c", origem: "advogado", id_uazapi: "M-NOVA", status: null },
+        ],
+      },
+    });
+    const status = (id, st) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ EventType: "messages_update", owner: TELEFONE.numero,
+                             message: { messageid: id, status: st } }),
+    });
+    await status("M-LIDA", "delivered");
+    await status("M-NOVA", "delivered");
+    await espera(500);
+    const m = (id) => (t.sb.dados.mensagens.find((x) => x.id_uazapi === id) || {}).status;
+    ok("a lida continua lida", m("M-LIDA") === "lida", String(m("M-LIDA")));
+    ok("e a sem status passa a entregue", m("M-NOVA") === "entregue", String(m("M-NOVA")));
+    await t.parar();
   }
 }
 

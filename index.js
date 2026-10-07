@@ -12,6 +12,12 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+// A RENDER FICA NA FRENTE (auditoria de 07/10): sem isto `req.ip` é o endereço
+// do balanceador dela, o MESMO para todo mundo — e o freio de tentativas de
+// entrada (por ip + login) virava um freio só por login: oito senhas erradas
+// de qualquer lugar trancavam a pessoa de verdade por cinco minutos. Um salto:
+// o endereço que o balanceador acrescenta, e não o que o navegador escreve.
+app.set('trust proxy', 1);
 // O CORPO CRU FICA GUARDADO, e não só o JSON já lido.
 //
 // O aviso que o Vantoro manda vem assinado sobre os BYTES que ele enviou. Para
@@ -301,7 +307,12 @@ async function mudarDeConversa(origemId, destinoId) {
     .eq('conversa_id', origemId);
   if (error) return { erro: error.message };
 
-  for (const tabela of ['notas', 'fila_envio']) {
+  // AS TAREFAS E O "JÁ TRATEI" VÃO JUNTO (auditoria de 07/10). As duas
+  // tabelas apontam para a conversa com `on delete cascade` (scripts 018 e
+  // 005): sem mudá-las de casa, apagar a conversa de origem logo depois
+  // apagava os lembretes abertos e o histórico do que foi tratado com o
+  // cliente — na junção manual e na automática dos grupos.
+  for (const tabela of ['notas', 'fila_envio', 'zorvin_tarefas', 'zorvin_tratamentos']) {
     const { error: e } = await supabase
       .from(tabela).update({ conversa_id: destinoId }).eq('conversa_id', origemId);
     if (e) console.log(`Junção: não movi "${tabela}" (${e.message}).`);
@@ -1685,7 +1696,22 @@ async function processarEventoDoWebhook(corpo) {
       .select('*')
       .eq('numero', advogadoNumero)
       .limit(2);
-    if (advErro) { mensagemDescartada(advogadoNumero, 'busca', advErro.message); return; }
+    // FALHA DE BANCO SOBE (auditoria de 07/10) — a regra 2 da caixa de
+    // entrada. Era `return`: com o evento já guardado e o "OK" já dado à
+    // Uazapi, um tropeço nesta leitura fazia a caixa marcar o evento como
+    // resolvido com a mensagem do cliente fora do banco, para sempre. Subindo,
+    // a rodada de 30s tenta de novo.
+    //
+    // O DIAGNÓSTICO CONTINUA SÓ QUANDO A PERDA É DE VERDADE: sem a caixa de
+    // entrada (a tabela que não existe), nada tenta de novo e a mensagem se
+    // perde — aí o aviso "MENSAGEM DE CLIENTE PERDIDA" e o
+    // `/webhook/desconhecidos` são o único rastro. Com a caixa, ela volta na
+    // rodada seguinte, e dizer "perdida" mandaria procurar um sumiço que não
+    // houve.
+    if (advErro) {
+      if (caixaDesligada) mensagemDescartada(advogadoNumero, 'busca', advErro.message);
+      throw new Error(`não consegui ler o telefone ${advogadoNumero}: ${advErro.message}`);
+    }
     const adv = (achados || [])[0] || null;
     if (!adv) { mensagemDescartada(advogadoNumero, 'nao_cadastrado'); return; }
     if (achados.length > 1) avisarDuplicado(advogadoNumero);
@@ -2398,11 +2424,23 @@ async function tratarStatusMensagem(body, evento) {
       return;
     }
 
-    const { error } = await supabase
+    // "ENTREGUE" NUNCA REBAIXA "LIDA" (auditoria de 07/10). Os avisos chegam
+    // fora de ordem — sobretudo quando a caixa de entrada reprocessa eventos
+    // atrasados —, e um "entregue" tardio voltava o tique azul para cinza.
+    // Duas gravações, e não um `neq` só: no Postgres `status <> 'lida'` deixa
+    // de fora quem tem status NULO, e a mensagem sem status nunca subiria.
+    const atualizar = () => supabase
       .from('mensagens')
       .update({ status: novo })
       .eq('id_uazapi', id)
       .eq('origem', 'advogado'); // só marcamos "lida" nas mensagens que enviamos
+    let error;
+    if (novo === 'entregue') {
+      ({ error } = await atualizar().neq('status', 'lida'));
+      if (!error) ({ error } = await atualizar().is('status', null));
+    } else {
+      ({ error } = await atualizar());
+    }
     if (error) { console.error('Erro ao atualizar status:', error.message); return; }
     console.log(`Status "${novo}" aplicado à mensagem ${id}.`);
   } catch (e) {
@@ -3931,12 +3969,24 @@ async function processarFilaDeEnvio() {
       if (!claim || claim.length === 0) continue; // outro ciclo já pegou este item
 
       // Descobre para qual número enviar e por qual advogado (token/servidor).
-      const { data: conv } = await supabase
+      const { data: conv, error: erroConv } = await supabase
         .from('conversas')
         .select('id, contato:contato_id (numero), advogado:advogado_id (token, servidor, numero, nome, ativo)')
         .eq('id', item.conversa_id)
-        .single();
+        .maybeSingle();
 
+      // UM TROPEÇO DO BANCO NÃO É CADASTRO ERRADO (auditoria de 07/10). O erro
+      // desta leitura era ignorado, e a falha virava erro DEFINITIVO dizendo
+      // "conversa/advogado/contato não encontrado" — que a tela traduz como
+      // "é cadastro, avise quem administra". Nada saiu para o cliente ainda,
+      // então é seguro tentar de novo daqui a pouco.
+      if (erroConv) {
+        const bruto = `não consegui ler a conversa: ${erroConv.message}`;
+        if (!(await tentarDeNovoMaisTarde(item, bruto))) {
+          await marcarErroNaFila(item.id, bruto, item.aviso_vantoro_id);
+        }
+        continue;
+      }
       if (!conv || !conv.advogado || !conv.contato) {
         await marcarErroNaFila(item.id, 'Conversa/advogado/contato não encontrado', item.aviso_vantoro_id);
         continue;
@@ -4048,7 +4098,16 @@ async function processarFilaDeEnvio() {
           resposta = await enviarMidia(item.midia_url, 'url');
 
           // Se falhar, 2ª tentativa: baixa o arquivo e envia como base64.
-          if (!resposta.ok) {
+          //
+          // SÓ QUANDO A RECUSA PROVA QUE NADA SAIU (auditoria de 07/10) — a
+          // régua da fila inteira. Um 5xx, o 502/504 do caminho, é justamente
+          // o caso em que o pedido pode ter chegado inteiro e só a resposta se
+          // perdeu: mandar de novo em base64 seria o cliente recebendo o
+          // arquivo duas vezes. E o 429 é a Uazapi pedindo calma, que a fila
+          // já trata esperando. Fica o 4xx — o servidor recusou o pedido.
+          const recusouPorUrl = !resposta.ok && resposta.status >= 400
+            && resposta.status < 500 && resposta.status !== 429;
+          if (recusouPorUrl) {
             const det = await resposta.text().catch(() => '');
             console.log(`Envio por URL falhou (${resposta.status}): ${det.slice(0, 200)}`);
             try {
@@ -4088,9 +4147,18 @@ async function processarFilaDeEnvio() {
         // Tenta capturar o id que a Uazapi deu à mensagem enviada.
         // Serve como trava extra: se um eco chegar com o mesmo id, o banco
         // recusa a duplicata automaticamente.
+        //
+        // O CORPO É LIDO UMA VEZ SÓ, e guardado (auditoria de 07/10). A edição
+        // e a exclusão, mais abaixo, liam `resposta.json()` de novo — e o
+        // corpo de uma resposta só pode ser lido uma vez: a segunda leitura
+        // dava sempre `null`. A recusa da Uazapi ("editar depois de uma hora")
+        // nunca era vista, o banco era reescrito com uma correção que o
+        // cliente não recebeu, e o `id_uazapi` novo da edição nunca entrava.
         let idUazapi = null;
+        let corpoDaResposta = null;
         try {
-          const dados = await resposta.json();
+          corpoDaResposta = await resposta.json();
+          const dados = corpoDaResposta;
           idUazapi = dados?.messageid || dados?.id || dados?.message?.messageid || null;
         } catch (_) { /* resposta sem JSON: seguimos sem o id */ }
 
@@ -4119,7 +4187,7 @@ async function processarFilaDeEnvio() {
         // sem a pergunta, e não teria como saber que algo foi removido nem por
         // quem.
         if (ehExclusao) {
-          const dados = await resposta.json().catch(() => null);
+          const dados = corpoDaResposta;
           if (dados && (dados.success === false || dados.error)) {
             throw new Error(`Uazapi recusou apagar: ${dados.error || dados.message || 'sem detalhe'}`);
           }
@@ -4155,13 +4223,19 @@ async function processarFilaDeEnvio() {
           // Por isso o corpo é lido: se ele disser que não deu, o item vai
           // para 'erro' e o banco NÃO é reescrito, senão o Zorvin mostraria
           // uma correção que só existe aqui dentro.
-          const dados = await resposta.json().catch(() => null);
+          const dados = corpoDaResposta;
           if (dados && (dados.success === false || dados.error)) {
             throw new Error(`Uazapi recusou a edição: ${dados.error || dados.message || 'sem detalhe'}`);
           }
-          idNovo = dados?.messageid || dados?.id || dados?.message?.messageid || null;
+          // A TROCA DO `id_uazapi` FICA DESLIGADA até ser medida com uma
+          // resposta de verdade (auditoria de 07/10). Com o corpo lido duas
+          // vezes, `idNovo` sempre foi nulo — ou seja, a troca NUNCA rodou em
+          // produção. Ligá-la agora, sem saber se o `messageid` da resposta é
+          // o da mensagem editada ou o do aviso de edição, poderia apontar a
+          // bolha para um id que não serve para responder, reagir nem apagar.
+          // A regra da casa: não supor o comportamento da Uazapi.
+          void idNovo;
           const campos = { texto: novoTexto, editada: true };
-          if (idNovo) campos.id_uazapi = String(idNovo).split(':').pop();
           let { error: erroEd } = await supabase.from('mensagens')
             .update(campos).eq('id_uazapi', item.responder_id_uazapi);
           // Instalação sem a coluna `editada`: grava só o texto. Perder o selo
@@ -4367,7 +4441,11 @@ function liberarCors(res, req) {
   const permitida = origemPermitida();
   res.set('Access-Control-Allow-Origin', permitida);
   res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-  res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+  // DELETE TAMBÉM (auditoria de 07/10): "Tirar este número" da ficha chama
+  // `DELETE /vantoro/cliente/:id/telefones/:tel`, e sem ele aqui o navegador
+  // barrava o pedido na consulta prévia — a pessoa via "Failed to fetch". As
+  // provas chamam pelo Node, que não faz consulta prévia, e passavam.
+  res.set('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
 
   // O ERRO MAIS INVISÍVEL QUE ESTA PONTE PODE DAR.
   //
@@ -6121,10 +6199,18 @@ async function aplicarPermissoes(usuarioId, u, emMaos = null) {
   // Sem essa distinção, o primeiro login depois desta mudança apagaria a
   // permissão de todo mundo que ainda não tem perfil no Vantoro — o sistema
   // inteiro ficaria cego de uma vez, e por causa de uma melhoria.
-  if (!u || u.zorvin_definido !== true) return;
+  //
+  // CONTA DESATIVADA NÃO VÊ NADA (auditoria de 07/10). Desligar "Conta ativa"
+  // gravava `usuarios.ativo = false` e mais nada: esta rotina reaplicava as
+  // mesmas linhas, e a regra do banco (`meus_telefones`) não olha `ativo` para
+  // quem não administra — a pessoa que saiu continuava vendo as conversas.
+  // Sem nenhuma linha em `permissoes`, ela não alcança telefone nenhum. Vale
+  // também para quem nunca teve acesso definido: desativar é decisão tomada.
+  const desativada = Boolean(u) && u.ativo === false;
+  if (!u || (u.zorvin_definido !== true && !desativada)) return;
   // Admin vê tudo pelas regras de visibilidade; linha de permissão para ele
   // seria enfeite que confunde quem for conferir depois.
-  if (u.admin) return;
+  if (u.admin && !desativada) return;
 
   // DOIS CORTES, E O FINO GANHA DO GROSSO.
   //
@@ -6143,7 +6229,9 @@ async function aplicarPermissoes(usuarioId, u, emMaos = null) {
 
   const linhas = [];
 
-  if (soTelefones) {
+  if (desativada) {
+    // Lista vazia, de propósito: a diferença lá embaixo tira tudo o que houver.
+  } else if (soTelefones) {
     // `select('*')` e não a lista de colunas, pelo mesmo motivo das outras
     // rotinas: o formato de `advogados` varia com o que já foi rodado no banco.
     let fones = emMaos && emMaos.fones;
@@ -6782,6 +6870,21 @@ async function gravarAtendenteDaqui(req, usuario) {
   const salvo = { ...alvo, ...mudanca };
   const daTela = comoOPainelEspera(salvo);
 
+  // E A ENTRADA FECHA JUNTO (auditoria de 07/10). Sem Vantoro quem confere a
+  // senha é o Auth do Supabase, e ele não sabe de `usuarios.ativo`: a pessoa
+  // desativada continuava entrando. Bloqueada lá, ela não entra nem renova a
+  // sessão; reativada, volta a entrar. Falhar aqui não desfaz o resto — as
+  // permissões já saem abaixo, e o log diz o que faltou.
+  if (Object.prototype.hasOwnProperty.call(c, 'ativo') && Boolean(c.ativo) !== (alvo.ativo !== false)) {
+    try {
+      const { error: erroBan } = await supabase.auth.admin.updateUserById(alvo.id,
+        { ban_duration: c.ativo ? 'none' : '876000h' });
+      if (erroBan) console.log(`Conta de ${alvo.login || alvo.email}: não consegui ${c.ativo ? 'liberar' : 'bloquear'} a entrada (${erroBan.message}).`);
+    } catch (e) {
+      console.log(`Conta de ${alvo.login || alvo.email}: não consegui ${c.ativo ? 'liberar' : 'bloquear'} a entrada —`, (e && e.message) || e);
+    }
+  }
+
   // APLICAR AGORA, e não na próxima rodada. Falhando, a intenção continua
   // gravada e a rodada seguinte aplica — por isso o erro daqui não desfaz nada.
   let aplicada = false;
@@ -6977,6 +7080,11 @@ app.post('/etiqueta/contato', rotaVantoro(async (req) => {
   if (!contatoId || !tagId) {
     return { status: 400, corpo: { ok: false, erro: 'Informe contato_id e tag_id.' } };
   }
+  // A ETIQUETA SEGUE O CONTATO por todos os telefones, de propósito — mas só
+  // quem enxerga ALGUMA conversa dele pode mexer nela.
+  const alcanca = await alcancaConversa(req, 'contato_id', contatoId);
+  if (alcanca === null) return { status: 502, corpo: { ok: false, erro: 'Não consegui conferir o seu acesso a este contato.' } };
+  if (!alcanca) return { status: 404, corpo: { ok: false, erro: 'Este contato não tem conversa nenhuma que você alcance.' } };
 
   const { data: convs, error } = await supabase
     .from('conversas').select('id').eq('contato_id', contatoId);
@@ -7204,6 +7312,9 @@ app.options('/contato/foto', (req, res) => { liberarCors(res); res.sendStatus(20
 app.post('/contato/foto', rotaVantoro(async (req) => {
   const conversaId = String((req.body && req.body.conversa_id) || '').trim();
   if (!conversaId) return { status: 400, corpo: { ok: false, erro: 'Informe a conversa.' } };
+  const alcanca = await alcancaConversa(req, 'id', conversaId);
+  if (alcanca === null) return { status: 502, corpo: { ok: false, erro: 'Não consegui conferir o seu acesso a esta conversa.' } };
+  if (!alcanca) return { status: 404, corpo: { ok: false, erro: 'Não achei essa conversa.' } };
 
   const { data: conv } = await supabase
     .from('conversas')
@@ -7287,6 +7398,21 @@ function bancoComo(jwt) {
     global: { headers: { Authorization: `Bearer ${jwt}` } },
     auth: { persistSession: false, autoRefreshToken: false },
   });
+}
+
+/** QUEM PEDIU ENXERGA ALGUMA CONVERSA COM ESTE FILTRO? Lido como ela, pela
+ *  regra de acesso do banco (auditoria de 07/10): as rotas de etiqueta e de
+ *  foto agiam com a chave da ponte sobre QUALQUER contato, e uma pessoa
+ *  logada mexia nas etiquetas — e puxava a foto — de clientes de telefones
+ *  que ela não atende. `null` quando a leitura falhou: falha não é "não pode",
+ *  e quem chama decide o que dizer. */
+async function alcancaConversa(req, coluna, valor) {
+  const jwt = String(req.headers.authorization || '').slice(7).trim();
+  if (!jwt) return false;
+  const { data, error } = await bancoComo(jwt)
+    .from('conversas').select('id').eq(coluna, valor).limit(1);
+  if (error) { console.error('alcance: não consegui conferir', error.message); return null; }
+  return (data || []).length > 0;
 }
 
 /** A extensão que o Groq usa para reconhecer o formato. Ele olha o NOME do
@@ -7415,9 +7541,11 @@ app.post('/transcrever', async (req, res) => {
 });
 
 app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
+  // `admin` E `ativo`, a régua de `soAdmin` e de `zorvin_admin()` (auditoria
+  // de 07/10): uma administradora desativada continuava lendo quem vê o quê.
   const { data: eu } = await supabase
-    .from('usuarios').select('admin').eq('id', usuario.id).maybeSingle();
-  if (!eu || !eu.admin) {
+    .from('usuarios').select('admin, ativo').eq('id', usuario.id).maybeSingle();
+  if (!eu || !eu.admin || eu.ativo === false) {
     return { status: 403, corpo: { ok: false, erro: 'Só quem administra pode abrir este diagnóstico.' } };
   }
 
@@ -7931,12 +8059,19 @@ async function definirFrente(contato, advogado, conversaId, body) {
       if (resposta) {
         frente = resposta.frente;
         if (frente === 'DESCONHECIDA' && veioDeAnuncio(body)) frente = 'LEAD';
-        await gravarTolerante('contatos', {
-          frente,
-          frente_em: new Date().toISOString(),
-          vantoro_cliente_id: resposta.cliente ? resposta.cliente.id : null,
-          vantoro_nome: resposta.cliente ? resposta.cliente.nome : null,
-        }, { id: contato.id }, 'frente do contato');
+        // O VÍNCULO SÓ É ESCRITO QUANDO O VANTORO ACHOU ALGUÉM (auditoria de
+        // 07/10). Escrever `null` quando ele não reconhece o telefone apagava
+        // o vínculo feito À MÃO — o cliente achado pelo CPF, ou "só abrir o
+        // cadastro, sem acrescentar este número" —, porque esses vínculos
+        // existem justamente para os números que o Vantoro não conhece. Uma
+        // semana depois a próxima mensagem desfazia o trabalho, calada: o nome
+        // voltava a ser o do WhatsApp e as notas paravam de subir.
+        const campos = { frente, frente_em: new Date().toISOString() };
+        if (resposta.cliente) {
+          campos.vantoro_cliente_id = resposta.cliente.id;
+          campos.vantoro_nome = resposta.cliente.nome;
+        }
+        await gravarTolerante('contatos', campos, { id: contato.id }, 'frente do contato');
       }
     }
 

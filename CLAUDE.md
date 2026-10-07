@@ -1030,6 +1030,54 @@ dono; conversa apagada leva as tarefas), reaplicação, banco limpo, e **3
 sabotagens com 3 pegas** (leitura aberta, `criada_por` da tela, reabrir sem
 limpar). A conferência do fim lê a tabela como `authenticated`.
 
+## A auditoria de 07/10
+
+Varredura inteira da ponte e dos scripts, cada achado conferido antes de
+mexer (a do painel está no CLAUDE.md dele). O que mudou aqui:
+
+| o que acontecia | agora |
+|---|---|
+| a busca do telefone falhando no meio do webhook fazia `return` — com o evento já guardado e o "OK" dado, a caixa o marcava como resolvido e **a mensagem do cliente se perdia** | SOBE (`throw`), a regra 2 da caixa; o aviso "MENSAGEM DE CLIENTE PERDIDA" só sai quando não há caixa (aí a perda é de verdade) |
+| edição e "apagar para todos" liam o corpo da resposta da Uazapi **duas vezes** — a segunda dava `null`, e a recusa nunca era vista | o corpo é lido uma vez (`corpoDaResposta`); a troca do `id_uazapi` na edição **fica desligada** até ser medida com resposta de verdade — com o corpo lido duas vezes ela nunca tinha rodado |
+| CORS sem `DELETE`: "Tirar este número" da ficha morria no navegador | liberado |
+| desligar "Conta ativa" (sem Vantoro) não tirava acesso nenhum | `aplicarPermissoes` tira todas as linhas de quem está desativado, e o Auth bloqueia a entrada (`ban_duration`); reativar devolve |
+| juntar conversas apagava (cascade) as tarefas e o "Já tratei" da que sai | mudam de conversa junto |
+| a mídia que falhava por URL era reenviada em base64 também em 5xx e 429 — o cliente podia receber o arquivo duas vezes | só no 4xx, a régua da fila |
+| a classificação semanal apagava o vínculo com o Vantoro feito à mão | só grava vínculo quando o Vantoro acha alguém |
+| um tropeço ao ler a conversa no envio virava erro definitivo "cadastro" | tenta de novo mais tarde |
+| sem `trust proxy`, o freio da entrada era só por login | um salto de proxy (a Render) |
+| `/permissoes/diagnostico` aceitava administradora desativada | exige `admin` e `ativo` |
+| um "entregue" atrasado rebaixava "lida" | nunca rebaixa (duas gravações: `neq` deixa o nulo de fora no Postgres) |
+| `/etiqueta/contato` e `/contato/foto` agiam sobre qualquer contato | conferem, lendo como quem pediu (`alcancaConversa`), que a pessoa vê alguma conversa dele |
+
+**E o script 020** (`sql/automaticos/020-a-auditoria-do-banco.sql`), com
+quatro consertos conferidos num Postgres 16 — os oito cenários reproduzem o
+defeito sem ele e passam com ele:
+
+- **a agendada só se edita antes da hora**: as políticas de UPDATE de
+  `fila_envio` se somam por "OU", e a do cancelar (que não olha a hora)
+  deixava a do editar valer depois da hora — e deixava um item com erro
+  voltar a `pendente`. Um gatilho, que enxerga a linha velha, recusa (42501)
+  quando é gente do painel; a ponte não passa por ele;
+- **o "Já tratei" só na conversa que a pessoa vê, e assinado por ela**: criar
+  e desfazer eram `true`, e `quem` vinha da tela. A leitura continua aberta
+  (decisão do 005, para o histórico do cliente);
+- **o gatilho da espera nunca derruba a mensagem**: a carência era lida na
+  declaração das variáveis, que o `exception` não protege. Este script é,
+  daqui para a frente, a versão de referência do gatilho;
+- **`tratada_em` no relógio do banco**, e não no do computador de quem clicou.
+
+**O LEIA-ME ganhou a regra 5:** "rode de novo sem medo" vale para a pasta
+inteira, na ordem — rodar o 004 sozinho depois do 006 desfaz a espera.
+
+**Ficou de fora, de propósito:** a reação e o envio para grupo com `@g.us`
+(depende de como a Uazapi responde — medir com um grupo de verdade); os
+avisos de audiência sem as variantes do nono dígito; o `/anexos/resgatar`
+pedindo mais de 1000 linhas.
+
+Prova: seção 57 (10 conferências) e a seção da busca do advogado refeita em
+duas cenas (com e sem a caixa), **5 sabotagens e 5 pegas**.
+
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
 Em 26/09 a instalação do script 005 custou **dez idas e voltas** e nenhuma
