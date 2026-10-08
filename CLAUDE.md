@@ -82,6 +82,14 @@ Duas coisas que valem lembrar antes de mexer nisso:
 - **a conta vive na memória e zera a cada reinício da Render.** Publicar reinicia.
   Números pequenos podem só querer dizer que a ponte subiu faz pouco — e a própria
   janela diz isso.
+- **a prova da chamada que não volta (49e) segura a porta.** Ela abria um
+  servidor e o fechava logo ("agora ninguém atende ali"), e em 08/10, na
+  integração contínua, outro servidor da bancada pegou a porta solta: a ponte
+  chamou a si mesma no lugar do Vantoro e a prova leu o 404 dela, com a conta
+  dizendo zero falhas. Reproduzido fazendo a porta "morta" responder 404 — as
+  mesmas duas reprovações, com os mesmos números. Hoje o servidor fica de pé
+  até o fim da cena, derrubando cada conexão. **Porta "livre" que a prova solta
+  não é de ninguém — é de quem pegar primeiro.**
 
 ## A entrada (login) — e por que ela tem dois caminhos
 

@@ -6372,10 +6372,19 @@ console.log("\n49. Quanto o Vantoro demora");
   {
     // Uma média feita só do que deu certo diz "tudo rápido" justamente quando
     // o que incomoda é a chamada que não voltou. A falha tem coluna própria.
+    //
+    // UM VANTORO QUE DERRUBA TODA CONEXÃO — E SEGURA A PORTA. Era um servidor
+    // aberto e fechado logo em seguida ("agora ninguém atende ali"), e a porta
+    // solta podia ser pega na hora por outro servidor da própria bancada.
+    // Medido na integração contínua em 08/10: a PONTE subiu nessa porta,
+    // chamou a si mesma no lugar do Vantoro, e a prova leu o 404 dela — "a
+    // chamada realmente falhou — veio 404", com a conta dizendo zero falhas.
+    // Segurando a porta até o fim da cena, ninguém mais a pega, e a chamada
+    // falha sempre do mesmo jeito.
     const morto = http.createServer(() => {});
+    morto.on("connection", (s) => s.destroy());
     await new Promise((r) => morto.listen(0, "127.0.0.1", r));
     const porta = morto.address().port;
-    await new Promise((r) => morto.close(r));   // agora ninguém atende ali
 
     const t = await subirTudo({ IMPORT_TOKEN: SENHA,
                                 VANTORO_API_URL: `http://127.0.0.1:${porta}`,
@@ -6389,6 +6398,7 @@ console.log("\n49. Quanto o Vantoro demora");
     ok("e marcada como falha, em vez de sumir da conta",
        linha && linha.falhas === 1, JSON.stringify(linha));
     await t.parar();
+    await new Promise((r) => morto.close(r));
   }
 
   // ---- 49f. a porta é do administrador ----
