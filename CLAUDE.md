@@ -50,7 +50,8 @@ Variáveis de ambiente (no Render):
   aplicar sozinha os scripts de `sql/automaticos/`. **Opcional: sem ela, tudo
   como antes** e as mudanças de banco continuam sendo coladas à mão. Ver "Os
   scripts que se aplicam sozinhos" abaixo. Pode ir **como a Supabase mostra**,
-  com `[YOUR-PASSWORD]` dentro.
+  com `[YOUR-PASSWORD]` dentro. **No escritório ela está ligada desde 08/10**,
+  com `SCRIPTS_AUTOMATICOS=aplicar` — ver "Ligado em produção".
 - `DATABASE_PASSWORD` — a senha do banco, à parte do endereço. **Opcional**, e é
   o jeito recomendado: senha com `@`, `#`, `/` ou `?` escrita crua dentro do
   endereço o parte no lugar errado.
@@ -499,6 +500,34 @@ nem tocava (51w) — era um descompasso de verdade: a próxima tentativa era
 apagada DEPOIS de a rodada voltar, e quem perguntasse no meio lia "em dia" ao
 lado de uma tentativa marcada. Hoje ela se apaga no começo da rodada. Uma variável
 própria para a bancada: `SCRIPTS_TENTAR_DE_NOVO_MS` (a primeira espera).
+
+### Ligado em produção (08/10) — e o marco que eu ia dar errado
+
+**Antes de pôr o marco, ele foi MEDIDO.** Eu vinha afirmando que de 001 a 020
+tinham sido colados à mão — e uma consulta só de leitura, que procura no banco
+o que cada script deixa (uma coluna, uma tabela, uma função, o gatilho),
+respondeu que **o 001 e o 002 nunca tinham sido colados**. Os dois nasceram em
+14/09 para quem compra sem Vantoro, e nenhum pedido de SQL ao Rodrigo os
+incluiu. Com `SCRIPTS_RODADOS_A_MAO=020` sem a conferência, os dois ficariam
+anotados como aplicados sem estar no banco — e nunca mais rodariam, calados.
+
+**Os dois foram colados à mão antes do marco**, num bloco só com a conferência
+no fim (dois `true`). No escritório eles não mudam nada para a equipe: o 002 é
+uma coluna que só o caminho sem Vantoro usa, e o gatilho do 001 cria a linha
+de `usuarios` que a entrada com Vantoro sobrescreve logo depois — conferido no
+código (`upsert(..., { onConflict: 'id' })` em `/auth/login`) e num Postgres
+de teste, rodando o bloco duas vezes.
+
+Depois, na Render: `DATABASE_URL` (Session pooler, com `[YOUR-PASSWORD]`),
+`DATABASE_PASSWORD`, `SCRIPTS_RODADOS_A_MAO=020` e `SCRIPTS_AUTOMATICOS=aplicar`.
+A primeira subida, às 15:53, disse na aba do painel: **"Em dia"** e **"20
+scripts colados à mão antes de a ponte aplicar sozinha (001 a 020)"**.
+`SCRIPTS_RODADOS_A_MAO` ficou na Render: com histórico ela é ignorada.
+
+**A régua que fica: o marco é uma afirmação sobre o banco, e afirmação sobre o
+banco se MEDE antes de virar configuração.** A consulta custou uma colada; o
+palpite custaria dois scripts sumidos sem nenhum aviso — a armadilha nº 2 com
+outra roupa, no lugar onde ninguém olharia de novo.
 
 ## A equipe sem Vantoro — a mesma tela, outra fonte
 
@@ -1211,12 +1240,25 @@ depois dela falhou e levou a criação junto. Ao diagnosticar, peça a mensagem 
 erro **inteira** antes de formular hipótese: as duas que formulei sem ela
 estavam erradas.
 
-**Fato lateral medido no mesmo dia:** `zorvin_scripts_aplicados` **não existe**
+~~**Fato lateral medido no mesmo dia:** `zorvin_scripts_aplicados` **não existe**
 no banco do escritório, ou seja, `DATABASE_URL` não está no Render e a ponte
 **nunca aplicou script sozinha**. Tudo o que está lá foi colado à mão. A
 automação de `sql/automaticos/` está escrita, provada e desligada em produção —
 enquanto for assim, todo script novo é um pedido ao Rodrigo, e vale o que está
-escrito acima.
+escrito acima.~~ **LIGADA EM 08/10** — ver "Ligado em produção", em "Os
+scripts que se aplicam sozinhos". Daqui para a frente:
+
+- **script novo de banco NÃO vai para o chat.** Ele entra em
+  `sql/automaticos/` com o próximo número, e a ponte o aplica na publicação
+  que vem com o merge. Mandar o mesmo SQL para o Rodrigo colar seria rodá-lo
+  duas vezes — e um script que não aguente a segunda rodada quebraria ali;
+- **o pedido ao Rodrigo passa a ser CONFERIR**, em Departamentos e acessos →
+  **Atualizações do banco**: o script novo aparece com o selo "nesta subida" e
+  com a conferência dele (a última linha) sem nada pintado de vermelho. Se
+  falhar, a faixa vermelha do painel avisa quem administra sozinha;
+- **as quatro regras acima continuam valendo** para o SQL que ainda vai para o
+  chat — a consulta só de leitura, para medir alguma coisa, como a que
+  conferiu de 001 a 020 antes do marco.
 
 ## As provas rodavam duas vezes, e a franquia da conta acabou
 
