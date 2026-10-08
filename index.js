@@ -8481,18 +8481,105 @@ async function contarComoEstaAEntrada() {
 //
 //  Armadilha nº 5: tabela nova em `public` já nasceu aberta para `anon` uma vez
 //  neste projeto. Esta liga RLS e NÃO cria política nenhuma — então só a ponte
-//  (`service_role`, que passa por cima de RLS) a alcança. O painel não vai ler
-//  esta tabela direto: quando ele precisar mostrar isto, será por
-//  `zorvin_saude()`, que já sabe quem é administrador.
+//  (`service_role`, que passa por cima de RLS) a alcança.
+//
+//  ------------------------------------------------------------
+//  OS SCRIPTS QUE JÁ FORAM COLADOS À MÃO — O MARCO (08/10)
+//
+//  MEDIDO em 26/09: `zorvin_scripts_aplicados` não existe no banco do
+//  escritório. De 001 a 020 tudo foi colado à mão, e a ponte não tem como saber
+//  disso: ligada como estava, ela rodaria os vinte DE NOVO na primeira subida.
+//  "Pode rodar de novo sem medo" vale para a pasta inteira, na ordem — mas não
+//  de graça: o 009 recria o "OUTROS" se alguém o renomeou ou desativou, e o 004
+//  e o 005 trocam as funções da espera pelas versões antigas até o 006 e o 020
+//  passarem de novo (regra 5 do LEIA-ME).
+//
+//  `SCRIPTS_RODADOS_A_MAO=020` diz isso à ponte: NA PRIMEIRA VEZ, com a tabela
+//  sem registro nenhum, ela anota de 001 a 020 com `origem = 'a_mao'` SEM RODAR
+//  nenhum, e daí em diante aplica só o que vier depois.
+//
+//  TRÊS CUIDADOS, e cada um fecha um jeito de errar calado:
+//
+//    • o número vai ESCRITO COMO NO NOME DO ARQUIVO ("020"). "02" é um erro de
+//      digitação plausível e, lido como número, seria o 002 — a ponte rodaria
+//      de novo de 003 a 020 achando que obedecia. Valor que não é o número de
+//      um arquivo da pasta é recusado, e NADA roda;
+//    • só vale NA PRIMEIRA VEZ. Com a tabela já tendo registro, a variável é
+//      ignorada, e o log diz isso: trocar o número depois não pode fazer a
+//      ponte pular calada um script que nunca rodou;
+//    • "0" quer dizer "nenhum foi colado à mão". É a saída de quem montou o
+//      Zorvin pelos scripts de `sql/` e nunca rodou um automático.
+//
+//  ------------------------------------------------------------
+//  A GUARDA: BANCO COM O ZORVIN E SEM REGISTRO NÃO RODA NADA
+//
+//  Esquecer a variável não pode ser o jeito de rodar os vinte de novo. Sem
+//  registro e sem o marco, a ponte pergunta se o banco já tem o Zorvin
+//  (`conversas`) — e, tendo, NÃO APLICA NADA e diz o que falta. Banco sem o
+//  Zorvin (um cliente novo, ou a bancada) segue como sempre seguiu.
+//
+//  ------------------------------------------------------------
+//  A SENHA À PARTE (`DATABASE_PASSWORD`)
+//
+//  O endereço que a Supabase mostra vem com `[YOUR-PASSWORD]` no lugar da
+//  senha, e trocar à mão tem uma armadilha que ninguém vê: senha com `@`, `#`,
+//  `/` ou `?` precisa ser ESCRITA EM CÓDIGO dentro de um endereço, e escrita
+//  crua ela parte o endereço no lugar errado — o banco responde "senha errada"
+//  para a senha certa. Com a senha numa variável própria, o endereço é colado
+//  como veio, e a senha vai inteira, sem passar por endereço nenhum.
+//
+//  ------------------------------------------------------------
+//  O QUE O PAINEL VÊ (`GET /scripts/estado`)
+//
+//  O log é o lugar onde este projeto já perdeu dois avisos importantes. Então
+//  o desfecho de cada subida fica em `estadoDosScripts`, e quem administra o lê
+//  no painel (Departamentos → Estrutura → Atualizações do banco).
+//
+//  POR UMA ROTA DA PONTE, e não por `zorvin_saude()` como estava previsto aqui:
+//  os defeitos que mais vão aparecer — senha errada, endereço errado — são
+//  justamente os que acontecem ANTES de a ponte alcançar o banco, e o banco não
+//  tem como contar o que nunca chegou a ele.
+//
+//  E A CONFERÊNCIA DE CADA SCRIPT FICA GUARDADA (`conferencia`). É a última
+//  linha dele — o `select` que respondia ao Rodrigo "deu certo?" no editor do
+//  Supabase. Agora ninguém vê o script rodar, então a ponte guarda o que ele
+//  respondeu, e o painel destaca um `false`, um "NÃO…" ou um "rode o script…".
 // ============================================================
 const BANCO_DIRETO = String(process.env.DATABASE_URL || '').trim();
-const SCRIPTS_AUTOMATICOS = String(process.env.SCRIPTS_AUTOMATICOS || 'conferir').trim().toLowerCase();
+const SENHA_DO_BANCO = String(process.env.DATABASE_PASSWORD || '').trim();
+// O MODO QUE FOI PEDIDO, guardado à parte do modo que vale: "aplica" (com a
+// letra faltando) vale como "conferir", que é o seguro — e a frase da tela diz
+// que foi isso que aconteceu, em vez de deixar a pessoa achando que ligou.
+const MODO_PEDIDO = String(process.env.SCRIPTS_AUTOMATICOS || '').trim().toLowerCase();
+const SCRIPTS_AUTOMATICOS = MODO_PEDIDO === 'aplicar' ? 'aplicar' : 'conferir';
+const MARCO_A_MAO = String(process.env.SCRIPTS_RODADOS_A_MAO || '').trim();
 // `SCRIPTS_PASTA` existe para a bancada, e segue a mesma linha de
 // `CAIXA_INTERVALO_MS` e `DESLIGAR_PRAZO_MS`: a prova sobe a ponte DE VERDADE
 // contra um Postgres DE VERDADE, e precisa apontá-la para scripts de mentira
 // sem escrever dentro da pasta do repositório. Em produção ninguém a define.
 const PASTA_DOS_SCRIPTS = String(process.env.SCRIPTS_PASTA || '').trim()
   || require('path').join(__dirname, 'sql', 'automaticos');
+
+// TENTAR DE NOVO, E QUANDO.
+//
+// Dois desfechos se resolvem sozinhos com o tempo, e esperar a próxima
+// publicação por eles seria deixar um script novo parado por dias:
+//
+//   • OUTRA PONTE COM A TRAVA. Numa publicação há duas pontes vivas por alguns
+//     segundos. A que desiste não pode ficar dizendo "outra ponte está
+//     cuidando disto" para sempre — é ela que fica no ar, e é ela que o painel
+//     pergunta;
+//   • O BANCO QUE NÃO RESPONDEU (tempo esgotado, conexão recusada ou cortada).
+//
+// Senha errada e endereço errado NÃO entram: não mudam sozinhos, e a Supabase
+// bloqueia o endereço de quem erra a senha muitas vezes seguidas — insistir
+// trocaria um aviso por um bloqueio.
+//
+// A espera dobra a cada tentativa (30s, 1min, 2min…) até dez minutos, e daí
+// segue de dez em dez. `SCRIPTS_TENTAR_DE_NOVO_MS` existe para a bancada
+// encurtar a primeira.
+const PRIMEIRA_ESPERA_MS = Math.max(200, Number(process.env.SCRIPTS_TENTAR_DE_NOVO_MS) || 30000);
+const MAIOR_ESPERA_MS = 10 * 60 * 1000;
 
 // Um número qualquer, fixo. O que importa é que as duas pontes usem o mesmo.
 const TRAVA_DOS_SCRIPTS = 823005001;
@@ -8501,6 +8588,31 @@ const TRAVA_DOS_SCRIPTS = 823005001;
 // no meio de um `create table` é exatamente o estado que a transação existe para
 // impedir.
 let scriptsRodando = false;
+
+// O DESFECHO DA ÚLTIMA RODADA, que é o que `GET /scripts/estado` devolve.
+// Vive na memória, e não é descuido: ele é refeito a cada subida, e as
+// rodadas só acontecem ao subir — o que ficou gravado no banco é relido junto.
+let estadoDosScripts = {
+  ligado: Boolean(BANCO_DIRETO),
+  modo: SCRIPTS_AUTOMATICOS,
+  situacao: BANCO_DIRETO ? 'rodando' : 'desligado',
+  mensagem: BANCO_DIRETO ? 'A ponte acabou de subir e está conferindo o banco.' : '',
+  detalhe: '',
+  quando: new Date().toISOString(),
+  servidor: '',
+  na_pasta: [],
+  pendentes: [],
+  nesta_subida: [],
+  marco: null,
+  aplicados: [],
+  alertas: [],
+  proxima_tentativa: null,
+};
+
+function mudarEstado(mudanca) {
+  estadoDosScripts = { ...estadoDosScripts, ...mudanca };
+  if (mudanca.situacao) estadoDosScripts.quando = new Date().toISOString();
+}
 
 function impressaoDigital(texto) {
   return crypto.createHash('sha256').update(texto, 'utf8').digest('hex');
@@ -8527,6 +8639,124 @@ function lerAPastaDosScripts() {
     });
 }
 
+// "020-a-auditoria-do-banco.sql" → "020". O número COMO ESTÁ ESCRITO, e não
+// convertido: é a comparação por texto que recusa o "02" do erro de digitação.
+function prefixoDoScript(nome) {
+  const m = /^(\d+)/.exec(String(nome));
+  return m ? m[1] : null;
+}
+
+// O MARCO, conferido contra a pasta. Devolve o número, ou a frase do porquê não.
+function lerOMarco(valor, arquivos) {
+  const v = String(valor).trim();
+  if (/^0+$/.test(v)) return { numero: 0, valor: v };
+  const achado = arquivos.find((a) => a.nome === v || prefixoDoScript(a.nome) === v);
+  if (!achado) {
+    const ultimo = arquivos.length ? prefixoDoScript(arquivos[arquivos.length - 1].nome) : null;
+    return { erro: `SCRIPTS_RODADOS_A_MAO está "${v}", e não há script com esse número na pasta. `
+      + 'Escreva o número do último script que já foi colado à mão, do jeito que ele aparece no '
+      + `nome do arquivo${ultimo ? ` (o último da pasta é "${ultimo}")` : ''}; se nenhum foi, ponha 0. `
+      + 'Nada foi aplicado.' };
+  }
+  return { numero: Number(prefixoDoScript(achado.nome)), valor: v, nome: achado.nome };
+}
+
+// ------------------------------------------------------------
+//  O ENDEREÇO, LIDO COM PACIÊNCIA
+//
+//  `postgresql://usuário:senha@servidor:porta/banco?sslmode=…`, lido aqui e
+//  não pela biblioteca, por causa da SENHA: quem a separa do servidor é o
+//  ÚLTIMO `@`. Uma senha com `@`, colada crua, a biblioteca corta no
+//  primeiro, e o banco diz "senha errada" para a senha certa. Lido assim, cada
+//  pedaço vai para o `pg` como VALOR, e a senha chega inteira, escrita em
+//  código ou crua.
+//
+//  NENHUMA FRASE DAQUI REPETE O ENDEREÇO: ele tem a senha dentro, e as frases
+//  vão para o log e para a tela de quem administra.
+// ------------------------------------------------------------
+function lerEnderecoDoBanco(bruto, senhaAParte) {
+  let s = String(bruto || '').trim();
+  // Aspas em volta, de quem colou o endereço com elas.
+  if (s.length >= 2 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0]) {
+    s = s.slice(1, -1).trim();
+  }
+  const m = /^postgres(?:ql)?:\/\/(.*)$/is.exec(s);
+  if (!m) {
+    return { erro: 'DATABASE_URL não parece o endereço de um banco: ele deveria começar com '
+      + '"postgresql://". Copie de novo o do Session pooler, na Supabase (Connect → Session pooler).' };
+  }
+  const resto = m[1];
+  const arroba = resto.lastIndexOf('@');
+  const credenciais = arroba >= 0 ? resto.slice(0, arroba) : '';
+  let lugar = arroba >= 0 ? resto.slice(arroba + 1) : resto;
+
+  let consulta = '';
+  const interrogacao = lugar.indexOf('?');
+  if (interrogacao >= 0) { consulta = lugar.slice(interrogacao + 1); lugar = lugar.slice(0, interrogacao); }
+  let caminho = '';
+  const barra = lugar.indexOf('/');
+  if (barra >= 0) { caminho = lugar.slice(barra + 1); lugar = lugar.slice(0, barra); }
+
+  let host = lugar;
+  let porta = 5432;
+  const comColchete = /^\[([^\]]+)\](?::(\d+))?$/.exec(lugar);
+  if (comColchete) {
+    host = comColchete[1];
+    if (comColchete[2]) porta = Number(comColchete[2]);
+  } else if (lugar.includes(':')) {
+    const doisPontos = lugar.lastIndexOf(':');
+    const p = lugar.slice(doisPontos + 1);
+    if (!/^\d+$/.test(p)) {
+      return { erro: 'A porta do DATABASE_URL não é um número. Copie de novo o endereço do Session pooler, inteiro.' };
+    }
+    porta = Number(p);
+    host = lugar.slice(0, doisPontos);
+  }
+  if (!host) {
+    return { erro: 'DATABASE_URL está sem o nome do servidor. Copie de novo o endereço do Session pooler, inteiro.' };
+  }
+
+  const decodificar = (x) => { try { return decodeURIComponent(x); } catch (_e) { return x; } };
+  const doisPontos = credenciais.indexOf(':');
+  const usuario = decodificar(doisPontos >= 0 ? credenciais.slice(0, doisPontos) : credenciais);
+  const senhaNoEndereco = doisPontos >= 0 ? credenciais.slice(doisPontos + 1) : '';
+  const marcador = /^\[YOUR[-_ ]?PASSWORD\]$/i.test(senhaNoEndereco.trim());
+
+  let senha;
+  if (senhaAParte) {
+    // A variável própria ganha da senha escrita no endereço: é a que foi
+    // posta de propósito, e é a que não passa por codificação nenhuma.
+    senha = senhaAParte;
+  } else if (marcador) {
+    return { erro: 'O endereço ainda tem [YOUR-PASSWORD] no lugar da senha. Ponha a senha do banco '
+      + 'na variável DATABASE_PASSWORD, do jeito que ela é — sem mexer no endereço.' };
+  } else {
+    senha = decodificar(senhaNoEndereco);
+  }
+
+  let sslmode = '';
+  try { sslmode = String(new URLSearchParams(consulta).get('sslmode') || '').toLowerCase(); } catch (_e) { /* sem consulta */ }
+
+  return {
+    host, porta, usuario: usuario || 'postgres', senha: senha || undefined,
+    banco: decodificar(caminho) || 'postgres', sslmode,
+  };
+}
+
+// O pooler de TRANSAÇÃO não é recusado por gosto: nele a trava se soltaria
+// sozinha (ela é de SESSÃO, e o pooler devolve a conexão ao bolo a cada
+// instrução), e as duas pontes de uma publicação aplicariam o mesmo script ao
+// mesmo tempo — o que a trava existe para impedir. Ele "funcionaria", e é
+// por isso mesmo que ele não pode ser tentado.
+function porQueNemTentar(end) {
+  if (/\.pooler\.supabase\.com$/i.test(end.host) && end.porta === 6543) {
+    return 'Este é o endereço do pooler de TRANSAÇÃO da Supabase (porta 6543). Nele a trava que impede '
+      + 'duas pontes de aplicar o mesmo script ao mesmo tempo se solta sozinha. Use o do Session pooler '
+      + '(porta 5432): na Supabase, Connect → Session pooler.';
+  }
+  return null;
+}
+
 // O SSL SAI DO PRÓPRIO ENDEREÇO, e o padrão é o que a Supabase pede.
 //
 // O pooler da Supabase serve um certificado que não está nas raízes do sistema:
@@ -8543,13 +8773,16 @@ function lerAPastaDosScripts() {
 //
 // Sem essa terceira, a prova não teria como falar com um Postgres de verdade —
 // e provar isto contra um banco de mentira seria provar o banco de mentira.
-function comoConectarNoBanco() {
-  const modo = (BANCO_DIRETO.match(/[?&]sslmode=([a-z-]+)/i) || [, ''])[1].toLowerCase();
+function comoConectarNoBanco(end) {
   let ssl = { rejectUnauthorized: false };
-  if (modo === 'disable') ssl = false;
-  else if (modo === 'verify-full' || modo === 'verify-ca') ssl = true;
+  if (end.sslmode === 'disable') ssl = false;
+  else if (end.sslmode === 'verify-full' || end.sslmode === 'verify-ca') ssl = true;
   return {
-    connectionString: BANCO_DIRETO,
+    host: end.host,
+    port: end.porta,
+    user: end.usuario,
+    password: end.senha,
+    database: end.banco,
     ssl,
     // Um banco que não responde em 15s não vai responder. A ponte tem mais o
     // que fazer do que ficar pendurada esperando por isto.
@@ -8557,15 +8790,163 @@ function comoConectarNoBanco() {
   };
 }
 
+// ------------------------------------------------------------
+//  A FRASE DE QUANDO NÃO DEU PARA FALAR COM O BANCO
+//
+//  Quem vai ler é quem administra, no painel, e a pergunta dele é "o que eu
+//  mudo?". "password authentication failed for user postgres.abcd" não
+//  responde isso; "a senha do banco não confere — é a do BANCO, e não a de
+//  entrar no site" responde. O motivo técnico vai junto, à parte (`detalhe`),
+//  para quem for consertar.
+//
+//  E DIZ SE PASSA SOZINHO (`transitoria`): é o que decide tentar de novo.
+// ------------------------------------------------------------
+function explicarFalhaDoBanco(erro, end, { conectado = false } = {}) {
+  const codigo = String((erro && erro.code) || '');
+  const msg = String((erro && erro.message) || erro || '');
+  const onde = end ? `${end.host}:${end.porta}` : 'o banco';
+  if (codigo === '28P01' || /password authentication failed/i.test(msg)) {
+    return { transitoria: false, frase: 'A senha do banco não confere. É a senha do BANCO — a que a Supabase '
+      + 'deixa trocar em Project Settings → Database → Reset database password —, e não a de entrar no site '
+      + 'da Supabase. Confira a variável DATABASE_PASSWORD.' };
+  }
+  if (/tenant or user not found/i.test(msg)) {
+    return { transitoria: false, frase: 'A Supabase não reconheceu o usuário deste endereço. No Session pooler '
+      + 'o usuário é "postgres." seguido do código do projeto: copie o endereço de novo, inteiro, sem mexer nele.' };
+  }
+  if (end && /^db\.[^.]+\.supabase\.co$/i.test(end.host)) {
+    return { transitoria: false, frase: `Este é o endereço DIRETO da Supabase (${end.host}), que só responde por `
+      + 'IPv6 — e a Render não alcança IPv6. Use o do Session pooler: na Supabase, Connect → Session pooler.' };
+  }
+  if (codigo === 'ENOTFOUND') {
+    return { transitoria: false, frase: `Não achei o servidor ${end ? end.host : ''}. Confira se o endereço foi copiado inteiro.` };
+  }
+  if (codigo === '3D000') {
+    return { transitoria: false, frase: `O banco "${end ? end.banco : ''}" não existe em ${onde}. `
+      + 'O endereço da Supabase termina em "/postgres".' };
+  }
+  if (/certificate|self[- ]signed/i.test(msg)) {
+    return { transitoria: false, frase: `A conexão segura com ${onde} não fechou. Sem "?sslmode=verify-full" no `
+      + 'fim do endereço, a ponte usa a forma que a Supabase pede.' };
+  }
+  if (codigo === 'ECONNREFUSED') {
+    return { transitoria: true, frase: `O servidor ${onde} recusou a conexão.` };
+  }
+  if (codigo === 'ETIMEDOUT' || /timeout|timed out/i.test(msg)) {
+    return { transitoria: true, frase: `O banco em ${onde} não respondeu a tempo.` };
+  }
+  if (['ECONNRESET', 'EAI_AGAIN', 'EPIPE', '57P01', '57P03', '53300'].includes(codigo)
+      || /terminated unexpectedly|connection terminated/i.test(msg)) {
+    return { transitoria: true, frase: `A conexão com o banco em ${onde} caiu no meio.` };
+  }
+  // Depois de conectar, o banco FALOU — e recusou um passo. Dizer "não
+  // consegui falar com o banco" mandaria procurar defeito de rede.
+  if (conectado) return { transitoria: false, frase: `O banco recusou um passo da rodada dos scripts: ${msg}.` };
+  return { transitoria: false, frase: `Não consegui falar com o banco em ${onde}: ${msg}.` };
+}
+
+function motivoTecnico(erro) {
+  return [erro && erro.message, erro && erro.code ? `código ${erro.code}` : '', erro && erro.detail]
+    .filter(Boolean).join(' · ');
+}
+
+// ------------------------------------------------------------
+//  A CONFERÊNCIA QUE O SCRIPT DEVOLVE
+//
+//  Um script com várias instruções devolve uma resposta por instrução, e a
+//  conferência é a ÚLTIMA (é a regra de escrever SQL para o Rodrigo: o editor
+//  da Supabase só mostra o último resultado). Guarda-se o que ela respondeu, e
+//  não mais do que isso: trinta linhas e trezentas letras por valor bastam
+//  para responder "deu certo?".
+// ------------------------------------------------------------
+function conferenciaDe(resposta) {
+  const lista = Array.isArray(resposta) ? resposta : [resposta];
+  const ultima = lista[lista.length - 1];
+  if (!ultima || ultima.command !== 'SELECT' || !Array.isArray(ultima.rows) || !ultima.rows.length) return null;
+  const curto = (v) => {
+    if (v === null || typeof v === 'boolean' || typeof v === 'number') return v;
+    if (v instanceof Date) return v.toISOString();
+    const t = typeof v === 'string' ? v : JSON.stringify(v);
+    return t.length > 300 ? `${t.slice(0, 300)}…` : t;
+  };
+  return ultima.rows.slice(0, 30).map((linha) => {
+    const o = {};
+    for (const [k, v] of Object.entries(linha)) o[k] = curto(v);
+    return o;
+  });
+}
+
+// O QUE NUMA CONFERÊNCIA QUER DIZER "NÃO FICOU COMO DEVIA". É a convenção dos
+// scripts desta pasta, escrita no LEIA-ME: `true` e "sim" são o certo; `false`,
+// um valor que começa com "NÃO" e um "rode o script…" são o defeito. O resto
+// (contagens, nomes) é informação, e não pesa.
+function conferenciaPreocupa(conferencia) {
+  if (!Array.isArray(conferencia)) return false;
+  return conferencia.some((linha) => linha && typeof linha === 'object'
+    && Object.values(linha).some((v) => v === false
+      || (typeof v === 'string' && (/^\s*false\s*$/i.test(v)
+        || /^\s*n[ãaÃA]o\b/i.test(v)
+        || /^\s*rode o script/i.test(v)))));
+}
+
+async function temOZorvin(cliente) {
+  const { rows } = await cliente.query("select to_regclass('public.conversas') is not null as tem");
+  return Boolean(rows[0] && rows[0].tem);
+}
+
+// O que está anotado no banco, para a tela. `select *` e não as colunas pelo
+// nome: num banco cuja tabela ainda não ganhou `origem` e `conferencia` (modo
+// conferir não escreve nada), pedir por elas derrubaria a leitura inteira.
+async function lerOQueFoiAplicado(cliente) {
+  try {
+    const { rows } = await cliente.query('select * from public.zorvin_scripts_aplicados order by nome');
+    const aplicados = rows.map((r) => ({
+      nome: r.nome,
+      origem: r.origem || 'ponte',
+      aplicado_em: r.aplicado_em,
+      tempo_ms: r.tempo_ms,
+      sucesso: r.sucesso,
+      erro: r.erro || null,
+      conferencia: r.conferencia || null,
+      alerta: conferenciaPreocupa(r.conferencia),
+    }));
+    mudarEstado({
+      aplicados,
+      alertas: aplicados.filter((a) => a.alerta && a.origem === 'ponte').map((a) => a.nome),
+    });
+  } catch (_e) {
+    // Sem a tabela (modo conferir, primeira vez): não há o que mostrar, e
+    // isso não é falha de nada.
+  }
+}
+
 async function aplicarOsScriptsDoBanco() {
   if (!BANCO_DIRETO) {
     console.log('Scripts automáticos: desligados (sem DATABASE_URL). '
       + 'As mudanças de banco continuam sendo rodadas à mão, como sempre foram.');
-    return;
+    mudarEstado({ situacao: 'desligado', mensagem: 'Sem DATABASE_URL na Render: as mudanças de banco '
+      + 'continuam sendo coladas à mão, como sempre foram.' });
+    return null;
   }
 
   const querAplicar = SCRIPTS_AUTOMATICOS === 'aplicar';
   const arquivos = lerAPastaDosScripts();
+  // A PRÓXIMA TENTATIVA SE APAGA AQUI, no começo, e não depois de a rodada
+  // voltar: apagada depois, quem perguntasse no meio leria "em dia" ao lado de
+  // uma próxima tentativa marcada — duas respostas contrárias na mesma janela.
+  mudarEstado({ situacao: 'rodando', mensagem: 'A ponte está conferindo o banco agora.',
+    na_pasta: arquivos.map((a) => a.nome), nesta_subida: [], pendentes: [], detalhe: '', marco: null,
+    proxima_tentativa: null });
+
+  const end = lerEnderecoDoBanco(BANCO_DIRETO, SENHA_DO_BANCO);
+  const semTentar = end.erro || porQueNemTentar(end);
+  if (semTentar) {
+    mudarEstado({ situacao: 'nao_conectou', mensagem: semTentar, servidor: end.erro ? '' : `${end.host}:${end.porta}` });
+    console.error(`Scripts automáticos: não deu para aplicar agora — ${semTentar} `
+      + 'A ponte segue atendendo normalmente.');
+    return null;
+  }
+  mudarEstado({ servidor: `${end.host}:${end.porta}` });
 
   let Client;
   try {
@@ -8573,13 +8954,26 @@ async function aplicarOsScriptsDoBanco() {
   } catch (_e) {
     console.error('Scripts automáticos: a biblioteca `pg` não está instalada. '
       + 'A ponte segue normalmente; nenhum script foi aplicado.');
-    return;
+    mudarEstado({ situacao: 'sem_pg', mensagem: 'A biblioteca que fala com o banco (pg) não está instalada '
+      + 'nesta publicação. Nenhum script foi aplicado.' });
+    return null;
   }
 
-  const cliente = new Client(comoConectarNoBanco());
+  const cliente = new Client(comoConectarNoBanco(end));
+  // Uma conexão que cai DEPOIS de aberta avisa por um evento, e evento sem
+  // ninguém ouvindo derruba o processo inteiro. A ponte não pode cair por isto.
+  cliente.on('error', () => {});
   scriptsRodando = true;
   try {
-    await cliente.connect();
+    try {
+      await cliente.connect();
+    } catch (erro) {
+      const { frase, transitoria } = explicarFalhaDoBanco(erro, end);
+      mudarEstado({ situacao: 'nao_conectou', mensagem: frase, detalhe: motivoTecnico(erro) });
+      console.error(`Scripts automáticos: não deu para aplicar agora — ${frase} `
+        + `(${motivoTecnico(erro)}). A ponte segue atendendo normalmente.`);
+      return transitoria ? 'tentar_de_novo' : null;
+    }
     console.log(`Scripts automáticos: falei com o banco pelo caminho direto. `
       + `${arquivos.length} script(s) na pasta, modo "${querAplicar ? 'aplicar' : 'conferir'}".`);
 
@@ -8587,134 +8981,312 @@ async function aplicarOsScriptsDoBanco() {
     const { rows: trava } = await cliente.query('select pg_try_advisory_lock($1) as peguei', [TRAVA_DOS_SCRIPTS]);
     if (!trava[0] || trava[0].peguei !== true) {
       console.log('Scripts automáticos: outra ponte está cuidando disto agora. Deixo com ela.');
-      return;
+      mudarEstado({ situacao: 'outra_ponte', mensagem: 'Outra ponte estava cuidando dos scripts nesta hora '
+        + '(numa publicação há duas no ar por alguns segundos).' });
+      return 'tentar_de_novo';
     }
 
-    if (querAplicar) {
-      await cliente.query(`
-        create table if not exists public.zorvin_scripts_aplicados (
-          nome        text primary key,
-          impressao   text not null,
-          aplicado_em timestamptz not null default now(),
-          tempo_ms    integer,
-          sucesso     boolean not null default true,
-          erro        text
-        )`);
-      await cliente.query('alter table public.zorvin_scripts_aplicados enable row level security');
-    }
-
-    // Em modo conferir a tabela pode nem existir — e aí nada foi aplicado, que é
-    // a resposta certa, não um erro.
-    let jaAplicados = new Map();
+    // O DESFECHO SÓ VAI PARA A JANELA DEPOIS DE A TABELA SER RELIDA. Publicado
+    // antes, quem perguntasse nesse meio-tempo leria "em dia" ao lado da lista
+    // de ANTES desta rodada — sem o script que acabou de entrar.
+    const final = {};
+    const concluir = (m) => { Object.assign(final, m); };
+    let desfecho = null;
     try {
-      const { rows } = await cliente.query('select nome, impressao, sucesso from public.zorvin_scripts_aplicados');
-      jaAplicados = new Map(rows.map((r) => [r.nome, r]));
+      desfecho = await rodarOsScripts(cliente, arquivos, querAplicar, concluir);
     } catch (erro) {
-      if (String(erro.code) !== '42P01') throw erro;
+      // Qualquer coisa que dê errado no meio — a conexão que cai, a tabela de
+      // controle que não pôde ser criada — não pode parar o WhatsApp.
+      const { frase, transitoria } = explicarFalhaDoBanco(erro, end, { conectado: true });
+      console.error(`Scripts automáticos: não deu para aplicar agora — ${frase} `
+        + `(${motivoTecnico(erro)}). A ponte segue atendendo normalmente.`);
+      concluir({ situacao: transitoria ? 'nao_conectou' : 'falhou', mensagem: frase, detalhe: motivoTecnico(erro) });
+      desfecho = transitoria ? 'tentar_de_novo' : null;
     }
-
-    // ---- a conferência da impressão digital, antes de aplicar qualquer coisa
-    const mudaram = arquivos.filter((a) => {
-      const antes = jaAplicados.get(a.nome);
-      return antes && antes.sucesso === true && antes.impressao !== a.impressao;
-    });
-    if (mudaram.length) {
-      console.error('Scripts automáticos: PAREI. '
-        + `Já apliquei ${mudaram.map((m) => m.nome).join(', ')}, mas o arquivo mudou depois. `
-        + 'O banco e o código discordam sobre o que está lá dentro. '
-        + 'Script já aplicado não se edita — escreva o próximo.');
-      return;
-    }
-
-    const sumiram = [...jaAplicados.keys()].filter((n) => !arquivos.some((a) => a.nome === n));
-    if (sumiram.length) {
-      console.log(`Scripts automáticos: ${sumiram.join(', ')} foi aplicado e não está mais na pasta. `
-        + 'Sigo em frente — só fica dito.');
-    }
-
-    const pendentes = arquivos.filter((a) => {
-      const antes = jaAplicados.get(a.nome);
-      return !antes || antes.sucesso !== true;
-    });
-
-    if (!pendentes.length) {
-      console.log('Scripts automáticos: nada pendente. O banco está em dia.');
-      return;
-    }
-
-    if (!querAplicar) {
-      console.log(`Scripts automáticos: ${pendentes.length} pendente(s) — `
-        + `${pendentes.map((p) => p.nome).join(', ')}. `
-        + 'NÃO apliquei nada: o modo é "conferir". Para aplicar, ponha SCRIPTS_AUTOMATICOS=aplicar.');
-      return;
-    }
-
-    for (const script of pendentes) {
-      // Sair no meio da fila de scripts é melhor do que sair no meio de um: o
-      // laço para aqui e o que faltou continua pendente para a próxima subida.
-      if (desligando) {
-        console.log(`Scripts automáticos: a ponte está saindo. Paro antes de ${script.nome}.`);
-        break;
-      }
-      const semTransacao = /^\s*--\s*sem-transacao/mi.test(script.corpo.split('\n')[0] || '');
-      const comecou = Date.now();
-      try {
-        if (!semTransacao) await cliente.query('begin');
-        await cliente.query(script.corpo);
-        // A ANOTAÇÃO ENTRA DENTRO DA TRANSAÇÃO, e isto é o conserto de uma
-        // falha de verdade: anotando depois do `commit`, uma publicação caindo
-        // nesse intervalo deixaria o script APLICADO e NÃO ANOTADO — e a
-        // subida seguinte o aplicaria de novo. Num `create table if not
-        // exists` isso passa batido; num `insert`, o escritório ganha a linha
-        // duas vezes. Junto, ou o banco fica com os dois ou com nenhum.
-        //
-        // Em `-- sem-transacao` essa garantia não existe, e não tem como
-        // existir: é o preço da saída, e mais um motivo para usá-la só quando
-        // o Postgres não deixar escolha.
-        const tempo = Date.now() - comecou;
-        await cliente.query(
-          `insert into public.zorvin_scripts_aplicados (nome, impressao, tempo_ms, sucesso, erro)
-           values ($1, $2, $3, true, null)
-           on conflict (nome) do update
-             set impressao = excluded.impressao, aplicado_em = now(),
-                 tempo_ms = excluded.tempo_ms, sucesso = true, erro = null`,
-          [script.nome, script.impressao, tempo],
-        );
-        if (!semTransacao) await cliente.query('commit');
-        console.log(`Scripts automáticos: apliquei ${script.nome} (${tempo}ms).`);
-      } catch (erro) {
-        if (!semTransacao) { try { await cliente.query('rollback'); } catch (_e) { /* já abortada */ } }
-        const motivo = [erro.message, erro.code ? `código ${erro.code}` : '', erro.detail || '']
-          .filter(Boolean).join(' · ');
-        // A FALHA FICA GRAVADA, e não só no log. O log é o lugar onde este
-        // projeto já perdeu dois avisos importantes; a linha na tabela é o que
-        // o painel vai poder mostrar depois.
-        try {
-          await cliente.query(
-            `insert into public.zorvin_scripts_aplicados (nome, impressao, tempo_ms, sucesso, erro)
-             values ($1, $2, $3, false, $4)
-             on conflict (nome) do update
-               set impressao = excluded.impressao, aplicado_em = now(),
-                   tempo_ms = excluded.tempo_ms, sucesso = false, erro = excluded.erro`,
-            [script.nome, script.impressao, Date.now() - comecou, motivo],
-          );
-        } catch (_e) { /* nem anotar deu: o log abaixo é o que sobrou */ }
-        console.error(`Scripts automáticos: ${script.nome} FALHOU — ${motivo}. `
-          + 'Não apliquei os seguintes (cada um costuma supor o anterior). '
-          + 'A ponte segue atendendo normalmente.');
-        break;
-      }
-    }
-  } catch (erro) {
-    // Qualquer coisa que dê errado aqui — não conectou, banco fora, senha errada
-    // — não pode parar o WhatsApp do escritório.
-    console.error('Scripts automáticos: não deu para aplicar agora — '
-      + `${erro.message}. A ponte segue atendendo normalmente.`);
+    await lerOQueFoiAplicado(cliente);
+    mudarEstado(final);
+    return desfecho;
   } finally {
     scriptsRodando = false;
     try { await cliente.end(); } catch (_e) { /* já caiu: tudo bem */ }
   }
 }
+
+async function rodarOsScripts(cliente, arquivos, querAplicar, concluir) {
+  const avisoDoModo = MODO_PEDIDO && MODO_PEDIDO !== 'aplicar' && MODO_PEDIDO !== 'conferir'
+    ? ` SCRIPTS_AUTOMATICOS está "${MODO_PEDIDO}", que não é "aplicar" nem "conferir" — por isso só conferi.`
+    : '';
+
+  if (querAplicar) {
+    await cliente.query(`
+      create table if not exists public.zorvin_scripts_aplicados (
+        nome        text primary key,
+        impressao   text not null,
+        aplicado_em timestamptz not null default now(),
+        tempo_ms    integer,
+        sucesso     boolean not null default true,
+        erro        text
+      )`);
+    await cliente.query('alter table public.zorvin_scripts_aplicados enable row level security');
+    // AS DUAS COLUNAS DE 08/10, também para quem já tinha a tabela. `origem`
+    // separa o que a ponte rodou ('ponte') do que só foi ANOTADO porque já
+    // tinha sido colado à mão ('a_mao'); `conferencia` é o que a última linha
+    // do script respondeu.
+    await cliente.query(`
+      alter table public.zorvin_scripts_aplicados
+        add column if not exists origem text not null default 'ponte',
+        add column if not exists conferencia jsonb`);
+  }
+
+  // Em modo conferir a tabela pode nem existir — e aí nada foi aplicado, que é
+  // a resposta certa, não um erro.
+  let jaAplicados = new Map();
+  try {
+    const { rows } = await cliente.query('select nome, impressao, sucesso from public.zorvin_scripts_aplicados');
+    jaAplicados = new Map(rows.map((r) => [r.nome, r]));
+  } catch (erro) {
+    if (String(erro.code) !== '42P01') throw erro;
+  }
+
+  // ---- o marco e a guarda — só quando o banco nunca registrou nada
+  let marcoDaRodada = null;
+  const temHistorico = [...jaAplicados.values()].some((r) => r.sucesso === true);
+  if (!temHistorico && MARCO_A_MAO) {
+    const marco = lerOMarco(MARCO_A_MAO, arquivos);
+    if (marco.erro) {
+      console.error(`Scripts automáticos: ${marco.erro}`);
+      concluir({ situacao: 'marco_invalido', mensagem: marco.erro });
+      return null;
+    }
+    const marcados = arquivos.filter((a) => {
+      const p = prefixoDoScript(a.nome);
+      return p !== null && Number(p) <= marco.numero;
+    });
+    if (querAplicar && marcados.length) {
+      // TODOS OU NENHUM, numa transação: metade do marco anotada faria a
+      // subida seguinte achar que há histórico, ignorar a variável, e rodar de
+      // novo a outra metade.
+      await cliente.query('begin');
+      try {
+        for (const a of marcados) {
+          await cliente.query(
+            `insert into public.zorvin_scripts_aplicados (nome, impressao, tempo_ms, sucesso, erro, origem, conferencia)
+             values ($1, $2, null, true, null, 'a_mao', null)
+             on conflict (nome) do update
+               set impressao = excluded.impressao, aplicado_em = now(), tempo_ms = null,
+                   sucesso = true, erro = null, origem = 'a_mao', conferencia = null`,
+            [a.nome, a.impressao],
+          );
+        }
+        await cliente.query('commit');
+      } catch (erro) {
+        try { await cliente.query('rollback'); } catch (_e) { /* já abortada */ }
+        throw erro;
+      }
+      console.log(`Scripts automáticos: anotei ${marcados.length} script(s) como já rodados à mão `
+        + `(SCRIPTS_RODADOS_A_MAO=${marco.valor}): ${marcados.map((a) => a.nome).join(', ')}. `
+        + 'Nenhum deles foi rodado de novo.');
+    } else if (marcados.length) {
+      console.log(`Scripts automáticos: com o modo "aplicar", eu anotaria ${marcados.length} script(s) como `
+        + `já rodados à mão (SCRIPTS_RODADOS_A_MAO=${marco.valor}), sem rodá-los.`);
+    }
+    for (const a of marcados) jaAplicados.set(a.nome, { nome: a.nome, impressao: a.impressao, sucesso: true });
+    marcoDaRodada = { valor: marco.valor, marcados: marcados.map((a) => a.nome), gravado: querAplicar };
+    concluir({ marco: marcoDaRodada });
+  } else if (!temHistorico && await temOZorvin(cliente)) {
+    const ultimo = arquivos.length ? prefixoDoScript(arquivos[arquivos.length - 1].nome) : null;
+    const frase = 'O banco já tem o Zorvin, mas não há registro de quais scripts já rodaram — e rodar todos '
+      + 'de novo poderia desfazer ajustes da equipe. Ponha SCRIPTS_RODADOS_A_MAO na Render com o número do '
+      + `último script que já foi colado à mão${ultimo ? ` (o último da pasta é "${ultimo}")` : ''}; `
+      + 'se nenhum foi, ponha 0. Nada foi aplicado.';
+    console.error(`Scripts automáticos: PAREI ANTES DE COMEÇAR. ${frase}`);
+    concluir({ situacao: 'sem_marco', mensagem: frase });
+    return null;
+  } else if (temHistorico && MARCO_A_MAO) {
+    console.log('Scripts automáticos: SCRIPTS_RODADOS_A_MAO só vale na primeira vez, e o banco já tem '
+      + 'registro dos scripts. Ignorei a variável — pode tirá-la da Render.');
+  }
+
+  // ---- a conferência da impressão digital, antes de aplicar qualquer coisa
+  const mudaram = arquivos.filter((a) => {
+    const antes = jaAplicados.get(a.nome);
+    return antes && antes.sucesso === true && antes.impressao !== a.impressao;
+  });
+  if (mudaram.length) {
+    const nomes = mudaram.map((m) => m.nome).join(', ');
+    console.error('Scripts automáticos: PAREI. '
+      + `Já apliquei ${nomes}, mas o arquivo mudou depois. `
+      + 'O banco e o código discordam sobre o que está lá dentro. '
+      + 'Script já aplicado não se edita — escreva o próximo.');
+    concluir({ situacao: 'mudou', mensagem: `O arquivo de ${nomes} mudou depois de aplicado, e o banco e o `
+      + 'código passaram a discordar sobre o que está lá dentro. Nada foi aplicado. Script aplicado não se '
+      + 'edita: o conserto é o próximo número.' });
+    return null;
+  }
+
+  const sumiram = [...jaAplicados.keys()].filter((n) => !arquivos.some((a) => a.nome === n));
+  if (sumiram.length) {
+    console.log(`Scripts automáticos: ${sumiram.join(', ')} foi aplicado e não está mais na pasta. `
+      + 'Sigo em frente — só fica dito.');
+  }
+
+  const pendentes = arquivos.filter((a) => {
+    const antes = jaAplicados.get(a.nome);
+    return !antes || antes.sucesso !== true;
+  });
+  concluir({ pendentes: pendentes.map((p) => p.nome) });
+
+  if (!pendentes.length) {
+    const marcoPorAnotar = marcoDaRodada && !marcoDaRodada.gravado && marcoDaRodada.marcados.length
+      ? ' (No modo "conferir" nada é escrito: a anotação dos que já foram colados à mão fica para quando '
+        + 'o modo for "aplicar".)'
+      : '';
+    console.log(`Scripts automáticos: nada pendente. O banco está em dia.${avisoDoModo}`);
+    concluir({ situacao: 'em_dia',
+      mensagem: `O banco está em dia: nenhum script esperando.${marcoPorAnotar}${avisoDoModo}` });
+    return null;
+  }
+
+  if (!querAplicar) {
+    const nomes = pendentes.map((p) => p.nome).join(', ');
+    console.log(`Scripts automáticos: ${pendentes.length} pendente(s) — ${nomes}. `
+      + 'NÃO apliquei nada: o modo é "conferir". Para aplicar, ponha SCRIPTS_AUTOMATICOS=aplicar.'
+      + avisoDoModo);
+    concluir({ situacao: 'pendentes', mensagem: `${pendentes.length} script(s) esperando: ${nomes}. `
+      + 'A ponte só está conferindo — para ela aplicar, ponha SCRIPTS_AUTOMATICOS=aplicar na Render.'
+      + avisoDoModo });
+    return null;
+  }
+
+  const aplicadosAgora = [];
+  for (const script of pendentes) {
+    // Sair no meio da fila de scripts é melhor do que sair no meio de um: o
+    // laço para aqui e o que faltou continua pendente para a próxima subida.
+    if (desligando) {
+      console.log(`Scripts automáticos: a ponte está saindo. Paro antes de ${script.nome}.`);
+      concluir({ situacao: 'pendentes', nesta_subida: aplicadosAgora.slice(),
+        pendentes: pendentes.filter((p) => !aplicadosAgora.includes(p.nome)).map((p) => p.nome),
+        mensagem: 'A ponte saiu do ar no meio da rodada; o que faltou fica para a próxima subida.' });
+      return null;
+    }
+    const semTransacao = /^\s*--\s*sem-transacao/mi.test(script.corpo.split('\n')[0] || '');
+    const comecou = Date.now();
+    try {
+      if (!semTransacao) await cliente.query('begin');
+      const resposta = await cliente.query(script.corpo);
+      const conferencia = conferenciaDe(resposta);
+      // A ANOTAÇÃO ENTRA DENTRO DA TRANSAÇÃO, e isto é o conserto de uma
+      // falha de verdade: anotando depois do `commit`, uma publicação caindo
+      // nesse intervalo deixaria o script APLICADO e NÃO ANOTADO — e a
+      // subida seguinte o aplicaria de novo. Num `create table if not
+      // exists` isso passa batido; num `insert`, o escritório ganha a linha
+      // duas vezes. Junto, ou o banco fica com os dois ou com nenhum.
+      //
+      // Em `-- sem-transacao` essa garantia não existe, e não tem como
+      // existir: é o preço da saída, e mais um motivo para usá-la só quando
+      // o Postgres não deixar escolha.
+      const tempo = Date.now() - comecou;
+      await cliente.query(
+        `insert into public.zorvin_scripts_aplicados (nome, impressao, tempo_ms, sucesso, erro, origem, conferencia)
+         values ($1, $2, $3, true, null, 'ponte', $4)
+         on conflict (nome) do update
+           set impressao = excluded.impressao, aplicado_em = now(),
+               tempo_ms = excluded.tempo_ms, sucesso = true, erro = null,
+               origem = 'ponte', conferencia = excluded.conferencia`,
+        [script.nome, script.impressao, tempo, conferencia === null ? null : JSON.stringify(conferencia)],
+      );
+      if (!semTransacao) await cliente.query('commit');
+      aplicadosAgora.push(script.nome);
+      console.log(`Scripts automáticos: apliquei ${script.nome} (${tempo}ms)`
+        + `${conferenciaPreocupa(conferencia) ? ' — mas a conferência dele diz que algo não ficou como devia' : ''}.`);
+    } catch (erro) {
+      if (!semTransacao) { try { await cliente.query('rollback'); } catch (_e) { /* já abortada */ } }
+      const motivo = motivoTecnico(erro);
+      // A FALHA FICA GRAVADA, e não só no log. O log é o lugar onde este
+      // projeto já perdeu dois avisos importantes; a linha na tabela é o que
+      // o painel mostra.
+      try {
+        await cliente.query(
+          `insert into public.zorvin_scripts_aplicados (nome, impressao, tempo_ms, sucesso, erro, origem, conferencia)
+           values ($1, $2, $3, false, $4, 'ponte', null)
+           on conflict (nome) do update
+             set impressao = excluded.impressao, aplicado_em = now(),
+                 tempo_ms = excluded.tempo_ms, sucesso = false, erro = excluded.erro,
+                 origem = 'ponte', conferencia = null`,
+          [script.nome, script.impressao, Date.now() - comecou, motivo],
+        );
+      } catch (_e) { /* nem anotar deu: o log abaixo é o que sobrou */ }
+      console.error(`Scripts automáticos: ${script.nome} FALHOU — ${motivo}. `
+        + 'Não apliquei os seguintes (cada um costuma supor o anterior). '
+        + 'A ponte segue atendendo normalmente.');
+      const naoRodaram = pendentes.filter((p) => !aplicadosAgora.includes(p.nome)).map((p) => p.nome);
+      concluir({ situacao: 'falhou', nesta_subida: aplicadosAgora.slice(), pendentes: naoRodaram,
+        mensagem: `${script.nome} falhou e não foi aplicado${naoRodaram.length > 1 ? ', nem os que vêm depois dele' : ''}. `
+          + 'A ponte segue atendendo normalmente; o resto do Zorvin não é afetado, mas o que esse script traz '
+          + 'não está no banco. Na próxima publicação ela tenta de novo.',
+        detalhe: motivo });
+      return null;
+    }
+  }
+  concluir({ situacao: 'em_dia', nesta_subida: aplicadosAgora.slice(), pendentes: [],
+    mensagem: `O banco está em dia. Nesta subida entrou: ${aplicadosAgora.join(', ')}.` });
+  return null;
+}
+
+// A rodada, com as novas tentativas. Ao subir, e só ao subir: é quando um
+// script novo chega, porque ele chega numa publicação.
+async function aplicarOsScriptsComPaciencia() {
+  let espera = PRIMEIRA_ESPERA_MS;
+  for (;;) {
+    let desfecho = null;
+    try {
+      desfecho = await aplicarOsScriptsDoBanco();
+    } catch (erro) {
+      console.error(`Scripts automáticos: tropecei — ${(erro && erro.message) || erro}. A ponte segue atendendo normalmente.`);
+      mudarEstado({ situacao: 'falhou', mensagem: 'A rodada dos scripts tropeçou num erro que não era do banco.',
+        detalhe: String((erro && erro.message) || erro) });
+      desfecho = null;
+    }
+    if (desfecho !== 'tentar_de_novo' || desligando) {
+      mudarEstado({ proxima_tentativa: null });
+      return;
+    }
+    // A HORA vai em campo próprio, e não na frase: quem a escreve é a tela, no
+    // fuso de quem lê. Escrita aqui, sairia no relógio da Render.
+    mudarEstado({ proxima_tentativa: new Date(Date.now() + espera).toISOString(),
+      mensagem: `${estadoDosScripts.mensagem} A ponte tenta de novo sozinha.` });
+    console.log(`Scripts automáticos: tento de novo em ${Math.round(espera / 1000)}s.`);
+    await new Promise((ok) => { const r = setTimeout(ok, espera); if (r.unref) r.unref(); });
+    if (desligando) return;
+    espera = Math.min(espera * 2, MAIOR_ESPERA_MS);
+  }
+}
+
+// ------------------------------------------------------------
+//  A JANELA DO PAINEL — só para quem administra
+//
+//  `admin` E `ativo`, a régua de `soAdmin` e de `zorvin_admin()`. Quem atende
+//  não tem o que fazer com "a senha do banco não confere", e o estado traz o
+//  nome do servidor do banco, que não é da conta de quem atende.
+//
+//  A conferência de quem pede FALHANDO não vira "você não administra": a
+//  pessoa que administra leria que não administra num dia de rede ruim, e é a
+//  armadilha nº 2 do painel com outra roupa. Vira a frase do que aconteceu.
+// ------------------------------------------------------------
+app.options('/scripts/estado', (req, res) => { liberarCors(res); res.sendStatus(204); });
+app.get('/scripts/estado', rotaVantoro(async (req, usuario) => {
+  const { data: eu, error } = await supabase
+    .from('usuarios').select('admin, ativo').eq('id', usuario.id).maybeSingle();
+  if (error) {
+    return { status: 502, corpo: { ok: false,
+      erro: `Não consegui conferir quem você é agora (${error.code || error.message}). Tente de novo.` } };
+  }
+  if (!eu || !eu.admin || eu.ativo === false) {
+    return { status: 403, corpo: { ok: false,
+      erro: 'Só quem administra vê o estado das atualizações do banco.' } };
+  }
+  return { status: 200, corpo: { ok: true, ...estadoDosScripts } };
+}));
 
 // ============================================================
 //  QUAL VERSÃO ESTÁ NO AR
@@ -8760,7 +9332,7 @@ const servidor = app.listen(port, () => {
   // ao subir, e uma rodada de scripts segurando o boot viraria publicação
   // reprovada. O banco fica em dia alguns segundos depois — que é o mesmo
   // intervalo que já existia quando o script era colado à mão.
-  aplicarOsScriptsDoBanco().catch(() => {});
+  aplicarOsScriptsComPaciencia().catch(() => {});
 });
 
 // ============================================================

@@ -6372,10 +6372,19 @@ console.log("\n49. Quanto o Vantoro demora");
   {
     // Uma média feita só do que deu certo diz "tudo rápido" justamente quando
     // o que incomoda é a chamada que não voltou. A falha tem coluna própria.
+    //
+    // UM VANTORO QUE DERRUBA TODA CONEXÃO — E SEGURA A PORTA. Era um servidor
+    // aberto e fechado logo em seguida ("agora ninguém atende ali"), e a porta
+    // solta podia ser pega na hora por outro servidor da própria bancada.
+    // Medido na integração contínua em 08/10: a PONTE subiu nessa porta,
+    // chamou a si mesma no lugar do Vantoro, e a prova leu o 404 dela — "a
+    // chamada realmente falhou — veio 404", com a conta dizendo zero falhas.
+    // Segurando a porta até o fim da cena, ninguém mais a pega, e a chamada
+    // falha sempre do mesmo jeito.
     const morto = http.createServer(() => {});
+    morto.on("connection", (s) => s.destroy());
     await new Promise((r) => morto.listen(0, "127.0.0.1", r));
     const porta = morto.address().port;
-    await new Promise((r) => morto.close(r));   // agora ninguém atende ali
 
     const t = await subirTudo({ IMPORT_TOKEN: SENHA,
                                 VANTORO_API_URL: `http://127.0.0.1:${porta}`,
@@ -6389,6 +6398,7 @@ console.log("\n49. Quanto o Vantoro demora");
     ok("e marcada como falha, em vez de sumir da conta",
        linha && linha.falhas === 1, JSON.stringify(linha));
     await t.parar();
+    await new Promise((r) => morto.close(r));
   }
 
   // ---- 49f. a porta é do administrador ----
@@ -6608,18 +6618,18 @@ console.log("\n50. A busca pede só o que o painel usa");
     // terminava SEM UMA LINHA DE FALHA — calada sobre o defeito. Por isso os
     // cenários com script quebrado sobem por aqui: ponte que não fica de pé
     // vira `null`, e `null` vira reprovação com nome logo abaixo.
-    async function pontOuNada(banco, pasta, extra) {
-      try { return await pontComScripts(banco, pasta, extra); }
+    async function pontOuNada(banco, pasta, extra, opcoes) {
+      try { return await pontComScripts(banco, pasta, extra, opcoes); }
       catch (_e) { return null; }
     }
 
     /** Sobe a ponte apontada para este banco e esta pasta, e espera a rodada. */
-    async function pontComScripts(banco, pasta, extra = {}) {
+    async function pontComScripts(banco, pasta, extra = {}, opcoes = {}) {
       const t = await subirTudo({
         DATABASE_URL: banco ? banco.url : "",
         SCRIPTS_PASTA: pasta,
         ...extra,
-      });
+      }, opcoes);
       // A rodada sai logo depois do listen. Espera-se o LOG dela, e não um
       // tempo fixo: tempo fixo passa a reprovar no dia em que a máquina do
       // GitHub estiver lenta, falando de outro assunto.
@@ -6806,10 +6816,20 @@ console.log("\n50. A busca pede só o que o painel usa");
       // Alguém edita o script que já rodou, e acrescenta outro depois dele.
       fs.writeFileSync(path.join(dir, "001-cria.sql"), "create table marca_h (n int, extra text);");
       fs.writeFileSync(path.join(dir, "002-nova.sql"), "create table marca_h2 (n int);");
-      const t2 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" });
+      const t2 = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" }, {
+        tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }] } });
       const log = t2.registro.join("");
       ok("a ponte para e diz QUAL arquivo mudou", /PAREI.*001-cria\.sql/s.test(log), log.slice(-600));
       ok("e não aplica a que veio depois", (await b.temTabela("marca_h2")) === false);
+      // E A JANELA DO PAINEL DIZ O MESMO: o log é onde ninguém olha.
+      let janela = null;
+      for (let i = 0; i < 40 && (!janela || janela.situacao === "rodando"); i++) {
+        if (i) await espera(150);
+        janela = await fetch(`http://127.0.0.1:${t2.porta}/scripts/estado`,
+          { headers: { Authorization: "Bearer jwt-bom" } }).then((r) => r.json(), () => null);
+      }
+      ok("e a janela do painel diz que parou, e por qual arquivo",
+         janela && janela.situacao === "mudou" && /001-cria\.sql/.test(janela.mensagem), JSON.stringify(janela));
       await t2.parar();
     }
 
@@ -6821,7 +6841,7 @@ console.log("\n50. A busca pede só o que o painel usa");
       u.searchParams.set("sslmode", "disable");
       const t = await subirTudo({
         DATABASE_URL: u.toString(), SCRIPTS_PASTA: dir, SCRIPTS_AUTOMATICOS: "aplicar",
-      });
+      }, { tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }] } });
       for (let i = 0; i < 80; i++) {
         if (/Scripts autom[áa]ticos:/.test(t.registro.join(""))) break;
         await espera(100);
@@ -6829,6 +6849,15 @@ console.log("\n50. A busca pede só o que o painel usa");
       const log = t.registro.join("");
       ok("diz que não deu para aplicar", /não deu para aplicar agora/.test(log), log.slice(-400));
       ok("e diz que segue atendendo", /segue atendendo normalmente/.test(log));
+      let janela = null;
+      for (let i = 0; i < 40 && (!janela || janela.situacao === "rodando"); i++) {
+        if (i) await espera(150);
+        janela = await fetch(`http://127.0.0.1:${t.porta}/scripts/estado`,
+          { headers: { Authorization: "Bearer jwt-bom" } }).then((r) => r.json(), () => null);
+      }
+      ok("e a janela do painel diz, em palavras, que aquele banco não existe",
+         janela && janela.situacao === "nao_conectou" && /banco_que_nao_existe_mesmo" não existe/.test(janela.mensagem),
+         JSON.stringify(janela));
       // Mesmo cuidado de 51f: ponte morta reprova, em vez de derrubar a prova.
       const status = await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -7023,6 +7052,413 @@ console.log("\n50. A busca pede só o que o painel usa");
          ctl.rows[0] && ctl.rows[0].sucesso === false, JSON.stringify(ctl.rows));
       ok("com o motivo dizendo que é a transação",
          ctl.rows[0] && /transaction/i.test(String(ctl.rows[0].erro)), ctl.rows[0] && ctl.rows[0].erro);
+      if (t) await t.parar();
+    }
+
+    // ==================================================================
+    //  51m em diante. O MARCO, A GUARDA, A SENHA À PARTE E A JANELA DO PAINEL
+    //
+    //  O banco do escritório tem de 001 a 020 colados à mão, e nenhum registro
+    //  disso. As cenas abaixo montam esse banco em miniatura — o Zorvin de pé
+    //  (`conversas`) e a tabela de controle sem nada — e conferem as saídas:
+    //  com o marco, sem ele, e com ele escrito errado.
+    //
+    //  E CONFEREM PELA JANELA DO PAINEL (`/scripts/estado`), e não só pelo
+    //  log: o log é o lugar onde este projeto já perdeu dois avisos, e a
+    //  janela é o que quem administra vai ler.
+    // ==================================================================
+    const COMO_ADMIN = { tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }] } };
+
+    /** O banco do escritório em miniatura: o Zorvin de pé, e nenhum registro de script. */
+    async function bancoComOZorvin() {
+      const b = await bancoNovo();
+      await b.consultar("create table public.conversas (id uuid primary key default gen_random_uuid())");
+      return b;
+    }
+
+    function estadoDe(t, jwt = "jwt-bom") {
+      return fetch(`http://127.0.0.1:${t.porta}/scripts/estado`,
+        { headers: jwt ? { Authorization: `Bearer ${jwt}` } : {} })
+        .then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) }),
+              () => ({ status: 0, corpo: null }));
+    }
+
+    /** Espera a rodada terminar, e devolve o que a janela do painel diz. */
+    async function desfechoDe(t, ms = 12000) {
+      const ate = Date.now() + ms;
+      let ultimo = null;
+      while (Date.now() < ate) {
+        ultimo = await estadoDe(t);
+        const situacao = ultimo.corpo && ultimo.corpo.situacao;
+        if (situacao && situacao !== "rodando") return ultimo.corpo;
+        await espera(150);
+      }
+      return ultimo && ultimo.corpo;
+    }
+
+    const linhas = (rows) => JSON.stringify(rows.map((r) => r.n));
+
+    // ---- 51m. o marco: os colados à mão são ANOTADOS, e não rodam ----
+    {
+      const b = await bancoComOZorvin();
+      // `insert` em todos: rodar deixa linha. É o que separa "anotei" de
+      // "rodei de novo" — um `create table if not exists` passaria calado
+      // nos dois casos.
+      await b.consultar("create table marca_mm (n int)");
+      const dir = pastaCom({
+        "001-um.sql": "insert into marca_mm (n) values (1);",
+        "002-dois.sql": "insert into marca_mm (n) values (2);",
+        "003-tres.sql": "insert into marca_mm (n) values (3);\n"
+          + "select 'a terceira entrou'::text as o_que, 'true'::text as resposta;",
+      });
+      const t = await pontComScripts(b, dir,
+        { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_RODADOS_A_MAO: "002" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      const { rows } = await b.consultar("select n from marca_mm order by n");
+      ok("o marco: os colados à mão NÃO rodam de novo (só o 003 deixou linha)",
+         linhas(rows) === "[3]", linhas(rows));
+      const ctl = await b.consultar(
+        "select nome, origem, sucesso from zorvin_scripts_aplicados order by nome");
+      ok("001 e 002 ficam anotados como colados à mão, e o 003 como da ponte",
+         JSON.stringify(ctl.rows.map((r) => [r.nome, r.origem, r.sucesso])) === JSON.stringify([
+           ["001-um.sql", "a_mao", true], ["002-dois.sql", "a_mao", true], ["003-tres.sql", "ponte", true]]),
+         JSON.stringify(ctl.rows));
+      const log = t.registro.join("");
+      ok("o log diz quantos anotou, e que nenhum rodou de novo",
+         /anotei 2 script\(s\) como já rodados à mão/.test(log) && /Nenhum deles foi rodado de novo/.test(log),
+         log.slice(-700));
+      ok("a janela do painel diz em dia, e o que entrou nesta subida",
+         fim && fim.situacao === "em_dia" && JSON.stringify(fim.nesta_subida) === '["003-tres.sql"]',
+         JSON.stringify(fim));
+      const c3 = fim && (fim.aplicados || []).find((a) => a.nome === "003-tres.sql");
+      ok("e guarda a conferência do script — a última linha dele",
+         c3 && Array.isArray(c3.conferencia) && c3.conferencia[0].resposta === "true" && c3.alerta === false,
+         JSON.stringify(c3));
+      ok("a janela separa o que a ponte rodou do que foi colado à mão",
+         fim && (fim.aplicados || []).filter((a) => a.origem === "a_mao").length === 2,
+         JSON.stringify(fim && fim.aplicados));
+      await t.parar();
+
+      // A SEGUNDA SUBIDA, com o número trocado: o marco só vale na primeira
+      // vez. Valendo sempre, trocar "002" por "004" faria a ponte pular calada
+      // um script que nunca rodou.
+      fs.writeFileSync(path.join(dir, "004-quatro.sql"), "insert into marca_mm (n) values (4);");
+      const t2 = await pontComScripts(b, dir,
+        { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_RODADOS_A_MAO: "004" }, COMO_ADMIN);
+      await desfechoDe(t2);
+      const { rows: r2 } = await b.consultar("select n from marca_mm order by n");
+      ok("trocar o número depois NÃO pula um script que nunca rodou (o 004 roda)",
+         linhas(r2) === "[3,4]", linhas(r2));
+      ok("e o log diz que a variável foi ignorada",
+         /só vale na primeira vez/.test(t2.registro.join("")), t2.registro.join("").slice(-600));
+      await t2.parar();
+    }
+
+    // ---- 51n. a guarda: o Zorvin de pé, sem registro e sem marco — nada roda ----
+    {
+      const b = await bancoComOZorvin();
+      await b.consultar("create table marca_n (n int)");
+      const dir = pastaCom({ "001-um.sql": "insert into marca_n (n) values (1);" });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      const { rows } = await b.consultar("select count(*)::int as n from marca_n");
+      ok("a guarda: banco com o Zorvin e sem registro — NADA roda", rows[0].n === 0, JSON.stringify(rows));
+      const ctl = await b.consultar("select count(*)::int as n from zorvin_scripts_aplicados");
+      ok("nem é anotado como aplicado", ctl.rows[0].n === 0, JSON.stringify(ctl.rows));
+      ok("e a janela diz o que falta (SCRIPTS_RODADOS_A_MAO), com o último da pasta",
+         fim && fim.situacao === "sem_marco" && /SCRIPTS_RODADOS_A_MAO/.test(fim.mensagem)
+           && /"001"/.test(fim.mensagem),
+         JSON.stringify(fim));
+      await t.parar();
+    }
+
+    // ---- 51o. o marco escrito errado é recusado — e nada roda ----
+    {
+      const b = await bancoComOZorvin();
+      await b.consultar("create table marca_o (n int)");
+      const dir = pastaCom({
+        "001-um.sql": "insert into marca_o (n) values (1);",
+        "002-dois.sql": "insert into marca_o (n) values (2);",
+        "020-vinte.sql": "insert into marca_o (n) values (20);",
+      });
+      // "02" LIDO COMO NÚMERO seria o 002 — e o 020 rodaria de novo, com a
+      // ponte achando que obedecia. "21" não é arquivo nenhum.
+      for (const errado of ["02", "21", "vinte"]) {
+        const t = await pontComScripts(b, dir,
+          { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_RODADOS_A_MAO: errado }, COMO_ADMIN);
+        const fim = await desfechoDe(t);
+        const { rows } = await b.consultar("select count(*)::int as n from marca_o");
+        ok(`SCRIPTS_RODADOS_A_MAO="${errado}" é recusado, e nada roda`,
+           rows[0].n === 0 && fim && fim.situacao === "marco_invalido",
+           `${rows[0].n} linha(s) · ${JSON.stringify(fim)}`);
+        await t.parar();
+      }
+      // E O MESMO VALOR ESCRITO CERTO VALE — sem esta metade, as três de cima
+      // passariam também com um marco que recusa tudo.
+      const t = await pontComScripts(b, dir,
+        { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_RODADOS_A_MAO: "002" }, COMO_ADMIN);
+      await desfechoDe(t);
+      const { rows } = await b.consultar("select n from marca_o order by n");
+      ok('escrito como no nome do arquivo ("002"), vale — e só o 020 roda', linhas(rows) === "[20]", linhas(rows));
+      await t.parar();
+    }
+
+    // ---- 51p. "0" quer dizer nenhum: o Zorvin de pé, e tudo roda ----
+    {
+      const b = await bancoComOZorvin();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_p (n int);" });
+      const t = await pontComScripts(b, dir,
+        { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_RODADOS_A_MAO: "0" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      ok('com "0", nenhum é dado como colado à mão, e tudo roda',
+         (await b.temTabela("marca_p")) === true && fim && fim.situacao === "em_dia", JSON.stringify(fim));
+      await t.parar();
+    }
+
+    // ---- 51q. conferir com o marco: não escreve nada, mas já diz o que faria ----
+    {
+      const b = await bancoComOZorvin();
+      const dir = pastaCom({
+        "001-um.sql": "create table marca_q1 (n int);",
+        "002-dois.sql": "create table marca_q2 (n int);",
+      });
+      const t = await pontComScripts(b, dir, { SCRIPTS_RODADOS_A_MAO: "001" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      ok("no modo conferir, a tabela de controle NÃO é criada — nem para o marco",
+         (await b.temTabela("zorvin_scripts_aplicados")) === false);
+      ok("e nenhum script roda", (await b.temTabela("marca_q2")) === false);
+      ok("mas a janela já diz que só o 002 está esperando",
+         fim && fim.situacao === "pendentes" && JSON.stringify(fim.pendentes) === '["002-dois.sql"]',
+         JSON.stringify(fim));
+      await t.parar();
+    }
+
+    // ---- 51r. a senha à parte, e uma senha cheia de símbolos ----
+    {
+      const b = await bancoNovo();
+      // Tudo o que parte um endereço: @, :, /, #, ? — e um % que não é código
+      // de nada.
+      const SENHA = "p@ss:w/rd#?%z";
+      // UM PAPEL POR RODADA, com nome sorteado. Papel é do servidor inteiro, e
+      // não do banco da cena: com um nome fixo, duas rodadas ao mesmo tempo
+      // (as sabotagens rodam em paralelo) brigavam pelo mesmo `alter role`, e
+      // a prova estourava com "tuple concurrently updated" — falando de outro
+      // assunto.
+      const PAPEL = `zorvin_prova_senha_${crypto.randomBytes(4).toString("hex")}`;
+      await falarCom(BANCO_BASE, `create role ${PAPEL} login password '${SENHA}'`);
+      await b.consultar(`grant usage, create on schema public to ${PAPEL}`);
+      const u = new URL(b.url);
+      const lugar = `${u.hostname}:${u.port || 5432}${u.pathname}?sslmode=disable`;
+      const dir = pastaCom({ "001-cria.sql": "create table marca_r (n int);" });
+
+      // 1. o endereço como a Supabase mostra, e a senha à parte
+      const t1 = await pontComScripts(b, dir, {
+        DATABASE_URL: `postgresql://${PAPEL}:[YOUR-PASSWORD]@${lugar}`,
+        DATABASE_PASSWORD: SENHA, SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const f1 = await desfechoDe(t1);
+      ok("o endereço com [YOUR-PASSWORD] e a senha em DATABASE_PASSWORD: conecta e aplica",
+         (await b.temTabela("marca_r")) === true && f1 && f1.situacao === "em_dia", JSON.stringify(f1));
+      ok("e a senha não aparece na janela nem no log",
+         !JSON.stringify(f1).includes(SENHA) && !t1.registro.join("").includes(SENHA));
+      await t1.parar();
+
+      // 2. a senha CRUA no endereço, do jeito que quem não é do ramo a cola
+      fs.writeFileSync(path.join(dir, "002-mais.sql"), "create table marca_r2 (n int);");
+      const t2 = await pontComScripts(b, dir, {
+        DATABASE_URL: `postgresql://${PAPEL}:${SENHA}@${lugar}`, SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      await desfechoDe(t2);
+      ok("a senha com @, #, ? e / colada crua no endereço também serve (quem a separa é o ÚLTIMO @)",
+         (await b.temTabela("marca_r2")) === true, t2.registro.join("").slice(-500));
+      await t2.parar();
+
+      // 3. o marcador ainda no endereço, e nenhuma senha à parte
+      const t3 = await pontComScripts(b, dir, {
+        DATABASE_URL: `postgresql://${PAPEL}:[YOUR-PASSWORD]@${lugar}`, SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const f3 = await desfechoDe(t3);
+      ok("[YOUR-PASSWORD] sem a senha à parte: a janela diz para pôr DATABASE_PASSWORD",
+         f3 && f3.situacao === "nao_conectou" && /DATABASE_PASSWORD/.test(f3.mensagem), JSON.stringify(f3));
+      await t3.parar();
+
+      // 4. a senha errada: a frase diz QUAL senha é, e a ponte NÃO insiste
+      const t4 = await pontComScripts(b, dir, {
+        DATABASE_URL: `postgresql://${PAPEL}:[YOUR-PASSWORD]@${lugar}`,
+        DATABASE_PASSWORD: "senha-errada", SCRIPTS_AUTOMATICOS: "aplicar",
+        SCRIPTS_TENTAR_DE_NOVO_MS: "300" }, COMO_ADMIN);
+      const f4 = await desfechoDe(t4);
+      ok("senha errada: a janela diz que é a senha do BANCO que não confere",
+         f4 && f4.situacao === "nao_conectou" && /senha do banco não confere/.test(f4.mensagem),
+         JSON.stringify(f4));
+      await espera(1800);
+      const vezes = (t4.registro.join("").match(/não deu para aplicar agora/g) || []).length;
+      // A Supabase bloqueia o endereço de quem erra a senha muitas vezes
+      // seguidas: insistir trocaria um aviso por um bloqueio.
+      ok("e NÃO insiste com a senha errada", vezes === 1, `${vezes} tentativa(s)`);
+      await t4.parar();
+      // E o papel sai junto com o que ele criou: deixado, cada rodada somaria
+      // um papel com senha conhecida ao servidor de quem roda a prova.
+      await b.consultar(`drop owned by ${PAPEL}`);
+      await falarCom(BANCO_BASE, `drop role ${PAPEL}`);
+    }
+
+    // ---- 51s. o pooler de TRANSAÇÃO nem é tentado ----
+    {
+      const dir = pastaCom({ "001-x.sql": "select 1;" });
+      const t = await subirTudo({
+        DATABASE_URL: "postgresql://postgres.abcdefghijklmnop:segredo-da-prova@aws-0-sa-east-1.pooler.supabase.com:6543/postgres",
+        SCRIPTS_PASTA: dir, SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      ok("o pooler de TRANSAÇÃO (6543) é recusado, e a frase diz qual usar",
+         fim && fim.situacao === "nao_conectou" && /6543/.test(fim.mensagem) && /Session pooler/.test(fim.mensagem),
+         JSON.stringify(fim));
+      ok("e nem a janela nem o log repetem a senha do endereço",
+         !JSON.stringify(fim).includes("segredo-da-prova") && !t.registro.join("").includes("segredo-da-prova"));
+      await t.parar();
+    }
+
+    // ---- 51t. o endereço DIRETO da Supabase: a frase diz qual usar ----
+    {
+      // Ele só responde por IPv6, e a Render não alcança IPv6 (armadilha nº 1).
+      // Aqui ele falha de outro jeito (o servidor não existe), e é de
+      // propósito: a frase tem de apontar o Session pooler QUALQUER que seja o
+      // jeito de falhar, porque o jeito muda de máquina para máquina.
+      const dir = pastaCom({ "001-x.sql": "select 1;" });
+      const t = await subirTudo({
+        DATABASE_URL: "postgresql://postgres:segredo-da-prova@db.zorvinprovaquenaoexiste.supabase.co:5432/postgres",
+        SCRIPTS_PASTA: dir, SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const fim = await desfechoDe(t, 25000);
+      ok("o endereço DIRETO: a frase manda usar o Session pooler",
+         fim && fim.situacao === "nao_conectou" && /DIRETO/.test(fim.mensagem) && /Session pooler/.test(fim.mensagem),
+         JSON.stringify(fim));
+      await t.parar();
+    }
+
+    // ---- 51u. a janela do painel é só de quem administra ----
+    {
+      const dir = pastaCom({ "001-x.sql": "select 1;" });
+      for (const [rotulo, usuarios, esperado] of [
+        ["quem administra lê", [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }], 200],
+        ["quem atende NÃO lê", [{ id: "u1", nome: "Rodrigo", admin: false, ativo: true }], 403],
+        ["administradora desativada NÃO lê", [{ id: "u1", nome: "Rodrigo", admin: true, ativo: false }], 403],
+      ]) {
+        const t = await subirTudo({ DATABASE_URL: "", SCRIPTS_PASTA: dir }, { tabelas: { usuarios } });
+        const r = await estadoDe(t);
+        ok(`a janela dos scripts: ${rotulo}`, r.status === esperado, `${r.status} ${JSON.stringify(r.corpo)}`);
+        if (esperado === 200) {
+          ok("e, sem DATABASE_URL, diz que está desligada",
+             r.corpo && r.corpo.situacao === "desligado" && r.corpo.ligado === false, JSON.stringify(r.corpo));
+        }
+        await t.parar();
+      }
+      const t = await subirTudo({ DATABASE_URL: "", SCRIPTS_PASTA: dir }, COMO_ADMIN);
+      const r = await estadoDe(t, null);
+      ok("sem entrar, ninguém lê", r.status === 401, `veio ${r.status}`);
+      await t.parar();
+    }
+
+    // ---- 51v. a conferência que não fechou fica marcada ----
+    {
+      // É a última linha de cada script — o "deu certo?" que o Rodrigo lia no
+      // editor da Supabase. Agora ninguém vê o script rodar, e a convenção
+      // desta pasta é que `false`, "NÃO…" e "rode o script…" querem dizer
+      // defeito. Contagens e nomes são informação, e não pesam.
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-bom.sql": "select 'tudo'::text as o_que, 'true'::text as resposta;",
+        "002-falso.sql": "select 'a coluna existe'::text as o_que, false as resposta;",
+        "003-nao.sql": "select 'a função responde'::text as o_que, "
+          + "'NÃO — permission denied (código 42501)'::text as resposta;",
+        "004-conta.sql": "select 'linhas caídas'::text as o_que, 'nenhuma — a faixa some'::text as resposta, "
+          + "0 as quantas;",
+        "005-ordem.sql": "select 'sem a tabela'::text as o_que, 'rode o script 005 antes'::text as resposta;",
+      });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      ok("a conferência que diz false, NÃO ou \"rode o script\" fica marcada; as outras não",
+         fim && JSON.stringify(fim.alertas) === '["002-falso.sql","003-nao.sql","005-ordem.sql"]',
+         JSON.stringify(fim && fim.alertas));
+      ok("e o log diz isso na hora em que aplica",
+         /apliquei 002-falso\.sql \(\d+ms\) — mas a conferência dele diz/.test(t.registro.join("")),
+         t.registro.join("").slice(-800));
+      await t.parar();
+    }
+
+    // ---- 51w. a trava presa: a ponte que desistiu tenta de novo sozinha ----
+    {
+      // Numa publicação há duas pontes vivas por alguns segundos. A que
+      // desiste é a que FICA no ar — e é ela que o painel pergunta. Sem tentar
+      // de novo, ela diria "outra ponte está cuidando disto" até a publicação
+      // seguinte, e um script que a outra não chegou a rodar ficaria parado.
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_w (n int);" });
+      const outra = new pg.Client({ connectionString: b.url, ssl: false });
+      await outra.connect();
+      await outra.query("select pg_advisory_lock(823005001)");
+      const t = await pontComScripts(b, dir,
+        { SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_TENTAR_DE_NOVO_MS: "700" }, COMO_ADMIN);
+      const antes = await desfechoDe(t);
+      ok("com a trava presa, a janela diz que outra ponte cuidava, e quando tenta de novo",
+         antes && antes.situacao === "outra_ponte" && Boolean(antes.proxima_tentativa), JSON.stringify(antes));
+      await outra.end();
+      let depois = null;
+      for (let i = 0; i < 80; i++) {
+        depois = (await estadoDe(t)).corpo;
+        if (depois && depois.situacao === "em_dia") break;
+        await espera(150);
+      }
+      ok("solta a trava, a MESMA ponte aplica sozinha, sem nova publicação",
+         (await b.temTabela("marca_w")) === true && depois && depois.situacao === "em_dia"
+           && depois.proxima_tentativa === null,
+         JSON.stringify(depois));
+      await t.parar();
+    }
+
+    // ---- 51x. o banco que não atende: a ponte tenta de novo sozinha ----
+    {
+      // Conexão recusada passa sozinha (o banco reiniciando, a Supabase numa
+      // manutenção). Esperar a próxima publicação por ela deixaria um script
+      // novo parado por dias. A senha errada, ao contrário, não insiste — e
+      // isso é conferido em 51r.
+      const dir = pastaCom({ "001-x.sql": "select 1;" });
+      const porta = await portaLivre();
+      const t = await subirTudo({
+        DATABASE_URL: `postgresql://postgres:prova@127.0.0.1:${porta}/postgres?sslmode=disable`,
+        SCRIPTS_PASTA: dir, SCRIPTS_AUTOMATICOS: "aplicar", SCRIPTS_TENTAR_DE_NOVO_MS: "300" }, COMO_ADMIN);
+      await espera(2500);
+      const vezes = (t.registro.join("").match(/não deu para aplicar agora/g) || []).length;
+      ok("conexão recusada: a ponte tenta de novo sozinha", vezes >= 2, `${vezes} tentativa(s)`);
+      await t.parar();
+    }
+
+    // ---- 51y. o modo escrito errado vale como conferir, e a frase diz ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({ "001-cria.sql": "create table marca_y (n int);" });
+      const t = await pontComScripts(b, dir, { SCRIPTS_AUTOMATICOS: "aplica" }, COMO_ADMIN);
+      const fim = await desfechoDe(t);
+      ok('SCRIPTS_AUTOMATICOS="aplica" (faltando uma letra) não aplica nada',
+         (await b.temTabela("marca_y")) === false);
+      ok('e a janela diz que o valor não é "aplicar" — em vez de deixar a pessoa achando que ligou',
+         fim && /"aplica"/.test(fim.mensagem) && /não é "aplicar"/.test(fim.mensagem), JSON.stringify(fim));
+      await t.parar();
+    }
+
+    // ---- 51z. o script que falha aparece na janela ----
+    {
+      const b = await bancoNovo();
+      const dir = pastaCom({
+        "001-boa.sql": "create table marca_z (n int);",
+        "002-quebrada.sql": "isto nao e sql;",
+        "003-depois.sql": "create table marca_z3 (n int);",
+      });
+      // Mesmo cuidado de 51f: aqui um script quebra de propósito.
+      const t = await pontOuNada(b, dir, { SCRIPTS_AUTOMATICOS: "aplicar" }, COMO_ADMIN);
+      const fim = t ? await desfechoDe(t) : null;
+      ok("o script que falha aparece na janela, com o nome e o que ficou para trás",
+         fim && fim.situacao === "falhou" && /002-quebrada\.sql/.test(fim.mensagem)
+           && JSON.stringify(fim.pendentes) === '["002-quebrada.sql","003-depois.sql"]'
+           && JSON.stringify(fim.nesta_subida) === '["001-boa.sql"]',
+         JSON.stringify(fim));
+      ok("com o motivo técnico à parte", fim && /syntax/i.test(fim.detalhe || ""), fim && fim.detalhe);
       if (t) await t.parar();
     }
   }

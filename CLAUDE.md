@@ -49,8 +49,15 @@ Variáveis de ambiente (no Render):
 - `DATABASE_URL` — o endereço do **Session Pooler** do Supabase, para a ponte
   aplicar sozinha os scripts de `sql/automaticos/`. **Opcional: sem ela, tudo
   como antes** e as mudanças de banco continuam sendo coladas à mão. Ver "Os
-  scripts que se aplicam sozinhos" abaixo.
+  scripts que se aplicam sozinhos" abaixo. Pode ir **como a Supabase mostra**,
+  com `[YOUR-PASSWORD]` dentro.
+- `DATABASE_PASSWORD` — a senha do banco, à parte do endereço. **Opcional**, e é
+  o jeito recomendado: senha com `@`, `#`, `/` ou `?` escrita crua dentro do
+  endereço o parte no lugar errado.
 - `SCRIPTS_AUTOMATICOS` — `conferir` (padrão) ou `aplicar`. **Opcional.**
+- `SCRIPTS_RODADOS_A_MAO` — o número do último script de `sql/automaticos/` que
+  já foi colado à mão (ex.: `020`). **Só vale na primeira vez**, com a tabela de
+  controle vazia. Ver "O marco" abaixo.
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -75,6 +82,14 @@ Duas coisas que valem lembrar antes de mexer nisso:
 - **a conta vive na memória e zera a cada reinício da Render.** Publicar reinicia.
   Números pequenos podem só querer dizer que a ponte subiu faz pouco — e a própria
   janela diz isso.
+- **a prova da chamada que não volta (49e) segura a porta.** Ela abria um
+  servidor e o fechava logo ("agora ninguém atende ali"), e em 08/10, na
+  integração contínua, outro servidor da bancada pegou a porta solta: a ponte
+  chamou a si mesma no lugar do Vantoro e a prova leu o 404 dela, com a conta
+  dizendo zero falhas. Reproduzido fazendo a porta "morta" responder 404 — as
+  mesmas duas reprovações, com os mesmos números. Hoje o servidor fica de pé
+  até o fim da cena, derrubando cada conexão. **Porta "livre" que a prova solta
+  não é de ninguém — é de quem pegar primeiro.**
 
 ## A entrada (login) — e por que ela tem dois caminhos
 
@@ -366,9 +381,9 @@ propósito). Por alguns segundos há duas pontes vivas, e as duas acordariam
 querendo aplicar o mesmo script. `pg_try_advisory_lock` faz a segunda desistir.
 
 **A tabela `zorvin_scripts_aplicados` nasce com RLS ligada e SEM política** — só
-a ponte (`service_role`) a alcança. É a armadilha nº 5 aplicada na origem. Quando
-o painel precisar mostrar isto, será por `zorvin_saude()`, que já sabe quem
-administra — e não lendo a tabela direto.
+a ponte (`service_role`) a alcança. É a armadilha nº 5 aplicada na origem. O
+painel não a lê: ele pergunta à ponte (`GET /scripts/estado`, ver "Ligar no
+escritório", logo abaixo).
 
 **O que isto NÃO resolve ainda:** um cliente novo, com banco vazio, continua sem
 um caminho — os 37 scripts estruturais de `sql/` descrevem a história, não o
@@ -400,6 +415,90 @@ Variável **opcional** `SCRIPTS_PASTA`, para a bancada apontar scripts de mentir
 sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Prova:
 seção 51, que sobe um **Postgres de verdade** (a integração contínua traz um), e
 **reprova se ele faltar** em vez de se pular em silêncio.
+
+### Ligar no escritório (08/10) — o marco, a guarda, a senha e a janela
+
+Pedido do Rodrigo: *"pode seguir com os scripts automáticos"* — parar de colar
+SQL. A automação estava escrita e provada desde 14/09, e **ligá-la como estava
+seria um estrago**: `zorvin_scripts_aplicados` não existe no banco do
+escritório, então a primeira subida rodaria de 001 a 020 de novo. A pasta
+inteira, na ordem, aguenta isso — mas não de graça (regra 5 do LEIA-ME: o 009
+recria o "OUTROS" renomeado ou desativado). Entraram cinco coisas antes do
+interruptor.
+
+**O marco — `SCRIPTS_RODADOS_A_MAO=020`.** Na primeira vez, com a tabela sem
+registro nenhum, a ponte anota de 001 a 020 com `origem = 'a_mao'` **sem rodar
+nenhum** — numa transação, porque metade do marco anotada faria a subida
+seguinte achar que há histórico e rodar a outra metade. Três cuidados:
+
+- o número vai **como no nome do arquivo**. "02" lido como número seria o 002, e
+  a ponte rodaria de novo de 003 a 020 achando que obedecia: valor que não é o
+  número de um arquivo da pasta é recusado, e **nada** roda;
+- **só vale na primeira vez**. Com histórico ele é ignorado, e o log diz que a
+  variável pode sair da Render: trocar o número depois não pode pular calado um
+  script que nunca rodou;
+- **"0" quer dizer nenhum** — para quem montou o Zorvin pelos scripts de `sql/`.
+
+**A guarda.** Sem registro e sem o marco, num banco que já tem `conversas`, a
+ponte **não aplica nada** e diz o que falta. Esquecer a variável não pode ser o
+jeito de rodar os vinte de novo. Banco sem o Zorvin (um cliente novo, a bancada,
+a 51l-bis) segue como sempre seguiu.
+
+**A senha à parte (`DATABASE_PASSWORD`).** O endereço da Supabase vem com
+`[YOUR-PASSWORD]`, e trocar à mão tem uma armadilha que ninguém vê: senha com
+`@`, `#`, `/` ou `?` precisa ir **codificada** dentro de um endereço, e crua ela
+o parte no lugar errado — o banco diz "senha errada" para a senha certa. A ponte
+agora **lê o endereço ela mesma** e passa cada pedaço ao `pg` como valor: quem
+separa a senha do servidor é o **último** `@`. A senha crua dentro do endereço
+também serve; à parte é o recomendado.
+
+**As frases de quem não é do ramo.** Senha errada (*"é a senha do BANCO, e não a
+de entrar no site"*), usuário sem o código do projeto (`Tenant or user not
+found`), endereço DIRETO (só IPv6), servidor que não existe, banco que não
+existe — cada um vira a frase do que mudar, com o motivo técnico à parte. O
+pooler de **transação** (porta 6543) é **recusado antes de tentar**: nele a
+trava de sessão se soltaria, e ele "funcionaria" — por isso mesmo não pode ser
+tentado. **Nenhuma frase repete o endereço**: ele tem a senha dentro.
+
+**Tentar de novo sozinha** — só no que passa sozinho: a trava presa por outra
+ponte (numa publicação há duas vivas, e a que desiste é a que FICA no ar) e o
+banco que não respondeu. A espera dobra de 30s até 10 min. **Senha errada não
+insiste:** a Supabase bloqueia o endereço de quem erra a senha muitas vezes
+seguidas, e insistir trocaria um aviso por um bloqueio.
+
+**A janela do painel — `GET /scripts/estado`**, só para quem administra (`admin`
+E `ativo`; a conferência de quem pede falhando vira 502 com a frase, e não "você
+não administra"). Devolve a situação (`desligado`, `rodando`, `em_dia`,
+`pendentes`, `falhou`, `mudou`, `sem_marco`, `marco_invalido`, `nao_conectou`,
+`outra_ponte`, `sem_pg`), a frase, o detalhe técnico, o que entrou nesta subida,
+a próxima tentativa e a lista do que está anotado no banco. **Por uma rota da
+ponte, e não por `zorvin_saude()`** como estava escrito aqui: os defeitos mais
+prováveis — senha, endereço — acontecem antes de a ponte chegar ao banco, e o
+banco não tem como contar o que nunca chegou a ele. **O desfecho só vai para a
+janela depois de a tabela ser relida**: publicado antes, "em dia" sairia ao lado
+da lista de antes da rodada, sem o script que acabou de entrar.
+
+**A conferência de cada script fica guardada** (`conferencia`, jsonb, a coluna
+nova ao lado de `origem`): é a última linha dele, o `select` que respondia "deu
+certo?" no editor da Supabase. Agora ninguém vê o script rodar, então a ponte
+guarda a resposta e marca `false`, "NÃO…" e "rode o script…" — a convenção desta
+pasta, escrita no LEIA-ME. Contagem e nome não pesam.
+
+**E `SCRIPTS_AUTOMATICOS` escrito errado** ("aplica") vale como `conferir`, que
+é o seguro — e a frase diz que foi isso, em vez de deixar a pessoa achando que
+ligou.
+
+Prova: seção 51, de 51m a 51z, mais 51h e 51i conferindo a janela — a seção foi
+a **94 conferências**, com **21 sabotagens e 21 pegas**, todas limpas (nenhuma
+"pegou" estourando a prova). Duas lições da bancada: o papel do banco com a
+senha cheia de símbolos é **sorteado por rodada** — papel é do servidor inteiro,
+e com nome fixo as sabotagens em paralelo brigavam pelo mesmo `alter role` e a
+prova estourava com *"tuple concurrently updated"*, falando de outro assunto; e
+a primeira rodada de sabotagens reprovou, de passagem, uma cena que a sabotagem
+nem tocava (51w) — era um descompasso de verdade: a próxima tentativa era
+apagada DEPOIS de a rodada voltar, e quem perguntasse no meio lia "em dia" ao
+lado de uma tentativa marcada. Hoje ela se apaga no começo da rodada. Uma variável
+própria para a bancada: `SCRIPTS_TENTAR_DE_NOVO_MS` (a primeira espera).
 
 ## A equipe sem Vantoro — a mesma tela, outra fonte
 
