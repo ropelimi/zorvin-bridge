@@ -41,12 +41,12 @@ async function portaLivre() {
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false, rpcs = {} } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar, semColunas, semTabelas, bilhetesQueFalham,
+    quebrar, semColunas, semTabelas, bilhetesQueFalham, rpcs,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
@@ -8355,6 +8355,274 @@ console.log("\n56. Transcrever um áudio, ao clicar");
     ok("a lida continua lida", m("M-LIDA") === "lida", String(m("M-LIDA")));
     ok("e a sem status passa a entregue", m("M-NOVA") === "entregue", String(m("M-NOVA")));
     await t.parar();
+  }
+}
+
+// ==================================================================
+//  58. A RESPOSTA AUTOMÁTICA FORA DO HORÁRIO
+//
+//  A DECISÃO É DO BANCO — o script 021 —, e a conta do horário dele é
+//  provada num Postgres de verdade, na seção 59. Aqui se prova o que é da
+//  ponte: perguntar com a conversa e a mensagem CERTAS, mandar EXATAMENTE o
+//  texto que o banco devolveu, para o número do cliente, sem `readchat`;
+//  anotar no registro o que houve; e nada disso virar linha em `mensagens`
+//  (a fila de espera e a prévia da lista não podem mudar), nem segurar a
+//  mensagem do cliente, nem parar a ponte sem o script.
+// ==================================================================
+console.log("\n58. A resposta automática fora do horário");
+{
+  const doCliente = (id, extra = {}) => ({
+    EventType: "messages", owner: TELEFONE.numero,
+    chat: { phone: "5511988887777", wa_name: "Cliente da Noite" },
+    message: {
+      id, messageid: id, chatid: "5511988887777@s.whatsapp.net",
+      sender: "5511988887777@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageTimestamp: Date.now(), wasSentByApi: false, type: "text",
+      text: "Boa noite, alguém aí?", ...extra,
+    },
+  });
+  const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  });
+  const TEXTO = "Recebemos sua mensagem. Respondemos de segunda a sexta, das 8h às 18h.";
+  /** O banco dizendo SIM, e reservando a linha no registro como o 021 faz. */
+  const bancoQueResponde = (perguntas) => ({
+    zorvin_responder_fora_do_horario: (corpo, dados) => {
+      perguntas.push(corpo);
+      dados.zorvin_respostas_automaticas = dados.zorvin_respostas_automaticas || [];
+      const id = "ra-" + (dados.zorvin_respostas_automaticas.length + 1);
+      dados.zorvin_respostas_automaticas.push({ id, conversa_id: corpo.p_conversa, texto: TEXTO, status: "enviando" });
+      return { corpo: { responde: true, id, texto: TEXTO, ate: "2026-10-13T11:00:00+00:00" } };
+    },
+  });
+  const enviosDeTexto = (t) => t.uaz.recebidas.filter((r) => r.caminho === "/send/text");
+  const registro = (t) => (t.sb.dados.zorvin_respostas_automaticas || [])[0] || null;
+
+  // ---- 58a. fora do horário: pergunta, manda, anota ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: bancoQueResponde(perguntas) });
+    await mandar(t, doCliente("noite-1"));
+    await espera(900);
+    const doCli = t.sb.dados.mensagens.find((m) => m.id_uazapi === "noite-1");
+    ok("a mensagem do cliente entrou", Boolean(doCli), JSON.stringify(t.sb.dados.mensagens));
+    ok("a ponte perguntou ao banco uma vez", perguntas.length === 1, JSON.stringify(perguntas));
+    ok("com a conversa e o id da mensagem do cliente",
+       Boolean(doCli) && perguntas.length === 1 && perguntas[0].p_conversa === doCli.conversa_id
+       && perguntas[0].p_id_uazapi === "noite-1", JSON.stringify(perguntas));
+    const envios = enviosDeTexto(t);
+    ok("mandou uma mensagem pelo WhatsApp", envios.length === 1,
+       JSON.stringify(t.uaz.recebidas.map((r) => r.caminho)));
+    const corpo = envios.length ? envios[0].corpo : {};
+    ok("com o texto que o banco devolveu", corpo.text === TEXTO, JSON.stringify(corpo));
+    ok("para o número do cliente", corpo.number === "5511988887777", JSON.stringify(corpo));
+    // QUEM RESPONDE NÃO LEU. Marcar como lida no aparelho apagaria o sinal de
+    // que há cliente esperando — a fila manda `readchat`, isto não.
+    ok("sem marcar a conversa como lida no aparelho", envios.length === 1 && !("readchat" in corpo),
+       JSON.stringify(corpo));
+    const reg = registro(t);
+    ok("o registro diz que saiu", Boolean(reg) && reg.status === "enviada", JSON.stringify(reg));
+    ok("com o id que o WhatsApp deu e a hora", Boolean(reg) && Boolean(reg.id_uazapi) && Boolean(reg.enviada_em),
+       JSON.stringify(reg));
+    // A CONFERÊNCIA QUE GUARDA A DECISÃO PRINCIPAL: em `mensagens` a resposta
+    // tiraria o cliente da fila de espera e trocaria a prévia da lista.
+    ok("e a resposta NÃO vira linha em mensagens",
+       t.sb.dados.mensagens.length === 1 && t.sb.dados.mensagens[0].origem === "contato",
+       JSON.stringify(t.sb.dados.mensagens.map((m) => [m.origem, m.texto])));
+    ok("nem item da fila de envio", (t.sb.dados.fila_envio || []).length === 0,
+       JSON.stringify(t.sb.dados.fila_envio));
+    await t.parar();
+  }
+
+  // ---- 58b. o banco diz que não: nada sai ----
+  {
+    const t = await subirTudo({}, { rpcs: { zorvin_responder_fora_do_horario: () =>
+      ({ corpo: { responde: false, motivo: "no_horario" } }) } });
+    await mandar(t, doCliente("dia-1"));
+    await espera(800);
+    ok("dentro do horário, nada sai", enviosDeTexto(t).length === 0,
+       JSON.stringify(enviosDeTexto(t)));
+    ok("e a mensagem do cliente entrou igual", t.sb.dados.mensagens.some((m) => m.id_uazapi === "dia-1"));
+    await t.parar();
+  }
+
+  // ---- 58c. sem o script 021: tudo como antes, e um aviso só ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: { zorvin_responder_fora_do_horario: (corpo) => {
+      perguntas.push(corpo);
+      return { status: 404, corpo: { code: "PGRST202",
+        message: "Could not find the function public.zorvin_responder_fora_do_horario(p_conversa, p_id_uazapi) in the schema cache" } };
+    } } });
+    await mandar(t, doCliente("sem-1"));
+    await espera(700);
+    await mandar(t, doCliente("sem-2"));
+    await espera(700);
+    ok("sem o script, as duas mensagens entram",
+       ["sem-1", "sem-2"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)),
+       JSON.stringify(t.sb.dados.mensagens.map((m) => m.id_uazapi)));
+    ok("nada sai", enviosDeTexto(t).length === 0);
+    const avisos = (t.registro.join("").match(/zorvin_responder_fora_do_horario não existe/g) || []).length;
+    ok("o log avisa UMA vez, dizendo o script", avisos === 1 && /021-a-resposta-fora-do-horario/.test(t.registro.join("")),
+       `avisou ${avisos} vez(es)`);
+    ok("e a ponte para de perguntar", perguntas.length === 1, `perguntou ${perguntas.length} vez(es)`);
+    await t.parar();
+  }
+
+  // ---- 58d. o WhatsApp recusa: o registro diz que não saiu, e por quê ----
+  {
+    const t = await subirTudo({}, { rpcs: bancoQueResponde([]),
+      uazapi: { falharEnvio: { status: 500, corpo: { error: "WhatsApp disconnected" } } } });
+    await mandar(t, doCliente("falha-1"));
+    await espera(900);
+    const reg = registro(t);
+    ok("o registro diz que NÃO saiu", Boolean(reg) && reg.status === "erro", JSON.stringify(reg));
+    ok("com o motivo que o WhatsApp deu", Boolean(reg) && /500/.test(reg.erro || "") && /disconnected/.test(reg.erro || ""),
+       JSON.stringify(reg));
+    ok("e a mensagem do cliente continua lá", t.sb.dados.mensagens.some((m) => m.id_uazapi === "falha-1"));
+    await t.parar();
+  }
+
+  // ---- 58e. o banco tropeça: a mensagem entra, e a próxima pergunta de novo ----
+  {
+    let vezes = 0;
+    const t = await subirTudo({}, { rpcs: { zorvin_responder_fora_do_horario: () => {
+      vezes++;
+      return { status: 500, corpo: { code: "XX000", message: "o banco tossiu" } };
+    } } });
+    await mandar(t, doCliente("tosse-1"));
+    await espera(700);
+    await mandar(t, doCliente("tosse-2"));
+    await espera(700);
+    ok("com o banco tossindo, as mensagens entram",
+       ["tosse-1", "tosse-2"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)));
+    // UM TROPEÇO NÃO É "O SCRIPT NÃO EXISTE": desligar aqui calaria a resposta
+    // até a ponte reiniciar por causa de um segundo ruim.
+    ok("um tropeço não desliga a resposta (perguntou nas duas)", vezes === 2, `perguntou ${vezes}`);
+    await t.parar();
+  }
+
+  // ---- 58f. grupo e mensagem nossa nem perguntam ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: bancoQueResponde(perguntas) });
+    const GRUPO = "120363000000000009@g.us";
+    await mandar(t, {
+      EventType: "messages", owner: TELEFONE.numero,
+      chat: { id: GRUPO, name: "Mutirão", isGroup: true },
+      message: { id: "grp-n", messageid: "grp-n", chatid: GRUPO, isGroup: true,
+                 sender: "5511977776666@s.whatsapp.net", fromMe: false, messageType: "conversation",
+                 text: "alguém?", content: "alguém?", messageTimestamp: Date.now(), wasSentByApi: false,
+                 senderName: "Fulana" },
+    });
+    await mandar(t, doCliente("nossa-1", { fromMe: true, text: "Respondi do celular" }));
+    await espera(900);
+    ok("grupo e mensagem nossa entram", ["grp-n", "nossa-1"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)),
+       JSON.stringify(t.sb.dados.mensagens.map((m) => m.id_uazapi)));
+    ok("e nenhuma das duas pergunta ao banco", perguntas.length === 0, JSON.stringify(perguntas));
+    ok("nem manda nada", enviosDeTexto(t).length === 0);
+    await t.parar();
+  }
+
+  // ---- 58g. o WhatsApp lento não segura a mensagem do cliente ----
+  {
+    const t = await subirTudo({}, { rpcs: bancoQueResponde([]), uazapi: { demoraDoEnvio: 2500 } });
+    await mandar(t, doCliente("lenta-1"));
+    await espera(700);
+    ok("a mensagem do cliente entra antes de a resposta sair",
+       t.sb.dados.mensagens.some((m) => m.id_uazapi === "lenta-1"));
+    ok("e a resposta ainda está saindo", (registro(t) || {}).status === "enviando", JSON.stringify(registro(t)));
+    await espera(2800);
+    ok("depois ela sai", (registro(t) || {}).status === "enviada", JSON.stringify(registro(t)));
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  59. A CONTA DO HORÁRIO, NUM POSTGRES DE VERDADE
+//
+//  A conta do script 021 (`zorvin_horario_de`) e os feriados nascem mesmo
+//  num banco limpo — é de propósito, para serem provados AQUI, e não só no
+//  dia da instalação. É ESTA conta que decide se o cliente recebe a resposta
+//  e quando o escritório "volta", e um erro nela só apareceria às 18h de uma
+//  sexta, com cliente de verdade do outro lado.
+//
+//  Sem Postgres a seção é pulada — nunca na integração contínua.
+// ==================================================================
+{
+  console.log("\n59. A conta do horário, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a conta do horário (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const SCRIPT = fs.readFileSync(new URL("../sql/automaticos/021-a-resposta-fora-do-horario.sql", import.meta.url), "utf8");
+    const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    await raiz.query(`create database ${nome}`);
+    const u = new URL(BANCO_BASE);
+    u.pathname = `/${nome}`;
+    u.searchParams.set("sslmode", "disable");
+    const c = new pg.Client({ connectionString: u.toString(), ssl: false });
+    await c.connect();
+    try {
+      await c.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if; end $$;`);
+      const aplicar = async () => { const r = await c.query(SCRIPT); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+      const conf = await aplicar();
+      ok("o 021 aplica num banco limpo, e a conferência não acusa defeito",
+         Array.isArray(conf) && conf.length > 0 && !conf.some((l) => l.resposta === "false" || /^NÃO/.test(l.resposta)),
+         JSON.stringify(conf));
+      await c.query("delete from zorvin_feriados where dia = '2026-11-02'");
+      await aplicar();
+      const fer = await c.query("select count(*)::int n, bool_or(dia = '2026-11-02') volta from zorvin_feriados");
+      ok("rodar de novo não devolve o feriado que alguém tirou", fer.rows[0].n === 14 && !fer.rows[0].volta,
+         JSON.stringify(fer.rows[0]));
+
+      const SEMANA = { seg: ["08:00", "18:00"], ter: ["08:00", "18:00"], qua: ["08:00", "18:00"],
+                       qui: ["08:00", "18:00"], sex: ["08:00", "18:00"], sab: null, dom: null };
+      const conta = async (semana, quando, fuso = "America/Sao_Paulo") =>
+        (await c.query("select zorvin_horario_de($1::jsonb, $2, $3::timestamptz) h",
+                       [JSON.stringify(semana), fuso, quando])).rows[0].h;
+      const em = (x) => (x ? new Date(x).toISOString() : null);
+      let h = await conta(SEMANA, "2026-10-09 19:00:00-03");
+      ok("sexta às 19h está fechado", h.aberto === false, JSON.stringify(h));
+      ok("e volta na TERÇA às 8h — a segunda 12/10 é feriado", em(h.abre_em) === "2026-10-13T11:00:00.000Z", JSON.stringify(h));
+      ok("tendo fechado na sexta às 18h", em(h.fechou_em) === "2026-10-09T21:00:00.000Z", JSON.stringify(h));
+      h = await conta(SEMANA, "2026-10-13 07:00:00-03");
+      ok("terça às 7h: volta às 8h do mesmo dia, e fechou na sexta",
+         h.aberto === false && em(h.abre_em) === "2026-10-13T11:00:00.000Z" && em(h.fechou_em) === "2026-10-09T21:00:00.000Z",
+         JSON.stringify(h));
+      h = await conta(SEMANA, "2026-10-14 08:00:00-03");
+      ok("às 8h em ponto já está aberto", h.aberto === true, JSON.stringify(h));
+      h = await conta(SEMANA, "2026-10-14 18:00:00-03");
+      ok("às 18h em ponto já está fechado", h.aberto === false, JSON.stringify(h));
+      // A PONTE RODA EM UTC NA RENDER: 22h UTC são 19h em Brasília.
+      h = await conta(SEMANA, "2026-10-09 22:00:00+00");
+      ok("a hora em UTC conta no fuso do escritório", h.aberto === false && em(h.fechou_em) === "2026-10-09T21:00:00.000Z",
+         JSON.stringify(h));
+      h = await conta(SEMANA, "2026-10-09 21:30:00+00", "America/Manaus");
+      ok("e no fuso de cada departamento (Manaus, 17h30: aberto)", h.aberto === true, JSON.stringify(h));
+      h = await conta({ ...SEMANA, sab: ["08:00", "12:00"] }, "2026-10-10 13:00:00-03");
+      ok("sábado de meio expediente: às 13h fechou ao meio-dia",
+         h.aberto === false && em(h.fechou_em) === "2026-10-10T15:00:00.000Z", JSON.stringify(h));
+      h = await conta({}, "2026-10-09 10:00:00-03");
+      ok("semana sem dia aberto: fechado, e sem prometer volta", h.aberto === false && h.abre_em === null, JSON.stringify(h));
+      h = await conta({ ...SEMANA, sex: ["oito", "18:00"] }, "2026-10-09 10:00:00-03");
+      ok("faixa que não se lê conta como fechado, sem estourar a prévia", h.aberto === false, JSON.stringify(h));
+    } catch (e) {
+      ok("a seção 59 rodou até o fim", false, e.message);
+    } finally {
+      await c.end();
+      await raiz.query(`drop database if exists ${nome}`).catch(() => {});
+      await raiz.end();
+    }
   }
 }
 

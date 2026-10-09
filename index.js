@@ -1625,6 +1625,112 @@ async function terminarOsPendentes() {
   }
 }
 
+// ============================================================
+//  A RESPOSTA AUTOMÁTICA FORA DO HORÁRIO (script 021, 09/10)
+//
+//  Quem escreve à noite, no fim de semana ou no feriado recebe na hora o
+//  texto que o departamento escreveu — uma vez por período fechado.
+//
+//  QUEM DECIDE É O BANCO, e não esta ponte. A conta do horário (fuso,
+//  feriados, a semana de cada departamento), as regras de quando não sair e
+//  a reserva da vez moram em `zorvin_responder_fora_do_horario`, numa
+//  transação só. Aqui só se pergunta, se manda o que ele disse e se anota o
+//  que houve. Duas pontes vivas na publicação, ou a caixa de entrada
+//  reprocessando o mesmo evento, perguntam as duas — e o banco deixa só uma
+//  mandar.
+//
+//  A RESPOSTA NÃO VIRA LINHA EM `mensagens`: ela fica no registro do script
+//  021, e o painel a mostra na conversa. Em `mensagens` ela mexeria na fila
+//  de espera, na prévia da lista, nas não lidas e nos números — e o cliente
+//  continua sem ter sido atendido por ninguém.
+//
+//  NÃO VAI `readchat`. A fila manda `readchat: true` porque quem responde já
+//  leu; a resposta automática sai sem ninguém ter lido, e marcar a conversa
+//  como lida no aparelho apagaria o sinal de que há cliente esperando.
+//
+//  SEM O SCRIPT 021, TUDO COMO ANTES: a primeira resposta "a função não
+//  existe" desliga isto até a ponte reiniciar, com uma linha no log.
+// ============================================================
+let foraDoHorarioDesligada = false;
+
+/** A função não existe? É diferente de "o banco recusou agora". */
+const semAFuncao = (erro) => Boolean(erro) && (
+  ['PGRST202', '42883'].includes(String(erro.code))
+  || /could not find the function|function .* does not exist/i.test(String(erro.message || '')));
+
+async function responderForaDoHorario({ adv, conversaId, idUazapi, numero }) {
+  if (foraDoHorarioDesligada || !conversaId || !idUazapi || !adv) return;
+  try {
+    const { data, error } = await supabase.rpc('zorvin_responder_fora_do_horario',
+      { p_conversa: conversaId, p_id_uazapi: idUazapi });
+    if (error) {
+      if (semAFuncao(error)) {
+        foraDoHorarioDesligada = true;
+        console.warn('Fora do horário: a função zorvin_responder_fora_do_horario não existe — '
+          + 'a resposta automática fica desligada até rodar '
+          + 'sql/automaticos/021-a-resposta-fora-do-horario.sql.');
+        return;
+      }
+      // UM TROPEÇO NÃO DERRUBA NADA: a mensagem do cliente já está gravada, e
+      // é isso que não pode se perder. A resposta automática é cortesia.
+      console.log('Fora do horário: não consegui perguntar ao banco —', error.message);
+      return;
+    }
+    // DENTRO DO HORÁRIO, DESLIGADA, JÁ RESPONDIDA… — o motivo só aparece no
+    // log quando ele diz alguma coisa sobre a configuração.
+    if (!data || data.responde !== true || !data.id) {
+      if (data && data.motivo === 'sem_dia_aberto') {
+        console.log(`Fora do horário: não respondi a conversa ${conversaId} (${data.motivo}).`);
+      }
+      return;
+    }
+
+    const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+    const destino = numeroLimpo(numero);
+    let idEnviada = null;
+    let falha = null;
+    try {
+      const resposta = await fetchComTimeout(`${servidor}/send/text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'token': adv.token },
+        body: JSON.stringify({ number: destino, text: data.texto }),
+      }, 30000);
+      // O CORPO É LIDO UMA VEZ SÓ — a lição da auditoria de 07/10.
+      const corpo = await resposta.text().catch(() => '');
+      if (!resposta.ok) {
+        falha = `Uazapi respondeu ${resposta.status}: ${corpo.slice(0, 300)}`;
+      } else {
+        try {
+          const dados = JSON.parse(corpo);
+          idEnviada = dados?.messageid || dados?.id || dados?.message?.messageid || null;
+        } catch (_) { /* resposta sem JSON: saiu, sem o id */ }
+      }
+    } catch (e) {
+      falha = e && e.cause && e.cause.code ? `${e.message} (${e.cause.code})` : String((e && e.message) || e);
+    }
+
+    // O REGISTRO DIZ O QUE HOUVE. É dele que a bolha da conversa sai: "saiu"
+    // ou "não saiu", com o motivo — e nunca um "enviando" para sempre por
+    // falta de anotar.
+    const mudancas = falha
+      ? { status: 'erro', erro: falha.slice(0, 500) }
+      : { status: 'enviada', id_uazapi: idEnviada, enviada_em: new Date().toISOString() };
+    const { error: erroAnotar } = await supabase.from('zorvin_respostas_automaticas')
+      .update(mudancas).eq('id', data.id);
+    if (erroAnotar) console.log('Fora do horário: não consegui anotar o resultado —', erroAnotar.message);
+
+    if (falha) {
+      console.log(`Fora do horário: a resposta para ${destino} NÃO saiu pela linha `
+        + `${adv.numero || '?'} — ${falha}`);
+      avisarQueALinhaCaiu(falha, adv.numero || 'telefone desconhecido', adv.nome);
+    } else {
+      console.log(`Fora do horário: respondi ${destino} pela linha ${adv.numero || '?'}.`);
+    }
+  } catch (e) {
+    console.log('Fora do horário:', (e && e.message) || e);
+  }
+}
+
 // O CORPO DO EVENTO, E NÃO O PEDIDO HTTP.
 //
 // Esta função passou a receber o `corpo` já lido, e não `req`/`res`. É o que
@@ -2102,6 +2208,16 @@ async function processarEventoDoWebhook(corpo) {
         .update({ arquivada: false }).eq('id', conversa.id).eq('arquivada', true).select('id');
       if (erroArq) console.log('Não consegui desarquivar (coluna "arquivada"?):', erroArq.message);
       else if (voltou && voltou.length) console.log(`Conversa ${conversa.id} saiu das arquivadas: o contato escreveu.`);
+    }
+
+    // FORA DO HORÁRIO, O CLIENTE RECEBE O AVISO DO DEPARTAMENTO. Depois de a
+    // mensagem dele estar gravada, e só dela: o banco procura a mensagem pelo
+    // id para decidir. ESPERADA, para o desligamento com calma esperar junto —
+    // mas ela nunca sobe erro: a mensagem do cliente já entrou, e é isso que a
+    // caixa de entrada guarda. Grupo nem pergunta.
+    if (origem === 'contato' && !chat.ehGrupo) {
+      await responderForaDoHorario({ adv, conversaId: conversa.id, idUazapi: m.messageid,
+                                     numero: contatoNumero });
     }
 
     // ------------------------------------------------------------
