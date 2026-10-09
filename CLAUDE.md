@@ -1158,6 +1158,83 @@ dono; conversa apagada leva as tarefas), reaplicação, banco limpo, e **3
 sabotagens com 3 pegas** (leitura aberta, `criada_por` da tela, reabrir sem
 limpar). A conferência do fim lê a tabela como `authenticated`.
 
+## A resposta automática fora do horário (script 021, 09/10)
+
+Pedido do Rodrigo, o nº 1 da lista de ideias de 08/10: quem escreve à noite,
+no fim de semana ou no feriado recebe na hora o texto do departamento
+("Recebemos sua mensagem. Respondemos de segunda a sexta, das 8h às 18h").
+Decidido com ele: **texto e horário por departamento**, **uma vez por
+período fechado** (não a cada mensagem), e **a conversa continua na fila de
+espera** — o cliente ainda não foi atendido.
+
+`sql/automaticos/021-a-resposta-fora-do-horario.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_feriados` | os dias em que o escritório não abre — do escritório inteiro |
+| `zorvin_horario_de(semana, fuso, quando)` | a conta: aberto? quando fecha? quando abre? quando fechou? |
+| `zorvin_fora_do_horario` | por departamento: ligada, texto, a semana (`seg`…`dom`, `["08:00","18:00"]` ou nulo) e o fuso |
+| `zorvin_respostas_automaticas` | o que saiu: texto, status (`enviando`/`enviada`/`erro`), e `ate` |
+| `zorvin_responder_fora_do_horario(conversa, id_uazapi)` | a decisão e a reserva da vez, numa transação só |
+
+### Quem decide é o banco, e a ponte só pergunta
+
+Depois de gravar uma mensagem de CLIENTE (não grupo), a ponte chama a função
+com a conversa e o id da mensagem; se ela disser que sim, manda o texto por
+`/send/text` e anota `enviada` (com o id do WhatsApp) ou `erro` (com o
+motivo). A conta do horário, as regras e a reserva moram no banco por dois
+motivos: é a MESMA conta que a prévia do painel usa (uma escrita só), e a
+reserva precisa ser atômica — duas pontes vivas na publicação, ou a caixa de
+entrada reprocessando, perguntam as duas, e só uma manda.
+
+**Não sai quando:** a mensagem tem mais de 30 minutos (importação, reenvio
+atrasado); é grupo; a linha está desativada; o departamento não tem a
+resposta ligada; está dentro do horário; não há dia aberto em 31 dias; **ou
+alguém da equipe escreveu depois do fechamento** — quem fez hora extra está
+atendendo, e "estamos fechados" no meio de uma conversa viva é
+constrangimento.
+
+**A chave do período é a hora em que o escritório ABRE de novo** (`ate`),
+única por conversa: a sexta às 19h e o sábado às 10h têm a mesma (terça 8h,
+com a segunda 12/10 feriado), a segunda às 20h outra. É também o que
+responde, no registro, "fechado até quando".
+
+### A resposta NÃO entra em `mensagens`, e é a decisão principal
+
+Em `mensagens` ela passaria pelo gatilho feito à mão no começo do projeto (a
+prévia, a ordem e as NÃO LIDAS da lista), que não está em arquivo nenhum — a
+prévia viraria "Recebemos sua mensagem" no lugar da pergunta do cliente, e
+não há como saber se o selo contaria a nossa resposta como mensagem a ler. E
+a fila de espera, o painel de números, os avisos e "quem respondeu" leem
+`mensagens`. No registro à parte, nada disso muda; o painel junta o registro
+à linha do tempo da conversa, como já junta as notas e as mensagens que não
+saíram.
+
+**Pelo mesmo motivo ela não passa pela `fila_envio`**: falhando, viraria
+bolha vermelha com "Reenviar" e acenderia a faixa vermelha de "mensagem que
+não saiu" — alarme sobre um aviso automático, que ninguém tem o que fazer
+com ele. Falhando aqui, o registro diz `erro` e o motivo, e só.
+
+**Sem `readchat`**: a fila manda porque quem responde já leu; aqui ninguém
+leu, e marcar como lida no aparelho apagaria o sinal de cliente esperando.
+
+**Nasce desligada**, e o 021 semeia os feriados nacionais de 2026 e 2027 só
+na rodada que CRIA a tabela (regra 5 do LEIA-ME). Carnaval e Corpus Christi
+ficam de fora: são ponto facultativo.
+
+**Sem o script, tudo como antes**: a primeira resposta "a função não existe"
+desliga isto até a ponte reiniciar, com uma linha no log. Um tropeço qualquer
+do banco NÃO desliga — calaria a resposta por causa de um segundo ruim.
+
+Conferido num Postgres 16 de verdade: **60 conferências** (a conta do
+horário com feriado, fuso, UTC, 8h e 18h em ponto, sábado de meio
+expediente; o gatilho que recusa em português; cada motivo de não sair; duas
+pontes ao mesmo tempo; quem pode o quê, no papel de quem atende) e **14
+sabotagens com 14 pegas**. Uma estourou a prova primeiro, em vez de reprovar
+com nome — a chamada da decisão passou a ser guardada. Na suíte: seção 58
+(a ponte, 28 conferências, **12 sabotagens e 12 pegas**) e seção 59 (a conta
+do horário num Postgres de verdade, obrigatória na integração contínua).
+
 ## A auditoria de 07/10
 
 Varredura inteira da ponte e dos scripts, cada achado conferido antes de

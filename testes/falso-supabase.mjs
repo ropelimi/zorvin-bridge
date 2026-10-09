@@ -211,7 +211,13 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
                                     // primeira gravação, então esse caminho não existia
                                     // aqui — e é justamente ele que roda em produção
                                     // enquanto o SQL não é aplicado.
-                                    semTabelas = [] } = {}) {
+                                    semTabelas = [],
+                                    // AS FUNÇÕES DO BANCO QUE A PROVA RESPONDE, por nome:
+                                    // `{ nome: (corpo, dados) => ({ status, corpo }) }`.
+                                    // A que não está aqui continua caindo no caminho de
+                                    // sempre (vira "tabela"), como caía antes — e as
+                                    // provas de antes não mudam de assunto por isso.
+                                    rpcs = {} } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
   const arquivos = new Map();                  // Storage
@@ -331,6 +337,18 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
         return responder(200, { Key: chave });
       }
       if (req.method === "GET") { res.writeHead(200); return res.end("bytes"); }
+    }
+
+    // ---------------- Funções (RPC) ----------------
+    // O PostgREST devolve o valor da função CRU — um `jsonb` volta como o
+    // objeto, e não numa lista —, e é assim que a ponte o lê.
+    if (caminho.startsWith("/rest/v1/rpc/")) {
+      const nome = caminho.replace("/rest/v1/rpc/", "");
+      if (rpcs[nome]) {
+        const r = (await rpcs[nome](json, dados)) || {};
+        res.writeHead(r.status || 200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(r.corpo === undefined ? null : r.corpo));
+      }
     }
 
     // ---------------- PostgREST ----------------
