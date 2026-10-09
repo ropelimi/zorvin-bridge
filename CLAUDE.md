@@ -1190,9 +1190,10 @@ entrada reprocessando, perguntam as duas, e só uma manda.
 **Não sai quando:** a mensagem tem mais de 30 minutos (importação, reenvio
 atrasado); é grupo; a linha está desativada; o departamento não tem a
 resposta ligada; está dentro do horário; não há dia aberto em 31 dias; **ou
-alguém da equipe escreveu depois do fechamento** — quem fez hora extra está
-atendendo, e "estamos fechados" no meio de uma conversa viva é
-constrangimento.
+a equipe está conversando com o cliente** — escreveu depois do fechamento
+(quem fez hora extra está atendendo, e "estamos fechados" no meio de uma
+conversa viva é constrangimento) ou nos 30 minutos antes da mensagem dele
+(script 022, logo abaixo).
 
 **A chave do período é a hora em que o escritório ABRE de novo** (`ate`),
 única por conversa: a sexta às 19h e o sábado às 10h têm a mesma (terça 8h,
@@ -1234,6 +1235,70 @@ sabotagens com 14 pegas**. Uma estourou a prova primeiro, em vez de reprovar
 com nome — a chamada da decisão passou a ser guardada. Na suíte: seção 58
 (a ponte, 28 conferências, **12 sabotagens e 12 pegas**) e seção 59 (a conta
 do horário num Postgres de verdade, obrigatória na integração contínua).
+
+### E ela não interrompe uma conversa (script 022, 09/10)
+
+Pedido do Rodrigo no mesmo dia em que ligou e testou: *"se eu estiver
+conversando com o contato antes ou após o horário do expediente, a mensagem
+automática não pode aparecer"*. O 021 cuidava de metade (quem escreveu
+DEPOIS do fechamento); faltava a conversa que vem de ANTES:
+
+| | |
+|---|---|
+| 17:55 | nós: "Vou conferir e já te digo." |
+| 18:00 | o escritório fecha |
+| 18:05 | ele: "Obrigado, fico no aguardo" → o 021 respondia "nosso horário é das 8h às 18h…" |
+
+`sql/automaticos/022-a-resposta-nao-interrompe-a-conversa.sql` recria a
+decisão com a regra nova: **não sai se a equipe agiu nesta conversa nos 30
+minutos antes da mensagem do cliente**, de qualquer lado do fechamento. Pela
+regra 5 do LEIA-ME, **o 022 é a versão de referência da decisão** daqui para
+a frente.
+
+**Os 30 minutos são `zorvin_carencia_da_espera()`, do 006** — a carência da
+fila de espera. É a mesma pergunta ("o cliente ainda está respondendo àquela
+conversa?"), e duas réguas para ela divergiriam no primeiro ajuste: a fila
+diria que ele não está esperando, e a resposta automática diria a ele que
+ninguém está ali. A aba do painel escreve o número lido de lá.
+
+**"A equipe agiu" são duas coisas:** a mensagem nossa em `mensagens` (inclui
+quem respondeu pelo celular) e **o pedido que ainda está na `fila_envio`** —
+quem apertou Enviar dois segundos antes está conversando, e a mensagem dele
+só entra em `mensagens` depois que o WhatsApp aceita. Sem isso, mensagens
+que se cruzam dariam a resposta automática logo depois da nossa. **A
+agendada que espera a hora não conta** (`agendada_para`, lida por `to_jsonb`
+porque nasceu no 013).
+
+**A carência é lida dentro de um bloco protegido**, e não é zelo: sem o 006,
+um "function does not exist" que escapasse cairia em `semAFuncao` — e a
+PONTE desligaria a resposta automática até reiniciar, achando que o 021 não
+existe. Sem a função, valem os mesmos 30 minutos. Pela mesma razão a
+conferência lê a carência por `execute`: escrita direto, a chamada seria
+resolvida ao preparar o `insert`, e o script inteiro morreria por uma linha
+de conferência.
+
+**Motivo próprio no retorno** (`conversa_em_andamento`), separado do
+`equipe_respondeu` do 021, para quem investigar saber qual das duas regras
+segurou.
+
+**O que continua de fora, e foi dito ao Rodrigo:** o cliente que escreve
+PRIMEIRO, fora do horário, recebe a resposta na hora — mesmo com alguém no
+escritório que vá responder um minuto depois. O banco não tem como saber
+disso. O ajuste é o horário do departamento na tela; esperar uns minutos
+antes de mandar seria outra decisão, e é dele.
+
+**E a presença ("estou atendendo") NÃO entrou, de propósito.** O painel pulsa
+`atendendo_em` de minuto em minuto enquanto a conversa está aberta, **mesmo
+com a aba escondida** — uma aba esquecida aberta numa conversa às 18h
+calaria a resposta daquele cliente a noite toda. Mensagem é fato; aba aberta
+não é gente.
+
+Conferido num Postgres 16 de verdade: **43 conferências** (a conversa que
+atravessa o fechamento; 29 e 31 minutos; a fila que ainda não saiu; a
+agendada; o envio que falhou; a carência trocada para 10 minutos; o banco
+sem o 006; a base sem a fila; banco limpo; reaplicação; o 021 inteiro de
+novo) e **11 sabotagens com 11 pegas**, todas limpas — inclusive a versão
+de antes (só o 021), que reproduz o relato.
 
 ## A auditoria de 07/10
 
