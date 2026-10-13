@@ -8626,5 +8626,535 @@ console.log("\n58. A resposta automática fora do horário");
   }
 }
 
+// ==================================================================
+//  60. A DISTRIBUIÇÃO DAS CONVERSAS NOVAS
+//
+//  A DECISÃO É DO BANCO — o script 023 —, e ela foi provada num Postgres de
+//  verdade (quem é cliente novo, de quem é a vez, a trava). Aqui se prova o
+//  que é da ponte: perguntar com a conversa e a mensagem CERTAS, depois de a
+//  mensagem estar gravada (é ela que o banco olha) e antes da resposta fora
+//  do horário (que pode levar segundos); perguntar em toda mensagem de
+//  cliente, e não em grupo nem em mensagem nossa; nunca segurar a mensagem do
+//  cliente; e parar de perguntar sem o script.
+// ==================================================================
+console.log("\n60. A distribuição das conversas novas");
+{
+  const doCliente = (id, extra = {}) => ({
+    EventType: "messages", owner: TELEFONE.numero,
+    chat: { phone: "5511977770000", wa_name: "Cliente Novo" },
+    message: {
+      id, messageid: id, chatid: "5511977770000@s.whatsapp.net",
+      sender: "5511977770000@s.whatsapp.net", fromMe: false, isGroup: false,
+      messageTimestamp: Date.now(), wasSentByApi: false, type: "text",
+      text: "Oi, preciso de ajuda", ...extra,
+    },
+  });
+  const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  });
+  const log = (t) => t.registro.join("");
+
+  // ---- 60a. pergunta uma vez, com a mensagem gravada, antes da resposta automática ----
+  {
+    const ordem = [];
+    const perguntas = [];
+    let gravadaQuandoPerguntou = null;
+    const t = await subirTudo({}, { rpcs: {
+      zorvin_distribuir_conversa: (corpo, dados) => {
+        ordem.push("distribuir");
+        perguntas.push(corpo);
+        gravadaQuandoPerguntou = (dados.mensagens || []).some((m) => m.id_uazapi === corpo.p_id_uazapi);
+        return { corpo: { distribuiu: true, para: "u-ana", nome: "Ana", departamento: 1 } };
+      },
+      zorvin_responder_fora_do_horario: () => {
+        ordem.push("fora");
+        return { corpo: { responde: false, motivo: "no_horario" } };
+      },
+    } });
+    await mandar(t, doCliente("nova-1"));
+    await espera(900);
+    const doCli = t.sb.dados.mensagens.find((m) => m.id_uazapi === "nova-1");
+    ok("a mensagem do cliente novo entrou", Boolean(doCli), JSON.stringify(t.sb.dados.mensagens));
+    ok("a ponte perguntou ao banco uma vez", perguntas.length === 1, JSON.stringify(perguntas));
+    ok("com a conversa e o id da mensagem do cliente",
+       Boolean(doCli) && perguntas.length === 1 && perguntas[0].p_conversa === doCli.conversa_id
+       && perguntas[0].p_id_uazapi === "nova-1", JSON.stringify(perguntas));
+    ok("depois de a mensagem estar gravada — é ela que o banco olha para decidir",
+       gravadaQuandoPerguntou === true, String(gravadaQuandoPerguntou));
+    ok("e antes da resposta fora do horário", ordem.join(",") === "distribuir,fora", ordem.join(","));
+    ok("o log diz para quem a conversa foi", /Distribuição: a conversa \S+ foi para Ana/.test(log(t)), log(t).slice(-600));
+    await t.parar();
+  }
+
+  // ---- 60b. em toda mensagem de cliente, e não só na primeira ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: (corpo) => {
+      perguntas.push(corpo.p_id_uazapi);
+      return { corpo: { distribuiu: false, motivo: "ja_tem_responsavel" } };
+    } } });
+    await mandar(t, doCliente("oi-1"));
+    await espera(600);
+    await mandar(t, doCliente("oi-2", { text: "Bom dia" }));
+    await espera(600);
+    // A CONVERSA É GRAVADA COM `upsert`: a ponte não sabe se ela acabou de
+    // nascer. Quem sabe é o banco — e é por perguntar de novo que o "Bom dia"
+    // acerta a distribuição que o "Oi" não conseguiu.
+    ok("pergunta nas duas mensagens — quem sabe se a conversa é nova é o banco",
+       perguntas.join(",") === "oi-1,oi-2", perguntas.join(","));
+    ok("e o dia a dia ('já tem responsável') não enche o log", !/Distribuição:/.test(log(t)), log(t).slice(-400));
+    await t.parar();
+  }
+
+  // ---- 60c. sem o script 023: tudo como antes, e um aviso só ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: (corpo) => {
+      perguntas.push(corpo);
+      return { status: 404, corpo: { code: "PGRST202",
+        message: "Could not find the function public.zorvin_distribuir_conversa(p_conversa, p_id_uazapi) in the schema cache" } };
+    } } });
+    await mandar(t, doCliente("sem23-1"));
+    await espera(700);
+    await mandar(t, doCliente("sem23-2"));
+    await espera(700);
+    ok("sem o script, as duas mensagens entram",
+       ["sem23-1", "sem23-2"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)),
+       JSON.stringify(t.sb.dados.mensagens.map((m) => m.id_uazapi)));
+    const avisos = (log(t).match(/zorvin_distribuir_conversa não existe/g) || []).length;
+    ok("o log avisa UMA vez, dizendo o script", avisos === 1 && /023-a-distribuicao-das-conversas-novas/.test(log(t)),
+       `avisou ${avisos} vez(es)`);
+    ok("e a ponte para de perguntar", perguntas.length === 1, `perguntou ${perguntas.length} vez(es)`);
+    await t.parar();
+  }
+
+  // ---- 60d. o banco tropeça: a mensagem entra, e a próxima pergunta de novo ----
+  {
+    let vezes = 0;
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: () => {
+      vezes++;
+      return { status: 500, corpo: { code: "XX000", message: "o banco tossiu" } };
+    } } });
+    await mandar(t, doCliente("tosse-1"));
+    await espera(700);
+    await mandar(t, doCliente("tosse-2"));
+    await espera(700);
+    ok("com o banco tossindo, as mensagens entram",
+       ["tosse-1", "tosse-2"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)));
+    // UM TROPEÇO NÃO É "O SCRIPT NÃO EXISTE": desligar aqui deixaria os
+    // clientes novos sem responsável até a ponte reiniciar.
+    ok("um tropeço não desliga a distribuição (perguntou nas duas)", vezes === 2, `perguntou ${vezes}`);
+    await t.parar();
+  }
+
+  // ---- 60e. grupo e mensagem nossa nem perguntam ----
+  {
+    const perguntas = [];
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: (corpo) => {
+      perguntas.push(corpo);
+      return { corpo: { distribuiu: true, para: "u-ana", nome: "Ana" } };
+    } } });
+    const GRUPO = "120363000000000019@g.us";
+    await mandar(t, {
+      EventType: "messages", owner: TELEFONE.numero,
+      chat: { id: GRUPO, name: "Mutirão", isGroup: true },
+      message: { id: "grp-d", messageid: "grp-d", chatid: GRUPO, isGroup: true,
+                 sender: "5511977776666@s.whatsapp.net", fromMe: false, messageType: "conversation",
+                 text: "alguém?", content: "alguém?", messageTimestamp: Date.now(), wasSentByApi: false,
+                 senderName: "Fulana" },
+    });
+    await mandar(t, doCliente("nossa-d", { fromMe: true, text: "Escrevi do celular" }));
+    await espera(900);
+    ok("grupo e mensagem nossa entram",
+       ["grp-d", "nossa-d"].every((id) => t.sb.dados.mensagens.some((m) => m.id_uazapi === id)),
+       JSON.stringify(t.sb.dados.mensagens.map((m) => m.id_uazapi)));
+    ok("e nenhuma das duas pergunta ao banco", perguntas.length === 0, JSON.stringify(perguntas));
+    await t.parar();
+  }
+
+  // ---- 60f. ninguém no rodízio vira uma linha no log ----
+  {
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: () =>
+      ({ corpo: { distribuiu: false, motivo: "ninguem_no_rodizio", departamento: 1 } }) } });
+    await mandar(t, doCliente("ninguem-1"));
+    await espera(700);
+    ok("o departamento ligado sem ninguém recebendo fica escrito no log",
+       /Distribuição: ninguém do rodízio vê o telefone/.test(log(t)), log(t).slice(-400));
+    ok("e a mensagem entrou", t.sb.dados.mensagens.some((m) => m.id_uazapi === "ninguem-1"));
+    await t.parar();
+  }
+
+  // ---- 60g. o banco lento não segura a mensagem do cliente ----
+  {
+    const t = await subirTudo({}, { rpcs: { zorvin_distribuir_conversa: async () => {
+      await espera(1500);
+      return { corpo: { distribuiu: true, para: "u-ana", nome: "Ana" } };
+    } } });
+    await mandar(t, doCliente("lenta-d"));
+    await espera(600);
+    ok("a mensagem do cliente entra antes de a distribuição responder",
+       t.sb.dados.mensagens.some((m) => m.id_uazapi === "lenta-d"));
+    ok("e a distribuição ainda não respondeu", !/foi para Ana/.test(log(t)));
+    await espera(1500);
+    ok("depois ela responde", /foi para Ana/.test(log(t)), log(t).slice(-400));
+    await t.parar();
+  }
+}
+
+// ==================================================================
+//  61. A DISTRIBUIÇÃO, NUM POSTGRES DE VERDADE
+//
+//  A DECISÃO INTEIRA É DO BANCO, e num banco limpo (a 51l-bis) o 023 sai
+//  cedo, por não achar as tabelas do Zorvin: sem esta seção, o corpo das
+//  funções nunca rodaria na integração contínua, e um erro dentro de um
+//  `plpgsql` só aparece quando ele roda. Aqui o 023 é aplicado sobre um
+//  esquema do Zorvin com as regras de acesso DE PRODUÇÃO — `zorvin_admin` e
+//  `pode_ver_conversa` copiadas de `sql/2026-07-sem-grupos.sql` —, porque a
+//  conferência do fim compara o rodízio com elas, pessoa por telefone.
+// ==================================================================
+{
+  console.log("\n61. A distribuição, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a distribuição (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S023 = fs.readFileSync(new URL("../sql/automaticos/023-a-distribuicao-das-conversas-novas.sql", import.meta.url), "utf8");
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    const bancos = [];
+    const clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`);
+      bancos.push(nome);
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      return u.toString();
+    }
+    async function conectar(url) {
+      const cl = new pg.Client({ connectionString: url, ssl: false });
+      await cl.connect();
+      clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl) => { const r = await cl.query(S023); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    // GUARDADO: o que estoura vira resultado com o erro, e a conferência que
+    // esperava outra coisa reprova COM NOME — e não a seção inteira.
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const defeito = (linhas) => (linhas || []).some((l) => l.resposta === "false" || /^NÃO/.test(String(l.resposta))
+      || /rode o script/i.test(String(l.resposta)));
+    const item = (linhas, re) => ((linhas || []).find((l) => re.test(l.item)) || {}).resposta;
+    const PAPEIS = `do $$ begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+    end $$;`;
+    const ESQUEMA = (com008) => `
+      create schema if not exists auth;
+      create or replace function auth.uid() returns uuid language sql stable as $f$
+        select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+      grant usage on schema auth to anon, authenticated, service_role;
+      grant execute on function auth.uid() to anon, authenticated, service_role;
+      grant usage on schema public to anon, authenticated, service_role;
+      create table departamentos (id bigint generated always as identity primary key, nome text not null,
+        slug text, ativo boolean not null default true);
+      create table usuarios (id uuid primary key, login text, nome text not null default '',
+        admin boolean not null default false, ativo boolean not null default true, foto_url text);
+      create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text,
+        token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+      create table permissoes (id bigint generated always as identity primary key,
+        usuario_id uuid not null references usuarios(id) on delete cascade,
+        departamento_id bigint references departamentos(id) on delete cascade,
+        telefone_id uuid references advogados(id) on delete cascade,
+        check (departamento_id is not null or telefone_id is not null));
+      create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+      create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+        contato_id uuid references contatos(id),
+        ${com008 ? `responsavel_id uuid references usuarios(id) on delete set null, responsavel_em timestamptz,
+        responsavel_por uuid references usuarios(id) on delete set null,` : ""}
+        unique (advogado_id, contato_id));
+      create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+        origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(),
+        unique (conversa_id, id_uazapi));
+      create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+        texto text, status text not null default 'pendente', criado_em timestamptz not null default now(),
+        agendada_para timestamptz);
+      create or replace function zorvin_admin() returns boolean language sql stable security definer
+        set search_path = public, auth as $f$
+        select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+      create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean
+        language sql stable security definer set search_path = public, auth as $f$
+        select zorvin_admin() or exists (
+          select 1 from permissoes p join advogados a on a.id = p_telefone_id
+           where p.usuario_id = auth.uid()
+             and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+             and (p.telefone_id     is null or p.telefone_id     = p_telefone_id)) $f$;
+      grant execute on function zorvin_admin(), pode_ver_conversa(uuid) to authenticated;
+      grant select on usuarios, departamentos, contatos, conversas, mensagens to authenticated;
+      grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+      grant all on all tables in schema public to service_role;`;
+    const U = {
+      ana: "00000000-0000-0000-0000-00000000000a", bruno: "00000000-0000-0000-0000-00000000000b",
+      carla: "00000000-0000-0000-0000-00000000000c", davi: "00000000-0000-0000-0000-00000000000d",
+      eva: "00000000-0000-0000-0000-00000000000e", fabio: "00000000-0000-0000-0000-00000000000f",
+      gil: "00000000-0000-0000-0000-000000000010", rodrigo: "00000000-0000-0000-0000-000000000011",
+    };
+    const NOME = Object.fromEntries(Object.entries(U).map(([k, v]) => [v, k]));
+    let seq = 0;
+    try {
+      await raiz.query(PAPEIS);
+
+      // ---- 61a. sem o 008, ele manda rodar o 008 e não cria a decisão pela metade ----
+      {
+        const c = await conectar(await bancoNovo());
+        await c.query(ESQUEMA(false));
+        const r = await guardado(() => aplicar(c));
+        ok("sem o responsável (008), o 023 aplica sem estourar", Array.isArray(r), JSON.stringify(r));
+        ok("e manda rodar o 008 antes", /rode o script 008/.test(String(item(r, /008/))), JSON.stringify(r));
+        const f = (await c.query("select to_regprocedure('public.zorvin_distribuir_conversa(uuid,text)') f")).rows[0].f;
+        ok("sem criar a decisão pela metade", f === null, String(f));
+      }
+
+      // ---- 61b. o banco do Zorvin ----
+      const url = await bancoNovo();
+      const c = await conectar(url);
+      await c.query(ESQUEMA(true));
+      await c.query("insert into departamentos (nome, slug) values ('SAC','sac'), ('SDC','sdc'), ('Vazio','vazio')");
+      const fone = async (nome, dep, ativo = true) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id, ativo) values ($1, $2, $3, $4) returning id",
+        [nome, "55119" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0"), dep, ativo])).rows[0].id;
+      const F = { sac1: await fone("SAC 1", 1), sac2: await fone("SAC 2", 1), sdc1: await fone("SDC 1", 2),
+                  desligado: await fone("SAC antigo", 1, false), semdep: await fone("Sem departamento", null),
+                  vazio: await fone("Vazio 1", 3) };
+      const pessoa = (id, nome, admin = false, ativo = true) =>
+        c.query("insert into usuarios (id, login, nome, admin, ativo) values ($1, $2, $3, $4, $5)",
+                [id, nome.toLowerCase(), nome, admin, ativo]);
+      // Ana, Bruno e Gil atendem o SAC; Carla só o telefone SAC 2; Davi o SDC;
+      // Eva saiu (desativada); Fábio e Rodrigo administram.
+      await pessoa(U.ana, "Ana"); await pessoa(U.bruno, "Bruno"); await pessoa(U.carla, "Carla");
+      await pessoa(U.davi, "Davi"); await pessoa(U.eva, "Eva", false, false); await pessoa(U.fabio, "Fábio", true);
+      await pessoa(U.gil, "Gil"); await pessoa(U.rodrigo, "Rodrigo", true);
+      const perm = (u, dep, tel) => c.query(
+        "insert into permissoes (usuario_id, departamento_id, telefone_id) values ($1, $2, $3)", [u, dep, tel]);
+      await perm(U.ana, 1, null); await perm(U.bruno, 1, null); await perm(U.carla, null, F.sac2);
+      await perm(U.davi, 2, null); await perm(U.eva, 1, null); await perm(U.gil, 1, null);
+
+      const conf = await guardado(() => aplicar(c));
+      ok("o 023 aplica sobre o Zorvin, e a conferência não acusa defeito", Array.isArray(conf) && !defeito(conf),
+         JSON.stringify(conf));
+      ok("a regra do rodízio bate com a regra de acesso de produção, pessoa por telefone",
+         item(conf, /quem recebe vê a conversa/) === "true", JSON.stringify(conf));
+      ok("nasce com nenhum departamento ligado", item(conf, /departamentos com a distribuição ligada/) === "0");
+      ok("no rodízio, quem atende — e não quem administra nem quem saiu (5)",
+         item(conf, /pessoas no rodízio/) === "5", JSON.stringify(conf));
+
+      const comoPessoa = async (uid, fn) => {
+        await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+        await c.query("set role authenticated");
+        try { return await fn(); } finally {
+          await c.query("reset role");
+          await c.query("select set_config('request.jwt.claim.sub', '', false)");
+        }
+      };
+      // AS FÉRIAS DO GIL, pela sessão de quem administra.
+      await comoPessoa(U.rodrigo, () => c.query("insert into zorvin_rodizio (usuario_id, recebe) values ($1, false)", [U.gil]));
+
+      async function conversaNova(telefone, { primeiraHaMin = 0, equipeAntes = false, filaAntes = false,
+                                              msgHaMin = 0, origem = "contato", numero = null } = {}) {
+        seq++;
+        const num = numero || "5511980000" + String(seq).padStart(3, "0");
+        const ct = (await c.query("insert into contatos (numero) values ($1) returning id", [num])).rows[0].id;
+        const cv = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id",
+                                  [telefone, ct])).rows[0].id;
+        if (primeiraHaMin) {
+          await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'contato', 'antiga', $2, now() - make_interval(mins => $3))",
+                        [cv, `velha-${seq}`, primeiraHaMin]);
+        }
+        if (equipeAntes) {
+          await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'advogado', 'nós', $2, now() - interval '1 minute')",
+                        [cv, `nossa-${seq}`]);
+        }
+        if (filaAntes) await c.query("insert into fila_envio (conversa_id, texto) values ($1, 'saindo')", [cv]);
+        const id = `msg-${seq}`;
+        await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, $2, 'Oi', $3, now() - make_interval(mins => $4))",
+                      [cv, origem, id, msgHaMin]);
+        return { cv, id };
+      }
+      const distribuir = async (cl, { cv, id }) =>
+        (await cl.query("select zorvin_distribuir_conversa($1, $2) r", [cv, id])).rows[0].r;
+      const dono = async (cv) =>
+        (await c.query("select responsavel_id, responsavel_por, responsavel_em from conversas where id = $1", [cv])).rows[0];
+      const recebeu = [];
+      async function vez(telefone) {
+        const x = await conversaNova(telefone);
+        const d = await distribuir(c, x);
+        recebeu.push(NOME[d.para] || d.motivo);
+        await espera(15);
+        return { x, d };
+      }
+
+      // ---- 61c. desligado não distribui; ligado sem ninguém diz isso ----
+      {
+        const x = await conversaNova(F.sac1);
+        const d = await distribuir(c, x);
+        ok("com o departamento desligado, não distribui", d.distribuiu === false && d.motivo === "desligada", JSON.stringify(d));
+        await c.query("insert into zorvin_distribuicao (departamento_id, ligada) values (3, true)");
+        const y = await conversaNova(F.vazio);
+        const e = await distribuir(c, y);
+        ok("ligado, e ninguém do rodízio vê o telefone: diz isso — quem administra não entra por ver tudo",
+           e.distribuiu === false && e.motivo === "ninguem_no_rodizio" && (await dono(y.cv)).responsavel_id === null,
+           JSON.stringify(e));
+      }
+
+      // ---- 61d. o rodízio do SAC ----
+      await c.query("insert into zorvin_distribuicao (departamento_id, ligada) values (1, true)");
+      {
+        const { x, d } = await vez(F.sac1);
+        ok("a primeira conversa nova vai para a Ana (ninguém recebeu; empate pelo nome)",
+           d.distribuiu === true && d.para === U.ana, JSON.stringify(d));
+        const o = await dono(x.cv);
+        ok("ela vira a responsável, com a hora, e sem “passada por” — nulo é o Zorvin",
+           o.responsavel_id === U.ana && o.responsavel_por === null && o.responsavel_em !== null, JSON.stringify(o));
+        await vez(F.sac1); await vez(F.sac1);
+        ok("depois Bruno, e Ana de novo — Gil de férias, Eva desativada, Carla só vê o SAC 2, quem administra fora",
+           recebeu.join(",") === "ana,bruno,ana", recebeu.join(","));
+        await vez(F.sac2);
+        ok("no SAC 2 entra a Carla, que nunca recebeu", recebeu[3] === "carla", recebeu.join(","));
+        await vez(F.sac2); await vez(F.sac1);
+        ok("e segue pela vez: quem recebeu há mais tempo (Bruno), depois Ana", recebeu.slice(4).join(",") === "bruno,ana",
+           recebeu.join(","));
+      }
+
+      // ---- 61e. as chaves de cada pessoa ----
+      {
+        await comoPessoa(U.rodrigo, () => c.query("insert into zorvin_rodizio (usuario_id, recebe) values ($1, true)", [U.fabio]));
+        const a = await vez(F.sac1);
+        ok("quem administra e liga a chave entra, e recebe a próxima (nunca recebeu)", a.d.para === U.fabio, JSON.stringify(a.d));
+        await comoPessoa(U.rodrigo, () => c.query("update zorvin_rodizio set recebe = true where usuario_id = $1", [U.gil]));
+        const b = await vez(F.sac1);
+        ok("quem volta das férias recebe a próxima", b.d.para === U.gil, JSON.stringify(b.d));
+        await comoPessoa(U.rodrigo, () => c.query("update zorvin_rodizio set recebe = false where usuario_id = $1", [U.gil]));
+        const nomes = [];
+        for (let i = 0; i < 4; i++) nomes.push(NOME[(await vez(F.sac1)).d.para]);
+        ok("e de férias de novo, não recebe mais", !nomes.includes("gil"), nomes.join(","));
+      }
+
+      // ---- 61f. a vez é de cada departamento ----
+      {
+        await c.query("insert into zorvin_distribuicao (departamento_id, ligada) values (2, true)");
+        const a = await vez(F.sdc1);
+        const b = await vez(F.sdc1);
+        ok("no SDC o Davi recebe primeiro, e depois o Fábio — a vez do SAC não conta aqui",
+           a.d.para === U.davi && b.d.para === U.fabio, JSON.stringify([a.d, b.d]));
+      }
+
+      // ---- 61g. o que não é cliente novo ----
+      {
+        const x = await conversaNova(F.sac1);
+        const d1 = await distribuir(c, x);
+        await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi) values ($1, 'contato', 'Bom dia', $2)", [x.cv, `seg-${seq}`]);
+        const d2 = await distribuir(c, { cv: x.cv, id: `seg-${seq}` });
+        ok("a segunda mensagem do mesmo cliente não distribui de novo",
+           d1.distribuiu === true && d2.distribuiu === false && d2.motivo === "ja_tem_responsavel", JSON.stringify([d1, d2]));
+        const casos = [
+          ["a equipe escreveu antes (pelo celular)", { equipeAntes: true }, "equipe_ja_agiu"],
+          ["há um item da equipe na fila de envio", { filaAntes: true }, "equipe_ja_agiu"],
+          ["a conversa tem histórico de ontem", { primeiraHaMin: 60 * 24 }, "conversa_antiga"],
+          ["a mensagem é antiga (importação, reenvio atrasado)", { msgHaMin: 60 * 24 * 2 }, "mensagem_antiga"],
+          ["a mensagem é nossa", { origem: "advogado" }, "nao_e_do_cliente"],
+          ["é grupo", { numero: "grupo:120363000000000001" }, "grupo"],
+        ];
+        for (const [nome, opc, motivo] of casos) {
+          const y = await conversaNova(F.sac1, opc);
+          const d = await distribuir(c, y);
+          ok(`${nome}: não distribui (${motivo}), e fica sem responsável`,
+             d.distribuiu === false && d.motivo === motivo && (await dono(y.cv)).responsavel_id === null, JSON.stringify(d));
+        }
+        ok("linha desativada não distribui", (await distribuir(c, await conversaNova(F.desligado))).motivo === "linha_desativada");
+        ok("telefone sem departamento não distribui", (await distribuir(c, await conversaNova(F.semdep))).motivo === "sem_departamento");
+        const z = await conversaNova(F.sac1, { primeiraHaMin: 5 });
+        ok("o “Oi” de 5 minutos atrás e o “Bom dia” de agora ainda são cliente novo",
+           (await distribuir(c, z)).distribuiu === true);
+      }
+
+      // ---- 61h. ao mesmo tempo: a trava do departamento ----
+      {
+        const c1 = await conectar(url), c2 = await conectar(url);
+        const a = await conversaNova(F.sac1), b = await conversaNova(F.sac1);
+        await c1.query("begin");
+        const r1 = await distribuir(c1, a);
+        const p2 = distribuir(c2, b);
+        await espera(400);
+        await c1.query("commit");
+        const r2 = await p2;
+        ok("dois clientes novos no mesmo instante vão para pessoas diferentes",
+           r1.distribuiu && r2.distribuiu && r1.para !== r2.para, JSON.stringify([r1, r2]));
+        const x = await conversaNova(F.sac1);
+        await c1.query("begin");
+        const s1 = await distribuir(c1, x);
+        const q2 = distribuir(c2, x);
+        await espera(400);
+        await c1.query("commit");
+        const s2 = await q2;
+        const n = (await c.query("select count(*)::int n from zorvin_distribuicoes where conversa_id = $1", [x.cv])).rows[0].n;
+        ok("a mesma conversa pelas duas pontes da publicação: uma distribui, a outra vê o dono, e o registro tem uma linha",
+           s1.distribuiu === true && s2.distribuiu === false && s2.motivo === "ja_tem_responsavel" && n === 1,
+           JSON.stringify([s1, s2, n]));
+      }
+
+      // ---- 61i. quem pode o quê ----
+      {
+        const priv = (await c.query(`select
+            has_function_privilege('authenticated', 'public.zorvin_distribuir_conversa(uuid,text)', 'execute') a,
+            has_function_privilege('anon', 'public.zorvin_distribuir_conversa(uuid,text)', 'execute') b,
+            has_function_privilege('service_role', 'public.zorvin_distribuir_conversa(uuid,text)', 'execute') s,
+            has_function_privilege('authenticated', 'public.zorvin_ve_o_telefone(uuid,uuid)', 'execute') v`)).rows[0];
+        ok("só a ponte chama a decisão — nem quem entrou, nem quem não entrou",
+           priv.a === false && priv.b === false && priv.s === true && priv.v === false, JSON.stringify(priv));
+        const lista = await guardado(() => comoPessoa(U.rodrigo, async () => (await c.query("select * from zorvin_rodizio_pessoas()")).rows));
+        const por = Object.fromEntries((Array.isArray(lista) ? lista : []).map((p) => [NOME[p.usuario_id], p]));
+        ok("quem administra lê a lista: quem vê algum telefone, e não quem saiu",
+           ["ana", "bruno", "carla", "davi", "fabio", "gil", "rodrigo"].every((k) => por[k]) && !por.eva,
+           JSON.stringify(lista && (lista.erro || Object.keys(por))));
+        ok("com o padrão vindo do banco: Ana dentro sem escolher, Rodrigo fora sem escolher, Gil fora por escolha",
+           por.ana && por.ana.recebe === true && por.ana.escolhido === false
+           && por.rodrigo && por.rodrigo.recebe === false && por.rodrigo.escolhido === false
+           && por.gil && por.gil.recebe === false && por.gil.escolhido === true, JSON.stringify([por.ana, por.rodrigo, por.gil]));
+        const recusa = await guardado(() => comoPessoa(U.ana, async () => (await c.query("select * from zorvin_rodizio_pessoas()")).rows));
+        ok("quem não administra recebe a recusa DITA (42501), e não uma lista vazia",
+           recusa && recusa.codigo === "42501", JSON.stringify(recusa));
+        const ligar = await guardado(() => comoPessoa(U.ana, () => c.query(
+          "insert into zorvin_distribuicao (departamento_id, ligada) values (1, false) on conflict (departamento_id) do update set ligada = false")));
+        const ainda = (await c.query("select ligada from zorvin_distribuicao where departamento_id = 1")).rows[0].ligada;
+        ok("quem atende não desliga a distribuição", Boolean(ligar && ligar.erro) && ainda === true,
+           JSON.stringify([ligar && ligar.erro, ainda]));
+      }
+
+      // ---- 61j. rodar de novo ----
+      {
+        const r2 = await guardado(() => aplicar(c));
+        ok("rodar de novo não estraga nada", Array.isArray(r2) && !defeito(r2), JSON.stringify(r2));
+        const lig = (await c.query("select ligada from zorvin_distribuicao")).rows;
+        const gil = (await c.query("select recebe from zorvin_rodizio where usuario_id = $1", [U.gil])).rows[0];
+        ok("nem desliga o que estava ligado, nem devolve as férias de ninguém",
+           lig.length === 3 && lig.every((l) => l.ligada === true) && gil && gil.recebe === false, JSON.stringify([lig, gil]));
+      }
+    } catch (e) {
+      ok("a seção 61 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
