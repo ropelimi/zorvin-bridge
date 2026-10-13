@@ -77,7 +77,21 @@ jobs:
     # importa é prova que não existe — e este projeto já teve duas.
     services:
       postgres:
-        image: postgres:16
+        # A IMAGEM VEM DO ESPELHO DA AMAZON, E NÃO DO DOCKER HUB (13/10).
+        #
+        # É a mesma imagem oficial (`docker/library/postgres`), copiada pela
+        # Amazon para o registro público dela. Em 09/10 a PR do script 022
+        # ficou vermelha duas vezes SEM RODAR PROVA NENHUMA: este passo não
+        # conseguiu baixar `postgres:16` do Docker Hub — primeiro pelo limite
+        # de downloads de quem não tem conta (`toomanyrequests`), depois por
+        # o Docker Hub não responder. O X vermelho era igual ao de defeito de
+        # código.
+        #
+        # O espelho também tem limite para quem baixa sem conta: medido de
+        # outra máquina em 13/10, ele respondeu `Data limit exceeded`. Se isso
+        # aparecer aqui, o caminho é o Postgres que já vem instalado na
+        # máquina do GitHub, que não baixa nada.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: prova
         # Sem isto o `npm test` começa antes de o banco aceitar conexão, e a

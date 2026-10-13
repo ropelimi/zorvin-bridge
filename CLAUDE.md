@@ -1444,6 +1444,24 @@ pergunte quanto ela custa para continuar de pé — e o que se vê no dia em que
 ela parar. Aqui o que se via era um X vermelho igual ao de um defeito de
 verdade.
 
+### E o banco de teste deixou de vir do Docker Hub (13/10)
+
+Em 09/10 a PR do script 022 ficou vermelha duas vezes **sem rodar prova
+nenhuma**. O passo que sobe o Postgres de teste não conseguiu baixar
+`postgres:16` do Docker Hub: primeiro `toomanyrequests` (o limite de downloads
+de quem não tem conta), depois o Docker Hub sem responder. A suíte inteira
+passava aqui.
+
+Hoje a imagem vem do espelho público da Amazon
+(`public.ecr.aws/docker/library/postgres:16`). É a mesma imagem oficial, e a
+troca foi decidida com o Rodrigo. **O espelho também tem limite** para quem
+baixa sem conta: medido daqui em 13/10, ele respondeu `Data limit exceeded`.
+Se isso aparecer na integração contínua, o passo seguinte é o Postgres que já
+vem instalado na máquina do GitHub, que não baixa nada.
+
+A lição é a de 25/09 com outra roupa: **antes de procurar defeito no código,
+olhe em qual passo o X vermelho parou.**
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
