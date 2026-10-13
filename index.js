@@ -1731,6 +1731,59 @@ async function responderForaDoHorario({ adv, conversaId, idUazapi, numero }) {
   }
 }
 
+// ============================================================
+//  A DISTRIBUIÇÃO DAS CONVERSAS NOVAS (script 023, 13/10)
+//
+//  O cliente novo já chega com um responsável, em rodízio entre quem atende
+//  o departamento. QUEM DECIDE É O BANCO: o que é "cliente novo", quem está
+//  no rodízio, de quem é a vez e a trava contra duas escolhas ao mesmo tempo
+//  moram em `zorvin_distribuir_conversa`. Aqui só se pergunta — depois de a
+//  mensagem do cliente estar gravada, porque é ela que o banco olha para
+//  decidir — e se anota no log o que diz alguma coisa.
+//
+//  A PERGUNTA VAI EM TODA MENSAGEM DE CLIENTE, e não só na primeira: a
+//  conversa é gravada com `upsert`, e a ponte não sabe se ela acabou de
+//  nascer. A resposta de quase toda mensagem — "já tem responsável" — é a
+//  primeira coisa que o banco confere. E é isso que faz o "Bom dia" acertar
+//  a distribuição que o "Oi" de um minuto antes não conseguiu.
+//
+//  NUNCA SEGURA A MENSAGEM: ela já entrou. Sem o script 023, a primeira
+//  resposta "a função não existe" desliga isto até a ponte reiniciar, com uma
+//  linha no log; um tropeço qualquer do banco NÃO desliga — a próxima
+//  mensagem do mesmo cliente pergunta de novo.
+// ============================================================
+let distribuicaoDesligada = false;
+
+async function distribuirConversaNova({ conversaId, idUazapi }) {
+  if (distribuicaoDesligada || !conversaId || !idUazapi) return;
+  try {
+    const { data, error } = await supabase.rpc('zorvin_distribuir_conversa',
+      { p_conversa: conversaId, p_id_uazapi: idUazapi });
+    if (error) {
+      if (semAFuncao(error)) {
+        distribuicaoDesligada = true;
+        console.warn('Distribuição: a função zorvin_distribuir_conversa não existe — '
+          + 'as conversas novas ficam sem responsável, como antes, até rodar '
+          + 'sql/automaticos/023-a-distribuicao-das-conversas-novas.sql.');
+        return;
+      }
+      console.log('Distribuição: não consegui perguntar ao banco —', error.message);
+      return;
+    }
+    if (data && data.distribuiu === true) {
+      console.log(`Distribuição: a conversa ${conversaId} foi para ${data.nome || data.para}.`);
+    } else if (data && data.motivo === 'ninguem_no_rodizio') {
+      // A ÚNICA RECUSA QUE É CONFIGURAÇÃO: o departamento está ligado, e
+      // ninguém que recebe vê o telefone desta conversa. As outras ("já tem
+      // responsável", "a equipe já agiu", "desligada") são o dia a dia.
+      console.log(`Distribuição: ninguém do rodízio vê o telefone da conversa ${conversaId} `
+        + `(departamento ${data.departamento}) — ela ficou sem responsável.`);
+    }
+  } catch (e) {
+    console.log('Distribuição:', (e && e.message) || e);
+  }
+}
+
 // O CORPO DO EVENTO, E NÃO O PEDIDO HTTP.
 //
 // Esta função passou a receber o `corpo` já lido, e não `req`/`res`. É o que
@@ -2210,12 +2263,18 @@ async function processarEventoDoWebhook(corpo) {
       else if (voltou && voltou.length) console.log(`Conversa ${conversa.id} saiu das arquivadas: o contato escreveu.`);
     }
 
-    // FORA DO HORÁRIO, O CLIENTE RECEBE O AVISO DO DEPARTAMENTO. Depois de a
-    // mensagem dele estar gravada, e só dela: o banco procura a mensagem pelo
-    // id para decidir. ESPERADA, para o desligamento com calma esperar junto —
-    // mas ela nunca sobe erro: a mensagem do cliente já entrou, e é isso que a
-    // caixa de entrada guarda. Grupo nem pergunta.
+    // O CLIENTE NOVO GANHA UM RESPONSÁVEL (023), e FORA DO HORÁRIO ELE
+    // RECEBE O AVISO DO DEPARTAMENTO (021). As duas depois de a mensagem dele
+    // estar gravada, e só dela: o banco procura a mensagem pelo id para
+    // decidir. ESPERADAS, para o desligamento com calma esperar junto — mas
+    // nenhuma sobe erro: a mensagem do cliente já entrou, e é isso que a caixa
+    // de entrada guarda. Grupo nem pergunta.
+    //
+    // A DISTRIBUIÇÃO VEM PRIMEIRO: ela é uma pergunta ao banco, e a resposta
+    // automática pode levar segundos falando com o WhatsApp. Nessa ordem a
+    // conversa aparece com dono na tela de todo mundo na hora.
     if (origem === 'contato' && !chat.ehGrupo) {
+      await distribuirConversaNova({ conversaId: conversa.id, idUazapi: m.messageid });
       await responderForaDoHorario({ adv, conversaId: conversa.id, idUazapi: m.messageid,
                                      numero: contatoNumero });
     }

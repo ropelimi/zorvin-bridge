@@ -1300,6 +1300,134 @@ sem o 006; a base sem a fila; banco limpo; reaplicação; o 021 inteiro de
 novo) e **11 sabotagens com 11 pegas**, todas limpas — inclusive a versão
 de antes (só o 021), que reproduz o relato.
 
+## A distribuição das conversas novas (script 023, 13/10)
+
+Pedido do Rodrigo, o nº 3 da lista de ideias de 08/10: o cliente novo já
+chega com um responsável, em rodízio entre quem atende o departamento.
+Decidido com ele: entra no rodízio **quem atende o departamento** (quem vê as
+conversas dele), com uma chave *"recebe conversas novas"* por pessoa para
+férias e folga; o rodízio é **simples** (cada um na sua vez); e **só a
+conversa de cliente novo** — as antigas sem responsável ficam como estão.
+
+`sql/automaticos/023-a-distribuicao-das-conversas-novas.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_distribuicao` | a chave de cada departamento — nasce desligada |
+| `zorvin_rodizio` | a chave de cada pessoa; sem linha, vale o padrão |
+| `zorvin_distribuicoes` | quem recebeu qual conversa, e quando — é dele que sai a vez |
+| `zorvin_ve_o_telefone(pessoa, telefone)` | a regra de acesso, para uma pessoa |
+| `zorvin_distribuir_conversa(conversa, id_uazapi)` | a decisão — só a ponte chama |
+| `zorvin_rodizio_pessoas()` | a lista da aba do painel — só quem administra |
+
+### Quem decide é o banco, e a ponte só pergunta
+
+Depois de gravar a mensagem de um CLIENTE (não grupo, não nossa), a ponte
+chama `zorvin_distribuir_conversa` — **antes** da resposta fora do horário,
+que pode levar segundos falando com o WhatsApp: nessa ordem a conversa
+aparece com dono na tela de todo mundo na hora. **A pergunta vai em toda
+mensagem de cliente**, e não só na primeira: a conversa é gravada com
+`upsert`, e a ponte não sabe se ela acabou de nascer. A resposta de quase
+toda mensagem é "já tem responsável", a primeira coisa que o banco confere.
+
+**"Cliente novo" é o banco quem diz**, olhando as mensagens: a que chegou é do
+cliente e recente (até 30 minutos — a importação de histórico não distribui
+o passado); a primeira da conversa também é recente (o "Oi" seguido de "Bom
+dia" é o mesmo cliente novo, e a distribuição que tropeçou no "Oi" acerta no
+"Bom dia"); a equipe ainda não agiu nela (nenhuma mensagem nossa, nem do
+celular; nenhum item na fila — conversa começada por nós é cliente que nós
+procuramos); não é grupo, a linha não está desativada e tem departamento.
+**A resposta automática não conta como a equipe ter agido** (ela mora fora de
+`mensagens`): o cliente da noite recebe a resposta E um responsável.
+
+### Quatro decisões que o pedido não dizia
+
+1. **Cada departamento liga a sua, e ela nasce desligada** — como a resposta
+   fora do horário. Ligada na publicação, daria cliente a quem ninguém
+   escolheu; ligada pela tela, quem administra vê antes a lista de quem vai
+   receber.
+2. **Quem administra começa fora, quem atende começa dentro.** O
+   administrador vê todos os telefones POR administrar, e não por atender:
+   sem isto o gerente entraria no rodízio de todos os departamentos. A chave
+   muda os dois sentidos.
+3. **"Na sua vez" é "quem recebeu há mais tempo, naquele departamento"**,
+   com quem nunca recebeu primeiro e o empate pelo nome. Acerta sozinho
+   quando a equipe muda: quem volta das férias recebe a próxima — com um
+   ponteiro de "quem é o próximo", esperaria a volta da lista inteira.
+4. **Só recebe quem vê o TELEFONE da conversa**, e não só o departamento:
+   entregar uma conversa a quem não consegue abri-la seria o cliente sem
+   ninguém, com cara de ter dono.
+
+### O responsável que o Zorvin põe
+
+É o `responsavel_id` do 008 com **`responsavel_por` NULO** — a convenção do
+funil, onde `quem` nulo é "O Zorvin". O painel diz *"pela distribuição
+automática"* no menu do responsável. **A escolha é feita sob uma trava por
+departamento** (`pg_advisory_xact_lock`), **e a gravação exige
+`responsavel_id` nulo**: duas pontes vivas na publicação, a caixa de entrada
+reprocessando ou dois clientes no mesmo segundo não dão a mesma vez duas
+vezes, nem tiram a conversa de quem já a pegou.
+
+### A regra de acesso escrita duas vezes, e conferida contra a de verdade
+
+`zorvin_ve_o_telefone` repete `pode_ver_conversa(telefone)` com a pessoa como
+parâmetro — a de verdade lê `auth.uid()`, e quem chama a decisão é a ponte,
+que não é ninguém. **A conferência do fim compara as duas**, pessoa por
+telefone, fazendo o banco acreditar que é cada pessoa da equipe (o
+`auth.uid()` do Supabase lê `request.jwt.claim.sub`). Tem de dar zero
+divergências; uma só aparece como *"NÃO — N de M pares…"*, e a faixa vermelha
+do painel avisa quem administra. É a régua de
+`sql/2026-09-a-permissao-perguntada-uma-vez.sql`: conferir linha por linha em
+vez de acreditar em mim.
+
+**Só a ponte chama a decisão** (`revoke` de `authenticated`, e a conferência
+diz). A lista da tela recusa (42501) quem não administra — a recusa DITA, e
+não uma lista vazia.
+
+### A ponte
+
+`distribuirConversaNova`, em `index.js`. **Nunca segura a mensagem**: ela já
+entrou. Sem o script, a primeira resposta "a função não existe" desliga isto
+até a ponte reiniciar, com uma linha no log; **um tropeço qualquer NÃO
+desliga** — a próxima mensagem do mesmo cliente pergunta de novo. O log diz
+para quem a conversa foi e, quando o departamento está ligado e ninguém do
+rodízio vê o telefone, diz isso — é a única recusa que é configuração; "já
+tem responsável", "desligada" e "a equipe já agiu" são o dia a dia e não
+enchem o log.
+
+**O aviso de mensagem nova não mudou** (ele é do painel): enquanto ninguém
+responde, todo mundo continua sendo avisado.
+
+**Um caso de borda conhecido, e aceito:** "Nova conversa" no painel grava a
+conversa antes de a primeira mensagem sair. Se o cliente escrever nesse
+intervalo, sem nada nosso na fila ainda, a conversa vai para o rodízio. É
+raro, e o "Assumir" do menu resolve.
+
+### As provas
+
+**Seção 61 — o 023 num Postgres de verdade, obrigatória na integração
+contínua** (37 conferências): sobre um esquema do Zorvin com `zorvin_admin` e
+`pode_ver_conversa` copiadas dos scripts de `sql/`. **E ela existe porque a
+51l-bis não basta:** num banco limpo o 023 sai cedo, por não achar as tabelas
+do Zorvin, e o corpo das funções — que é `plpgsql`, conferido só ao rodar —
+nunca rodaria na integração contínua. As cenas mais longas, que a semente
+desta seção encurtou, rodaram à parte (77 conferências) antes de virar seção.
+**16 sabotagens do script, 16 pegas pela seção 61**, todas limpas (a trava
+tirada; quem administra entrando sem escolher; quem vê o departamento e não o
+telefone; a vez ao contrário; sem perguntar se a equipe agiu; a conversa com
+histórico tratada como nova; a mensagem antiga distribuída; o Zorvin
+assinando como quem recebeu; quem saiu recebendo; a regra esquecendo o
+telefone; a chave do departamento ignorada; quem entrou chamando a decisão; a
+lista sem a recusa; as férias que não valem; sem as duas guardas do dono; a
+lista trazendo quem saiu).
+
+**Seção 60 — a ponte** (20 conferências), **11 sabotagens e 11 pegas** (não
+perguntar; perguntar depois da resposta automática; perguntar antes de
+gravar a mensagem; sem a guarda da função que falta; qualquer erro
+desligando; grupo e mensagem nossa perguntando; o contato no lugar da
+conversa; o log calado sobre para quem foi; o dia a dia enchendo o log; o
+"ninguém no rodízio" calado).
+
 ## A auditoria de 07/10
 
 Varredura inteira da ponte e dos scripts, cada achado conferido antes de
