@@ -860,6 +860,71 @@ números de outra pessoa e recebendo só os dela, os filtros de telefone e
 departamento, fuso inválido, o limite da lista, banco sem o 009, banco limpo e
 reaplicação.
 
+### O REPASSE, e a lista em ordem alfabética (script 025, 14/10)
+
+Pedido do Rodrigo: *"No 'Já tratei' crie a opção 'REPASSE'. E deixe tudo em
+ordem alfabética."* `sql/automaticos/025-o-repasse-e-a-ordem-alfabetica.sql`.
+
+**Quem mantém a ordem é o banco, e nenhuma tela mudou.** A lista aparece em
+quatro lugares do painel (a janela do "Já tratei", a administração, o
+histórico do cliente e o relatório), e os quatro já liam
+`zorvin_assuntos.ordem`. `zorvin_ordenar_assuntos()` refaz as posições pela
+ordem alfabética, e um gatilho de instrução a chama quando um assunto
+**nasce** ou **muda de nome**: o assunto criado amanhã pela tela vai sozinho
+para o lugar dele. Ordenar em cada tela seria a mesma regra escrita quatro
+vezes.
+
+**`ordem` deixou de ser a ordem de criação** e passou a ser a posição
+alfabética — a tela nunca ofereceu mudá-la à mão. O painel continua gravando
+`ordem` = maior + 1 ao criar, e o gatilho conserta na mesma instrução.
+**Ao escrever um "mudar a ordem à mão" na tela, este gatilho tem de sair
+antes**, senão ele desfaz cada escolha no clique seguinte.
+
+**"Tudo" inclui o OUTROS**, que ficou entre DOCUMENTOS JG e REPASSE. O
+costume seria o fim da lista; o pedido foi "tudo", e deixar no fim "o assunto
+que se chama OUTROS" seria uma regra presa a um nome que quem compra pode
+trocar — a razão de a descrição obrigatória ser uma marca (009).
+
+**A chave ignora acento e caixa** (`zorvin_chave_do_assunto`: `translate`
+primeiro, `lower` depois — num banco de collation "C", `lower` não baixa letra
+acentuada) e é comparada em `collate "C"`, para a ordem não depender da
+collation que a Supabase escolheu. Sem ela, byte a byte, "ÁGUA" viria depois
+de "ZELADORIA" e "abertura" depois de "BLINDAGEM". Ativos e desativados entram
+na mesma conta.
+
+**`security invoker`, com uma trava de transação.** Quem cria ou renomeia é
+quem administra (as políticas do 005), e é com essa permissão que as posições
+são refeitas. A trava põe em fila duas renumerações ao mesmo tempo — sem ela,
+dois assuntos criados no mesmo segundo ficam com o mesmo número, cada
+renumeração calculada sem ver o outro. **Só quem saiu do lugar é regravado.**
+
+**O REPASSE só nasce na rodada que cria a função** (regra 5 do LEIA-ME):
+rodar a pasta de novo depois de o escritório tirá-lo de uso não o traz de
+volta, e a conferência diz isso sem acusar defeito — faltar só é defeito na
+primeira rodada. Um REPASSE já ativo, criado à mão, é aproveitado.
+
+Prova: seção 64, num Postgres de verdade, sobre o 005 e o 009 aplicados a
+partir dos próprios arquivos, e não de uma cópia deles. São 28 conferências,
+**17 sabotagens e 17 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma. Duas cenas são as únicas que pegam a sabotagem delas:
+
+- a das duas pessoas criando no mesmo segundo pega a que tira a trava;
+- a do REPASSE criado à mão pega a que tira a renumeração da instalação. Sem
+  assunto novo, o gatilho não dispara, e só a renumeração da instalação põe a
+  lista de hoje em ordem.
+
+**O banco da prova é mais fechado que a produção**: ele não tem o EXECUTE que
+o Postgres dá a todos por padrão. É assim que se prova que o gatilho funciona
+só com as concessões do próprio 025, e que disparar o gatilho não pede EXECUTE
+de quem mexeu.
+
+**E uma sabotagem vazou primeiro, por engano meu na prova.** Escrevi o
+`revoke` desse banco com `in schema public`. Um `revoke` por esquema só desfaz
+um `grant` por esquema: o padrão global continuava valendo, e a sabotagem que
+tirava a concessão do 025 passava. Sem o `in schema`, ela é pega por cinco
+conferências, com o erro que a tela mostraria ao criar um assunto:
+*permission denied for function zorvin_ordenar_assuntos*.
+
 ### A espera não começa no rabicho da conversa já atendida
 
 Relato de 28/09, com foto: a conversa da ANDREIA dizia **"esperando há 6
