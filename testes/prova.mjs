@@ -10067,5 +10067,187 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
   }
 }
 
+// ============================================================
+//  66. O DÚVIDAS TRATADAS, E A SEMENTE ANOTADA
+//
+//  O 027 planta um assunto numa tabela que já existia, e por isso precisa de
+//  uma âncora para a regra 5: a chave anotada em `zorvin_sementes`. A seção
+//  prova o que a âncora segura (rodar de novo não traz de volta o que o
+//  escritório tirou de uso ou renomeou) e o que a chave do 025 segura (o
+//  criado à mão, com ou sem acento, não ganha um segundo).
+// ==================================================================
+{
+  console.log("\n66. O DÚVIDAS TRATADAS, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o DÚVIDAS TRATADAS (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S005 = ler("005-ja-tratei.sql");
+    const S009 = ler("009-o-assunto-outros.sql");
+    const S025 = ler("025-o-repasse-e-a-ordem-alfabetica.sql");
+    const S026 = ler("026-o-outros-fica-no-fim.sql");
+    const S027 = ler("027-duvidas-tratadas.sql");
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    const bancos = [];
+    const clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`);
+      bancos.push(nome);
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false });
+      await cl.connect();
+      clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const defeito = (linhas) => (linhas || []).some((l) => l.resposta === "false" || /^NÃO/.test(String(l.resposta))
+      || /rode o script/i.test(String(l.resposta)));
+    const item = (linhas, re) => ((linhas || []).find((l) => re.test(l.item)) || {}).resposta;
+    const PAPEIS = `do $$ begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+    end $$;`;
+    // O MESMO BANCO FECHADO DAS SEÇÕES 64 E 65 nas funções — e ABERTO nas
+    // tabelas, como a Supabase: toda tabela nova de `public` nasce com tudo
+    // concedido a `authenticated`. É nesse banco que se vê se o 027 tira a
+    // tabela das sementes do alcance do painel, e não num que já nasce fechado.
+    const ESQUEMA = `
+      alter default privileges revoke execute on functions from public;
+      alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+      create schema if not exists auth;
+      create or replace function auth.uid() returns uuid language sql stable as $f$
+        select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+      grant usage on schema auth to anon, authenticated, service_role;
+      grant execute on function auth.uid() to anon, authenticated, service_role;
+      grant usage on schema public to anon, authenticated, service_role;
+      create table usuarios (id uuid primary key, login text, nome text not null default '',
+        admin boolean not null default false, ativo boolean not null default true, foto_url text);
+      create or replace function zorvin_admin() returns boolean language sql stable security definer
+        set search_path = public, auth as $f$
+        select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+      grant execute on function zorvin_admin() to authenticated;
+      grant select on usuarios to authenticated;`;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", rodrigo: "00000000-0000-0000-0000-000000000011" };
+    const emUso = async (cl) => (await cl.query(
+      "select nome from zorvin_assuntos where ativo order by ordem")).rows.map((r) => r.nome);
+    const duvidas = async (cl) => (await cl.query(
+      "select nome, ativo from zorvin_assuntos where zorvin_chave_do_assunto(nome) = 'duvidas tratadas' order by nome")).rows;
+    // O ZORVIN ATÉ O 026, com quem atende e quem administra.
+    async function zorvinAte026() {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin, ativo) values
+        ('${U.ana}', 'Ana', false, true), ('${U.rodrigo}', 'Rodrigo', true, true)`);
+      await c.query(S005);
+      await c.query(S009);
+      await c.query(S025);
+      await c.query(S026);
+      return c;
+    }
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally {
+        await c.query("reset role");
+        await c.query("select set_config('request.jwt.claim.sub', '', false)");
+      }
+    };
+    try {
+      await raiz.query(PAPEIS);
+
+      // ---- 66a. sem o 026, desiste e diz qual falta ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA);
+        await c.query(S005);
+        await c.query(S009);
+        await c.query(S025);
+        const r = await guardado(() => aplicar(c, S027));
+        ok("sem o 026, o 027 aplica sem estourar e manda rodar o 026 antes",
+           Array.isArray(r) && /rode o script 026/.test(String(item(r, /sem o OUTROS no fim/))), JSON.stringify(r));
+        const n = (await c.query("select count(*)::int n from zorvin_assuntos where zorvin_chave_do_assunto(nome) = 'duvidas tratadas'")).rows[0].n;
+        ok("e não planta nada", n === 0 && (await c.query("select to_regclass('public.zorvin_sementes') t")).rows[0].t === null, String(n));
+      }
+
+      // ---- 66b. sobre o Zorvin até o 026 ----
+      const c = await zorvinAte026();
+      const conf = await guardado(() => aplicar(c, S027));
+      ok("o 027 aplica, e a conferência não acusa defeito", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que o assunto está lá e que a lista fechou",
+         item(conf, /DÚVIDAS TRATADAS está na lista/) === "true" && item(conf, /lista está em ordem/) === "true", JSON.stringify(conf));
+      const ESPERADA = ["ACORDOS", "BLINDAGEM", "DOCUMENTOS JG", "DÚVIDAS TRATADAS", "REPASSE", "SUBSÍDIO CCR",
+                        "SUBSÍDIO CONDENAÇÃO", "SUBSÍDIO EMENDA", "VENDA CCS", "VENDA LN", "OUTROS"];
+      const l = await emUso(c);
+      ok("DÚVIDAS TRATADAS entrou entre DOCUMENTOS JG e REPASSE, e o OUTROS continua no fim",
+         l.join("|") === ESPERADA.join("|"), l.join(", "));
+      ok("em maiúsculas, como os outros, e um só", JSON.stringify(await duvidas(c)) === JSON.stringify([{ nome: "DÚVIDAS TRATADAS", ativo: true }]),
+         JSON.stringify(await duvidas(c)));
+      const semente = (await c.query("select chave from zorvin_sementes")).rows.map((r) => r.chave);
+      ok("e a semente ficou anotada", semente.join("|") === "assunto:duvidas-tratadas", semente.join(", "));
+
+      // ---- 66c. as sementes não são de ninguém além da ponte ----
+      {
+        const rls = (await c.query("select relrowsecurity r from pg_class where oid = 'public.zorvin_sementes'::regclass")).rows[0].r;
+        ok("a tabela das sementes nasce com RLS ligada", rls === true, String(rls));
+        const leu = await guardado(() => comoPessoa(c, U.rodrigo, async () => (await c.query("select * from zorvin_sementes")).rows));
+        ok("nem quem administra a lê pela chave do painel", Boolean(leu && leu.codigo === "42501"), JSON.stringify(leu));
+        const apagou = await guardado(() => comoPessoa(c, U.rodrigo, () => c.query("delete from zorvin_sementes")));
+        ok("nem apaga a semente para o script plantar de novo", Boolean(apagou && apagou.codigo === "42501"),
+           JSON.stringify(apagou && apagou.codigo));
+      }
+
+      // ---- 66d. rodar de novo não traz de volta o que o escritório mudou ----
+      {
+        const r2 = await guardado(() => aplicar(c, S027));
+        ok("rodar de novo não acusa defeito nem cria um segundo", Array.isArray(r2) && !defeito(r2)
+           && (await duvidas(c)).length === 1, JSON.stringify(r2));
+        await guardado(() => comoPessoa(c, U.rodrigo, () => c.query(
+          "update zorvin_assuntos set ativo = false where nome = 'DÚVIDAS TRATADAS'")));
+        const r3 = await guardado(() => aplicar(c, S027));
+        const d3 = await duvidas(c);
+        ok("tirado de uso pela tela, ele não volta sozinho", d3.length === 1 && d3[0].ativo === false, JSON.stringify(d3));
+        ok("e a conferência diz isso sem acusar defeito", Array.isArray(r3) && !defeito(r3)
+           && /fora de uso/.test(String(item(r3, /DÚVIDAS TRATADAS/))), JSON.stringify(r3));
+        await guardado(() => comoPessoa(c, U.rodrigo, () => c.query(
+          "update zorvin_assuntos set ativo = true, nome = 'DÚVIDAS RESOLVIDAS' where nome = 'DÚVIDAS TRATADAS'")));
+        await guardado(() => aplicar(c, S027));
+        const d4 = await duvidas(c);
+        ok("renomeado pela tela, ele não ganha de volta o nome antigo ao lado do novo",
+           d4.length === 0 && (await emUso(c)).includes("DÚVIDAS RESOLVIDAS"), JSON.stringify(d4));
+      }
+
+      // ---- 66e. o criado à mão, antes da publicação, é aproveitado ----
+      for (const [comoEscreveu, desc] of [["Dúvidas tratadas", "com outra caixa"], ["DUVIDAS TRATADAS", "sem o acento"]]) {
+        const d = await zorvinAte026();
+        await guardado(() => comoPessoa(d, U.rodrigo, () => d.query(
+          "insert into zorvin_assuntos (nome, ordem) values ($1, 99)", [comoEscreveu])));
+        const r = await guardado(() => aplicar(d, S027));
+        const ds = await duvidas(d);
+        ok(`o “${comoEscreveu}” criado à mão (${desc}) é aproveitado: um só, sem defeito`,
+           Array.isArray(r) && !defeito(r) && ds.length === 1 && ds[0].nome === comoEscreveu, JSON.stringify([r, ds]));
+      }
+    } catch (e) {
+      ok("a seção 66 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
