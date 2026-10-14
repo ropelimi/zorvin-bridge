@@ -880,10 +880,11 @@ alfabética — a tela nunca ofereceu mudá-la à mão. O painel continua gravan
 **Ao escrever um "mudar a ordem à mão" na tela, este gatilho tem de sair
 antes**, senão ele desfaz cada escolha no clique seguinte.
 
-**"Tudo" inclui o OUTROS**, que ficou entre DOCUMENTOS JG e REPASSE. O
-costume seria o fim da lista; o pedido foi "tudo", e deixar no fim "o assunto
-que se chama OUTROS" seria uma regra presa a um nome que quem compra pode
-trocar — a razão de a descrição obrigatória ser uma marca (009).
+~~**"Tudo" inclui o OUTROS**, que ficou entre DOCUMENTOS JG e REPASSE.~~
+**Mudou no mesmo dia, a pedido do Rodrigo: o OUTROS fica sempre no fim** —
+ver "O OUTROS sempre no fim (script 026)", logo abaixo. O que continua valendo
+daquele raciocínio é a outra metade: a regra não podia ficar presa ao nome
+"OUTROS", e por isso o 026 é uma marca.
 
 **A chave ignora acento e caixa** (`zorvin_chave_do_assunto`: `translate`
 primeiro, `lower` depois — num banco de collation "C", `lower` não baixa letra
@@ -924,6 +925,42 @@ um `grant` por esquema: o padrão global continuava valendo, e a sabotagem que
 tirava a concessão do 025 passava. Sem o `in schema`, ela é pega por cinco
 conferências, com o erro que a tela mostraria ao criar um assunto:
 *permission denied for function zorvin_ordenar_assuntos*.
+
+### O OUTROS sempre no fim (script 026, 14/10)
+
+Pedido do Rodrigo, logo depois do 025: *"Deixe o OUTROS sempre no fim"*.
+`sql/automaticos/026-o-outros-fica-no-fim.sql`.
+
+**Uma marca, e não o nome**: `zorvin_assuntos.fica_no_fim`, a régua do 009.
+Presa ao nome, a regra quebraria no dia em que alguém corrigisse o nome pela
+tela — "OUTROS ASSUNTOS" voltaria para o meio. A marca vai junto com o
+assunto em qualquer renomeação.
+
+**E não é a marca do "pede descrição"**: a tela deixa ligá-la em qualquer
+assunto, e ligar a descrição em ACORDOS não pode mandar ACORDOS para o fim.
+
+**A ordem agora:** primeiro quem não tem a marca, em ordem alfabética (a chave
+do 025); depois quem tem, em ordem alfabética entre si. O gatilho dispara
+também na troca da marca, e não só do nome. **O 026 é a versão de referência
+de `zorvin_ordenar_assuntos()` e do gatilho** (regra 5 do LEIA-ME).
+
+**A marca é ligada no OUTROS só na rodada que cria a coluna**: desligada
+depois, rodar a pasta de novo não a religa. E a conferência procura o OUTROS
+pelo nome só nessa rodada — numa rodada de novo o nome pode ter mudado pela
+tela, com a marca junto, e isso não é defeito.
+
+**Ainda em aberto, e é decisão:** a marca não tem chave na tela. Hoje só o
+OUTROS a usa; quem compra o programa e quiser outro assunto no fim precisa de
+um botão "fica no fim da lista" ao lado de "pede descrição", na
+administração.
+
+Prova: seção 65, no mesmo banco fechado da 64: 21 conferências, **10
+sabotagens e 10 pegas**, todas limpas, rodadas em cópias e lidas uma a uma.
+Duas delas só existem por causa da diferença entre marca e nome:
+
+- a ordem pelo NOME no lugar da marca é pega pela cena que renomeia o OUTROS;
+- a marca ligada em quem PEDE DESCRIÇÃO é pega pela cena em que ACORDOS pede
+  descrição antes de o 026 rodar.
 
 ### A espera não começa no rabicho da conversa já atendida
 

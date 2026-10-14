@@ -9868,5 +9868,204 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
   }
 }
 
+// ============================================================
+//  65. O OUTROS SEMPRE NO FIM
+//
+//  O 026 manda para o fim quem tem a MARCA `fica_no_fim`, ligada no OUTROS.
+//  A seção prova as duas coisas que separam uma marca de uma regra presa ao
+//  nome: renomear o OUTROS não o tira do fim, e ligar "pede descrição" em
+//  outro assunto não o manda para lá. Mesmo banco fechado da seção 64.
+// ==================================================================
+{
+  console.log("\n65. O OUTROS sempre no fim, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o OUTROS no fim (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S005 = ler("005-ja-tratei.sql");
+    const S009 = ler("009-o-assunto-outros.sql");
+    const S025 = ler("025-o-repasse-e-a-ordem-alfabetica.sql");
+    const S026 = ler("026-o-outros-fica-no-fim.sql");
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    const bancos = [];
+    const clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`);
+      bancos.push(nome);
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false });
+      await cl.connect();
+      clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const defeito = (linhas) => (linhas || []).some((l) => l.resposta === "false" || /^NÃO/.test(String(l.resposta))
+      || /rode o script/i.test(String(l.resposta)));
+    const item = (linhas, re) => ((linhas || []).find((l) => re.test(l.item)) || {}).resposta;
+    const PAPEIS = `do $$ begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+    end $$;`;
+    // O MESMO BANCO FECHADO DA SEÇÃO 64: sem o EXECUTE que o Postgres dá a
+    // todos, a função recriada pelo 026 só roda no papel de quem administra
+    // se as concessões dela continuarem lá.
+    const ESQUEMA = `
+      alter default privileges revoke execute on functions from public;
+      create schema if not exists auth;
+      create or replace function auth.uid() returns uuid language sql stable as $f$
+        select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+      grant usage on schema auth to anon, authenticated, service_role;
+      grant execute on function auth.uid() to anon, authenticated, service_role;
+      grant usage on schema public to anon, authenticated, service_role;
+      create table usuarios (id uuid primary key, login text, nome text not null default '',
+        admin boolean not null default false, ativo boolean not null default true, foto_url text);
+      create or replace function zorvin_admin() returns boolean language sql stable security definer
+        set search_path = public, auth as $f$
+        select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+      grant execute on function zorvin_admin() to authenticated;
+      grant select on usuarios to authenticated;`;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", rodrigo: "00000000-0000-0000-0000-000000000011" };
+    const emUso = async (cl) => (await cl.query(
+      "select nome from zorvin_assuntos where ativo order by ordem")).rows.map((r) => r.nome);
+    const posicoes = async (cl) => (await cl.query(
+      "select nome, ordem, ativo from zorvin_assuntos order by ordem, nome")).rows;
+    const contiguas = (linhas) => linhas.every((l, i) => l.ordem === i + 1);
+    try {
+      await raiz.query(PAPEIS);
+
+      // ---- 65a. sem o 025, desiste e diz qual falta ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA);
+        await c.query(S005);
+        await c.query(S009);
+        const r = await guardado(() => aplicar(c, S026));
+        ok("sem o 025, o 026 aplica sem estourar e manda rodar o 025 antes",
+           Array.isArray(r) && /rode o script 025/.test(String(item(r, /sem a ordem/))), JSON.stringify(r));
+        const col = (await c.query(`select count(*)::int n from information_schema.columns
+          where table_name = 'zorvin_assuntos' and column_name = 'fica_no_fim'`)).rows[0].n;
+        ok("e não deixa a coluna pela metade", col === 0, String(col));
+      }
+
+      // ---- 65b. sobre o 005, o 009 e o 025 ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin, ativo) values
+        ('${U.ana}', 'Ana', false, true), ('${U.rodrigo}', 'Rodrigo', true, true)`);
+      await c.query(S005);
+      await c.query(S009);
+      // "PEDE DESCRIÇÃO" LIGADO EM OUTRO ASSUNTO, como a tela deixa: é o que
+      // separa a marca nova da marca do 009.
+      await c.query("update zorvin_assuntos set pede_descricao = true where nome = 'ACORDOS'");
+      await c.query("insert into zorvin_assuntos (nome, ordem, ativo) values ('MUTIRÃO 2024', 99, false)");
+      await c.query(S025);
+      ok("antes do 026, o OUTROS está no meio (é o 025)", (await emUso(c)).indexOf("OUTROS") === 3,
+         (await emUso(c)).join(", "));
+
+      const conf = await guardado(() => aplicar(c, S026));
+      ok("o 026 aplica, e a conferência não acusa defeito", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que o OUTROS ganhou a marca e que a lista fechou",
+         item(conf, /ganhou a marca/) === "true" && item(conf, /lista está em ordem/) === "true", JSON.stringify(conf));
+      const ESPERADA = ["ACORDOS", "BLINDAGEM", "DOCUMENTOS JG", "REPASSE", "SUBSÍDIO CCR", "SUBSÍDIO CONDENAÇÃO",
+                        "SUBSÍDIO EMENDA", "VENDA CCS", "VENDA LN", "OUTROS"];
+      const depois = await emUso(c);
+      ok("o OUTROS foi para o fim, e o resto continua em ordem alfabética",
+         depois.join("|") === ESPERADA.join("|"), depois.join(", "));
+      ok("e a conferência mostra a lista, na ordem", item(conf, /na ordem/) === ESPERADA.join(", "), item(conf, /na ordem/));
+      ok("ACORDOS, que pede descrição, NÃO foi para o fim — são duas marcas diferentes", depois[0] === "ACORDOS",
+         depois.join(", "));
+      const marcados = (await c.query("select nome from zorvin_assuntos where fica_no_fim order by nome")).rows.map((r) => r.nome);
+      ok("só o OUTROS tem a marca", marcados.join("|") === "OUTROS", marcados.join(", "));
+      const tudo = await posicoes(c);
+      ok("os fora de uso continuam na conta, sem buraco nem repetição",
+         contiguas(tudo) && tudo.find((l) => l.nome === "MUTIRÃO 2024").ordem === 4 && tudo[tudo.length - 1].nome === "OUTROS",
+         JSON.stringify(tudo.map((l) => `${l.ordem}:${l.nome}`)));
+
+      const comoPessoa = async (uid, fn) => {
+        await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+        await c.query("set role authenticated");
+        try { return await fn(); } finally {
+          await c.query("reset role");
+          await c.query("select set_config('request.jwt.claim.sub', '', false)");
+        }
+      };
+
+      // ---- 65c. quem administra cria e renomeia pela tela ----
+      {
+        const criou = await guardado(() => comoPessoa(U.rodrigo, async () => (await c.query(
+          "insert into zorvin_assuntos (nome, ordem) values ('ZELADORIA', 100)")).rowCount));
+        const l1 = await emUso(c);
+        ok("um assunto novo com Z vai para antes do OUTROS, e não depois",
+           criou === 1 && l1[l1.length - 1] === "OUTROS" && l1[l1.length - 2] === "ZELADORIA", l1.join(", "));
+        const renomeou = await guardado(() => comoPessoa(U.rodrigo, async () => (await c.query(
+          "update zorvin_assuntos set nome = 'OUTROS ASSUNTOS' where nome = 'OUTROS'")).rowCount));
+        const l2 = await emUso(c);
+        ok("renomear o OUTROS não o tira do fim — a marca vai junto com o assunto",
+           renomeou === 1 && l2[l2.length - 1] === "OUTROS ASSUNTOS", l2.join(", "));
+      }
+
+      // ---- 65d. a marca ligada ou desligada arruma a lista na hora ----
+      {
+        await guardado(() => comoPessoa(U.rodrigo, () => c.query(
+          "update zorvin_assuntos set fica_no_fim = true where nome = 'ACORDOS'")));
+        const l1 = await emUso(c);
+        ok("ligando a marca em ACORDOS, ele vai para o fim, e os do fim em ordem alfabética entre si",
+           l1.slice(-2).join("|") === "ACORDOS|OUTROS ASSUNTOS" && l1[0] === "BLINDAGEM", l1.join(", "));
+        await guardado(() => comoPessoa(U.rodrigo, () => c.query(
+          "update zorvin_assuntos set fica_no_fim = false where nome = 'ACORDOS'")));
+        const l2 = await emUso(c);
+        ok("desligando, ele volta para o lugar dele", l2[0] === "ACORDOS" && l2[l2.length - 1] === "OUTROS ASSUNTOS",
+           l2.join(", "));
+        ok("e a conta segue sem buraco", contiguas(await posicoes(c)));
+      }
+
+      // ---- 65e. quem atende não mexe na marca ----
+      {
+        const antes = await posicoes(c);
+        const mudou = await guardado(() => comoPessoa(U.ana, async () => (await c.query(
+          "update zorvin_assuntos set fica_no_fim = true where nome = 'BLINDAGEM'")).rowCount));
+        ok("quem atende não liga a marca: zero linhas, sem erro", mudou === 0, JSON.stringify(mudou));
+        const depois5 = await posicoes(c);
+        ok("e a lista continua como estava",
+           JSON.stringify(depois5.map((l) => [l.nome, l.ordem])) === JSON.stringify(antes.map((l) => [l.nome, l.ordem])));
+      }
+
+      // ---- 65f. rodar de novo não liga nem desliga a marca ----
+      {
+        const r2 = await guardado(() => aplicar(c, S026));
+        ok("rodar de novo, com o OUTROS renomeado, não acusa defeito", Array.isArray(r2) && !defeito(r2), JSON.stringify(r2));
+        ok("e o OUTROS renomeado continua no fim", (await emUso(c)).slice(-1)[0] === "OUTROS ASSUNTOS");
+        await guardado(() => comoPessoa(U.rodrigo, () => c.query(
+          "update zorvin_assuntos set nome = 'OUTROS', fica_no_fim = false where nome = 'OUTROS ASSUNTOS'")));
+        const r3 = await guardado(() => aplicar(c, S026));
+        const l = await emUso(c);
+        ok("a marca desligada pela tela não volta sozinha: o OUTROS fica no lugar alfabético",
+           l.indexOf("OUTROS") > 0 && l[l.length - 1] !== "OUTROS", l.join(", "));
+        ok("e a conferência diz isso sem acusar defeito", Array.isArray(r3) && !defeito(r3)
+           && /não liga nem desliga/.test(String(item(r3, /ganhou a marca/))), JSON.stringify(r3));
+      }
+    } catch (e) {
+      ok("a seção 65 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
