@@ -9608,5 +9608,265 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
   }
 }
 
+// ============================================================
+//  64. O REPASSE, E A LISTA DO "JÁ TRATEI" EM ORDEM ALFABÉTICA
+//
+//  O 025 põe a ordem no BANCO: um gatilho a refaz quando um assunto nasce ou
+//  muda de nome. Aqui ele é aplicado sobre os assuntos do 005 e do 009 DE
+//  VERDADE (os arquivos, e não uma cópia deles), e o que a tela faz — criar e
+//  renomear — é feito no papel de quem administra, porque é com a permissão
+//  dessa pessoa que as posições são refeitas.
+// ==================================================================
+{
+  console.log("\n64. O REPASSE, e o \"Já tratei\" em ordem alfabética, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a ordem dos assuntos (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S005 = ler("005-ja-tratei.sql");
+    const S009 = ler("009-o-assunto-outros.sql");
+    const S025 = ler("025-o-repasse-e-a-ordem-alfabetica.sql");
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    const bancos = [];
+    const clientes = [];
+    async function conectar(nome) {
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false });
+      await cl.connect();
+      clientes.push(cl);
+      return cl;
+    }
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`);
+      bancos.push(nome);
+      const cl = await conectar(nome);
+      cl.nomeDoBanco = nome;
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const defeito = (linhas) => (linhas || []).some((l) => l.resposta === "false" || /^NÃO/.test(String(l.resposta))
+      || /rode o script/i.test(String(l.resposta)));
+    const item = (linhas, re) => ((linhas || []).find((l) => re.test(l.item)) || {}).resposta;
+    const PAPEIS = `do $$ begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+    end $$;`;
+    // UM BANCO MAIS FECHADO QUE A PRODUÇÃO: sem o EXECUTE que o Postgres dá a
+    // todos por padrão, as funções do 025 só rodam no papel de quem
+    // administra se o próprio script as conceder — e o gatilho tem de
+    // funcionar assim mesmo. SEM `in schema`: o padrão de dar a todos é
+    // global, e um `revoke` por esquema só desfaz um `grant` por esquema — a
+    // sabotagem que tira a concessão do 025 passava com ele.
+    const ESQUEMA = `
+      alter default privileges revoke execute on functions from public;
+      create schema if not exists auth;
+      create or replace function auth.uid() returns uuid language sql stable as $f$
+        select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+      grant usage on schema auth to anon, authenticated, service_role;
+      grant execute on function auth.uid() to anon, authenticated, service_role;
+      grant usage on schema public to anon, authenticated, service_role;
+      create table usuarios (id uuid primary key, login text, nome text not null default '',
+        admin boolean not null default false, ativo boolean not null default true, foto_url text);
+      create or replace function zorvin_admin() returns boolean language sql stable security definer
+        set search_path = public, auth as $f$
+        select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+      grant execute on function zorvin_admin() to authenticated;
+      grant select on usuarios to authenticated;`;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", rodrigo: "00000000-0000-0000-0000-000000000011" };
+    // A LISTA COMO A TELA A LÊ: em uso, pela ordem que o banco guardou.
+    const emUso = async (cl) => (await cl.query(
+      "select nome from zorvin_assuntos where ativo order by ordem")).rows.map((r) => r.nome);
+    // E A CONTA INTEIRA (desativados juntos): posições 1, 2, 3… sem buraco nem repetição.
+    const posicoes = async (cl) => (await cl.query(
+      "select nome, ordem, ativo from zorvin_assuntos order by ordem, nome")).rows;
+    const contiguas = (linhas) => linhas.every((l, i) => l.ordem === i + 1);
+    try {
+      await raiz.query(PAPEIS);
+
+      // ---- 64a. sem a tabela dos assuntos, desiste e diz qual falta ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA);
+        const r = await guardado(() => aplicar(c, S025));
+        ok("sem o 005, o 025 aplica sem estourar e manda rodar o 005 antes",
+           Array.isArray(r) && /rode o script 005/.test(String(item(r, /sem a tabela/))), JSON.stringify(r));
+        const f = (await c.query("select to_regprocedure('public.zorvin_ordenar_assuntos()') f")).rows[0].f;
+        ok("e não deixa a função pela metade", f === null, String(f));
+      }
+
+      // ---- 64b. sobre os assuntos do 005 e do 009 ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin, ativo) values
+        ('${U.ana}', 'Ana', false, true), ('${U.rodrigo}', 'Rodrigo', true, true)`);
+      await c.query(S005);
+      await c.query(S009);
+      // UM DESATIVADO, para a conta provar que os fora de uso entram nela.
+      await c.query("insert into zorvin_assuntos (nome, ordem, ativo) values ('MUTIRÃO 2024', 99, false)");
+      const antes = await emUso(c);
+      ok("antes do 025, a lista é a da ordem de criação (o OUTROS no fim)",
+         antes[0] === "BLINDAGEM" && antes[antes.length - 1] === "OUTROS", antes.join(", "));
+
+      const conf = await guardado(() => aplicar(c, S025));
+      ok("o 025 aplica sobre o Zorvin, e a conferência não acusa defeito", Array.isArray(conf) && !defeito(conf),
+         JSON.stringify(conf));
+      const ESPERADA = ["ACORDOS", "BLINDAGEM", "DOCUMENTOS JG", "OUTROS", "REPASSE", "SUBSÍDIO CCR",
+                        "SUBSÍDIO CONDENAÇÃO", "SUBSÍDIO EMENDA", "VENDA CCS", "VENDA LN"];
+      const depois = await emUso(c);
+      ok("o REPASSE entrou, e a lista em uso ficou em ordem alfabética — o OUTROS no lugar dele",
+         depois.join("|") === ESPERADA.join("|"), depois.join(", "));
+      ok("a conferência diz que o REPASSE está lá e que a ordem fechou",
+         item(conf, /REPASSE está na lista/) === "true" && item(conf, /ordem alfabética/) === "true", JSON.stringify(conf));
+      ok("e mostra a lista, na ordem", item(conf, /na ordem/) === ESPERADA.join(", "), item(conf, /na ordem/));
+      const tudo = await posicoes(c);
+      ok("os fora de uso entram na mesma conta, sem buraco nem repetição",
+         contiguas(tudo) && tudo.find((l) => l.nome === "MUTIRÃO 2024").ordem === 4,
+         JSON.stringify(tudo.map((l) => `${l.ordem}:${l.nome}`)));
+      const repasse = (await c.query("select nome, ativo, pede_descricao from zorvin_assuntos where lower(nome) = 'repasse'")).rows;
+      ok("um REPASSE só, em uso, sem pedir descrição", repasse.length === 1 && repasse[0].ativo === true
+         && repasse[0].pede_descricao === false, JSON.stringify(repasse));
+
+      const comoPessoa = async (cl, uid, fn) => {
+        await cl.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+        await cl.query("set role authenticated");
+        try { return await fn(); } finally {
+          await cl.query("reset role");
+          await cl.query("select set_config('request.jwt.claim.sub', '', false)");
+        }
+      };
+
+      // ---- 64c. quem administra cria e renomeia pela tela ----
+      {
+        // COMO A TELA FAZ: o assunto novo vai com `ordem` = maior + 1.
+        const criou = await guardado(() => comoPessoa(c, U.rodrigo, async () => (await c.query(
+          "insert into zorvin_assuntos (nome, ordem) values ('Audiência', 100) returning id")).rowCount));
+        ok("quem administra cria um assunto", criou === 1, JSON.stringify(criou));
+        const l1 = await emUso(c);
+        ok("e ele vai sozinho para o lugar dele, e não para o fim — maiúscula e acento não decidem",
+           l1.indexOf("Audiência") === 1 && l1[0] === "ACORDOS" && l1[2] === "BLINDAGEM", l1.join(", "));
+        // O ACENTO E A CAIXA SÃO O QUE A COMPARAÇÃO BYTE A BYTE ERRARIA: "Á" vem
+        // depois de "Z", e "a" depois de "B".
+        await guardado(() => comoPessoa(c, U.rodrigo, () => c.query(
+          "insert into zorvin_assuntos (nome, ordem) values ('ÁGUA E LUZ', 101), ('abertura de conta', 102)")));
+        const l2 = await emUso(c);
+        ok("“abertura de conta” antes de ACORDOS, e “ÁGUA E LUZ” logo depois",
+           l2.slice(0, 4).join("|") === "abertura de conta|ACORDOS|ÁGUA E LUZ|Audiência", l2.slice(0, 5).join(", "));
+        const renomeou = await guardado(() => comoPessoa(c, U.rodrigo, async () => (await c.query(
+          "update zorvin_assuntos set nome = 'CESSÃO DE CRÉDITO' where nome = 'VENDA CCS'")).rowCount));
+        const l3 = await emUso(c);
+        ok("renomear muda o lugar: VENDA CCS virou CESSÃO DE CRÉDITO, logo depois de BLINDAGEM",
+           renomeou === 1 && l3.indexOf("CESSÃO DE CRÉDITO") === l3.indexOf("BLINDAGEM") + 1
+           && !l3.includes("VENDA CCS"), l3.join(", "));
+        const antesDeDesativar = await posicoes(c);
+        await guardado(() => comoPessoa(c, U.rodrigo, () => c.query(
+          "update zorvin_assuntos set ativo = false where nome = 'abertura de conta'")));
+        const aposDesativar = await posicoes(c);
+        ok("tirar de uso não mexe na posição de ninguém",
+           JSON.stringify(aposDesativar.map((l) => [l.nome, l.ordem])) === JSON.stringify(antesDeDesativar.map((l) => [l.nome, l.ordem])),
+           JSON.stringify(aposDesativar.map((l) => `${l.ordem}:${l.nome}`)));
+        ok("e a conta segue sem buraco", contiguas(aposDesativar), JSON.stringify(aposDesativar.map((l) => l.ordem)));
+      }
+
+      // ---- 64d. quem atende não mexe ----
+      {
+        const antes4 = await posicoes(c);
+        const renomeou = await guardado(() => comoPessoa(c, U.ana, async () => (await c.query(
+          "update zorvin_assuntos set nome = 'AAAA' where nome = 'VENDA LN'")).rowCount));
+        ok("quem atende não renomeia: zero linhas, sem erro", renomeou === 0, JSON.stringify(renomeou));
+        const criou = await guardado(() => comoPessoa(c, U.ana, () => c.query(
+          "insert into zorvin_assuntos (nome) values ('AAAA')")));
+        ok("nem cria", Boolean(criou && criou.codigo === "42501"), JSON.stringify(criou && criou.codigo));
+        const depois4 = await posicoes(c);
+        ok("e a lista continua como estava",
+           JSON.stringify(depois4.map((l) => [l.nome, l.ordem])) === JSON.stringify(antes4.map((l) => [l.nome, l.ordem])));
+      }
+
+      // ---- 64e. muda só quem saiu do lugar ----
+      {
+        const xmins = async () => Object.fromEntries((await c.query(
+          "select nome, xmin::text as x from zorvin_assuntos")).rows.map((r) => [r.nome, r.x]));
+        const antes5 = await xmins();
+        await c.query("insert into zorvin_assuntos (nome) values ('ZELADORIA')");
+        const depois5 = await xmins();
+        const mexidos = Object.keys(antes5).filter((n) => antes5[n] !== depois5[n]);
+        ok("um assunto que entra no fim não regrava os outros", mexidos.length === 0, mexidos.join(", "));
+        ok("e ele fica no fim", (await emUso(c)).slice(-1)[0] === "ZELADORIA");
+      }
+
+      // ---- 64f. duas pessoas criando no mesmo segundo ----
+      {
+        // A SEGUNDA RENUMERAÇÃO TEM DE VER A PRIMEIRA. Sem a trava, cada uma
+        // calcula as posições sem o assunto da outra, e as duas gravam: dois
+        // assuntos com o mesmo número, e a lista deixa de ser alfabética.
+        const c2 = await conectar(c.nomeDoBanco);
+        await c.query("begin");
+        await c.query("insert into zorvin_assuntos (nome) values ('ZZ ÚLTIMO')");
+        await c2.query("begin");
+        const segunda = c2.query("insert into zorvin_assuntos (nome) values ('AA PRIMEIRO')");
+        await espera(400);
+        await c.query("commit");
+        await segunda;
+        await c2.query("commit");
+        const linhas = await posicoes(c);
+        ok("os dois entram, e a conta segue sem buraco nem repetição", contiguas(linhas)
+           && linhas[0].nome === "AA PRIMEIRO" && linhas[linhas.length - 1].nome === "ZZ ÚLTIMO",
+           JSON.stringify(linhas.map((l) => `${l.ordem}:${l.nome}`)));
+      }
+
+      // ---- 64g. rodar de novo não traz de volta o que o escritório mudou ----
+      {
+        const r2 = await guardado(() => aplicar(c, S025));
+        ok("rodar de novo não acusa defeito", Array.isArray(r2) && !defeito(r2), JSON.stringify(r2));
+        const n = (await c.query("select count(*)::int n from zorvin_assuntos where lower(nome) = 'repasse'")).rows[0].n;
+        ok("e não cria um segundo REPASSE", n === 1, String(n));
+        await guardado(() => comoPessoa(c, U.rodrigo, () => c.query(
+          "update zorvin_assuntos set ativo = false where nome = 'REPASSE'")));
+        const r3 = await guardado(() => aplicar(c, S025));
+        const ativos = (await c.query("select count(*)::int n from zorvin_assuntos where ativo and lower(nome) = 'repasse'")).rows[0].n;
+        ok("o REPASSE tirado de uso pela tela não volta sozinho", ativos === 0, String(ativos));
+        ok("e a conferência diz isso sem acusar defeito — foi escolha do escritório",
+           Array.isArray(r3) && !defeito(r3) && /fora de uso/.test(String(item(r3, /REPASSE/))), JSON.stringify(r3));
+      }
+
+      // ---- 64h. o REPASSE que o escritório já criou pela tela é aproveitado ----
+      {
+        // E É A CENA EM QUE O 025 NÃO INSERE NADA: a ordem tem de sair da
+        // renumeração da instalação, e não do gatilho do REPASSE novo.
+        const d = await bancoNovo();
+        await d.query(ESQUEMA);
+        await d.query(S005);
+        await d.query(S009);
+        await d.query("insert into zorvin_assuntos (nome, ordem) values ('Repasse', 50)");
+        const r = await guardado(() => aplicar(d, S025));
+        ok("com um “Repasse” já criado à mão, o 025 aplica sem defeito", Array.isArray(r) && !defeito(r), JSON.stringify(r));
+        const n = (await d.query("select count(*)::int n from zorvin_assuntos where lower(nome) = 'repasse'")).rows[0].n;
+        ok("e não cria um segundo", n === 1, String(n));
+        const l = await emUso(d);
+        ok("e a lista fica em ordem alfabética mesmo sem nenhum assunto novo",
+           l.join("|") === ESPERADA.join("|").replace("REPASSE", "Repasse"), l.join(", "));
+      }
+    } catch (e) {
+      ok("a seção 64 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
