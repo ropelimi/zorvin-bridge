@@ -4923,7 +4923,18 @@ console.log("\nCliente sem conversa nenhuma aqui não é erro");
     }
     ok("o evento que ficou pela metade vira mensagem na conversa", entrou,
        "ele continuaria pendente para sempre, e a mensagem nunca teria entrado");
-    const linha = (t.sb.dados.eventos_recebidos || []).find((e) => String(e.id) === "1");
+    // FECHAR VEM DEPOIS DE TRATAR, e não junto: a ponte grava a mensagem,
+    // ainda pergunta ao banco pela distribuição e pela resposta fora do
+    // horário, e só então marca o evento. Conferir no instante em que a
+    // mensagem aparece media o meio do caminho — e com a máquina ocupada
+    // (sabotagens em paralelo, em 13/10) a conferência caiu exatamente ali,
+    // com `processando_em` marcado e `processado_em` ainda vazio.
+    let linha = null;
+    for (let i = 0; i < 20; i++) {
+      linha = (t.sb.dados.eventos_recebidos || []).find((e) => String(e.id) === "1");
+      if (linha && linha.processado_em) break;
+      await espera(250);
+    }
     ok("e a linha dele é fechada", Boolean(linha && linha.processado_em), JSON.stringify(linha));
     ok("tendo contado a tentativa", linha && linha.tentativas >= 1, JSON.stringify(linha));
     await t.parar();

@@ -154,6 +154,13 @@ Três regras que sustentam isso, e que não podem ser desfeitas sem quebrar a ga
 SQL: `sql/2026-09-a-caixa-de-entrada-do-webhook.sql`. Variável **opcional**
 `CAIXA_INTERVALO_MS` (padrão 30s), que existe para a bancada encurtar a rodada.
 
+**Fechar vem DEPOIS de tratar, e a prova espera por isso (13/10).** A ponte
+grava a mensagem, ainda pergunta ao banco pela distribuição e pela resposta
+fora do horário, e só então marca `processado_em`. A conferência "a linha é
+fechada" olhava no instante em que a mensagem aparecia — o meio do caminho —
+e, com a máquina ocupada por sabotagens em paralelo, caiu ali. Hoje ela espera
+até 5 segundos pelo fechamento: se a ponte nunca fechar, continua reprovando.
+
 ## A fila de envio — quando a ponte insiste sozinha, e quando não
 
 Uma falha, e a mensagem morria ali: virava bolha vermelha e só saía se alguém
