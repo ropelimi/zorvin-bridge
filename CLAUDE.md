@@ -962,6 +962,45 @@ Duas delas só existem por causa da diferença entre marca e nome:
 - a marca ligada em quem PEDE DESCRIÇÃO é pega pela cena em que ACORDOS pede
   descrição antes de o 026 rodar.
 
+### O DÚVIDAS TRATADAS, e as sementes (script 027, 14/10)
+
+Pedido do Rodrigo: *"No 'Já tratei' incluir a opção 'Dúvidas Tratadas'"*.
+Primeiro foi sugerido a ele o caminho da tela (Departamentos e acessos →
+Assuntos do "Já tratei" → Criar), que fica pronto na hora; ele pediu que
+fosse feito por aqui. `sql/automaticos/027-duvidas-tratadas.sql`.
+
+**Em maiúsculas, como os outros** (`DÚVIDAS TRATADAS`), sugestão feita a ele
+antes. O lugar não é escolhido no script: o gatilho do 025/026 o põe entre
+DOCUMENTOS JG e REPASSE, com o OUTROS no fim.
+
+**A âncora da regra 5 é nova: `zorvin_sementes`.** O 025 semeou o REPASSE
+"na rodada que cria a função da ordem"; este não cria nada — o assunto entra
+numa tabela que já existe. Sem âncora, rodar a pasta de novo depois de o
+escritório tirá-lo de uso ou renomeá-lo o traria de volta. Agora cada linha
+plantada assim deixa uma CHAVE (`assunto:duvidas-tratadas`), e a chave
+plantada não planta de novo. **O próximo "inclua o assunto X" usa a mesma
+tabela** — o LEIA-ME de `sql/automaticos` diz isso na regra 5.
+
+A tabela nasce **com RLS ligada, sem política e sem concessão a `anon` nem a
+`authenticated`**, como `zorvin_scripts_aplicados`: nenhuma tela precisa
+dela, e apagar uma chave é o jeito de um script plantar de novo.
+
+**O criado à mão é aproveitado pela chave do 025**, que ignora acento e
+caixa: "Dúvidas tratadas" ou "DUVIDAS TRATADAS" feitos pela tela antes da
+publicação contam como o mesmo assunto. O índice único do 005
+(`lower(nome)`) separaria "Ú" de "U" e deixaria nascer um segundo.
+
+Prova: seção 66, num banco que imita a Supabase nas tabelas (tudo concedido
+a `authenticated` por padrão) — é nele que se vê se o 027 tira as sementes
+do alcance do painel. 16 conferências, **10 sabotagens e 10 pegas**, todas
+limpas, rodadas em cópias e lidas uma a uma.
+
+**E uma sabotagem pegou pelo motivo errado na primeira escrita.** "Plantar em
+toda rodada" estourava na chave primária das sementes, e a prova reprovava
+com o erro em vez de mostrar o assunto voltando. Refeita para não tropeçar
+(`on conflict do nothing`), ela é pega pelas cenas do assunto tirado de uso
+e do renomeado — que é o defeito de verdade.
+
 ### A espera não começa no rabicho da conversa já atendida
 
 Relato de 28/09, com foto: a conversa da ANDREIA dizia **"esperando há 6

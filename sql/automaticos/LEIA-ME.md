@@ -50,6 +50,11 @@ anterior passou. O nome em português é para o arquivo dizer sozinho o que faz 
    mais novo que a recria** (o gatilho da espera, hoje, é o do 020), e um
    script que semeia linha (como o "OUTROS") só semeia na rodada que CRIA a
    coluna ou a tabela.
+   **Linha nova numa tabela que já existe, sem criar nada** (um assunto do
+   "Já tratei" pedido pelo escritório, por exemplo): a âncora é uma chave em
+   `zorvin_sementes` (o 027 é o modelo). Plantada uma vez, a chave fica, e
+   nenhuma rodada planta de novo — nem depois de a linha ser tirada de uso ou
+   renomeada pela tela.
 
 6. **A última linha é a conferência, e `false` quer dizer defeito.** É o
    `select` que responde "deu certo?" — no editor da Supabase ele é o que
