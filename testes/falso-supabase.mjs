@@ -226,7 +226,8 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
   const cabecalhosDeUpload = new Map();         // caminho → cache-control enviado
   const chamadas = [];                         // tudo o que a ponte pediu
   // De qual tabela cada coluna de junção aponta. Só o que a ponte usa.
-  const esquema = { contato_id: "contatos", advogado_id: "advogados", conversa_id: "conversas" };
+  const esquema = { contato_id: "contatos", advogado_id: "advogados", conversa_id: "conversas",
+                   departamento_id: "departamentos" };
   let seq = 1000;
 
   const servidor = http.createServer(async (req, res) => {
