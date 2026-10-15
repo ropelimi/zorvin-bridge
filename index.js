@@ -9154,11 +9154,13 @@ function impressaoDigital(texto) {
   return crypto.createHash('sha256').update(texto, 'utf8').digest('hex');
 }
 
-function lerAPastaDosScripts() {
-  const fs = require('fs');
+// OS NOMES DOS SCRIPTS DA PASTA, na ordem em que rodam. Uma escrita só: é
+// daqui que saem a rodada e o "último script" que a janela do painel mostra
+// (`versaoNoAr`) — duas listas poderiam discordar sobre qual é o último.
+function nomesDosScripts() {
   let nomes = [];
   try {
-    nomes = fs.readdirSync(PASTA_DOS_SCRIPTS);
+    nomes = require('fs').readdirSync(PASTA_DOS_SCRIPTS);
   } catch (_e) {
     // Pasta que não existe é o mesmo que pasta vazia. Não é erro: é um repo
     // ainda sem script automático nenhum.
@@ -9168,11 +9170,15 @@ function lerAPastaDosScripts() {
     .filter((n) => n.toLowerCase().endsWith('.sql'))
     // Ordem alfabética, e é por isso que os nomes começam com número. Aplicar
     // fora de ordem é aplicar o conserto antes do defeito.
-    .sort()
-    .map((nome) => {
-      const corpo = fs.readFileSync(require('path').join(PASTA_DOS_SCRIPTS, nome), 'utf8');
-      return { nome, corpo, impressao: impressaoDigital(corpo) };
-    });
+    .sort();
+}
+
+function lerAPastaDosScripts() {
+  const fs = require('fs');
+  return nomesDosScripts().map((nome) => {
+    const corpo = fs.readFileSync(require('path').join(PASTA_DOS_SCRIPTS, nome), 'utf8');
+    return { nome, corpo, impressao: impressaoDigital(corpo) };
+  });
 }
 
 // "020-a-auditoria-do-banco.sql" → "020". O número COMO ESTÁ ESCRITO, e não
@@ -9821,7 +9827,10 @@ app.get('/scripts/estado', rotaVantoro(async (req, usuario) => {
     return { status: 403, corpo: { ok: false,
       erro: 'Só quem administra vê o estado das atualizações do banco.' } };
   }
-  return { status: 200, corpo: { ok: true, ...estadoDosScripts } };
+  // A VERSÃO VAI EM TODA RESPOSTA, inclusive com os scripts desligados: a
+  // pergunta "qual ponte está no ar?" não depende de a ponte aplicar script.
+  // Ver "QUAL VERSÃO ESTÁ NO AR", logo abaixo.
+  return { status: 200, corpo: { ok: true, ...estadoDosScripts, versao: versaoNoAr() } };
 }));
 
 // ============================================================
@@ -9845,10 +9854,46 @@ app.get('/scripts/estado', rotaVantoro(async (req, usuario) => {
 //  `RENDER_GIT_COMMIT` é dado pela própria Render. Fora dela a variável não
 //  existe, e aí vale a data de escrita do arquivo — que não identifica o
 //  commit, mas denuncia um deploy velho, que é o que se quer pegar.
+//
+//  ------------------------------------------------------------
+//  E O LOG NÃO BASTOU: EM 14/10 ACONTECEU DE NOVO (`versaoNoAr`)
+//
+//  Três PRs da ponte mesclados à tarde (os scripts 025, 026 e 027) e nenhum
+//  publicado: a Render não registrou um único evento do serviço naquele dia, e
+//  na manhã seguinte o Rodrigo viu a lista do "Já tratei" na ordem antiga. A
+//  aba "Atualizações do banco" dizia "Em dia" — e estava certa, para a ponte
+//  que estava no ar, que não conhecia scripts depois do 024. A linha deste
+//  log dizia a verdade o tempo todo, num lugar que ninguém abre.
+//
+//  Então a versão vai também na janela do painel (`GET /scripts/estado`), e o
+//  PAINEL a compara com o GitHub: o repositório é público, e quem pergunta é o
+//  navegador do escritório. Perguntar daqui não serviria — a Render sai para a
+//  internet por endereços que muitos serviços dividem, e o GitHub limita as
+//  perguntas sem senha POR ENDEREÇO.
+//
+//  Só o que a Render documenta (`RENDER_GIT_COMMIT`, `RENDER_GIT_BRANCH`,
+//  `RENDER_GIT_REPO_SLUG`, `RENDER_SERVICE_NAME`): as outras `RENDER_*` são de
+//  uso interno dela e mudam sem aviso. Fora da Render, as quatro vêm nulas — e
+//  nulo, e não vazio, porque é "não sei", e não "é isto".
+//
+//  E O ÚLTIMO SCRIPT DA PASTA vai junto: "conhece as atualizações até a 027" é
+//  o número que o Rodrigo consegue conferir sozinho, e é por ele que se vê que
+//  "em dia" é em dia com ESTA ponte.
 // ============================================================
+function versaoNoAr() {
+  const ler = (nome) => String(process.env[nome] || '').trim() || null;
+  const nomes = nomesDosScripts();
+  return {
+    commit: ler('RENDER_GIT_COMMIT'),
+    ramo: ler('RENDER_GIT_BRANCH'),
+    repositorio: ler('RENDER_GIT_REPO_SLUG'),
+    servico: ler('RENDER_SERVICE_NAME'),
+    ultimo_script: nomes.length ? nomes[nomes.length - 1] : null,
+  };
+}
+
 function comoMeChamo() {
-  const commit = String(process.env.RENDER_GIT_COMMIT || '').trim();
-  const ramo = String(process.env.RENDER_GIT_BRANCH || '').trim();
+  const { commit, ramo } = versaoNoAr();
   const partes = [];
   if (commit) partes.push(`commit ${commit.slice(0, 8)}`);
   if (ramo) partes.push(`ramo ${ramo}`);

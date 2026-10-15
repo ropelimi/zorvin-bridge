@@ -1857,6 +1857,55 @@ o prazo, a ponte sai assim mesmo e **diz no log** o que ficou pela metade.
 
 Webhook que chega durante a saída recebe `503`, e não um "OK" que não será honrado.
 
+## Qual versão está no ar — e a publicação que não aconteceu (14/10)
+
+Em 14/10 três PRs da ponte (os scripts 025, 026 e 027) foram mesclados à tarde, e
+**nenhum foi publicado**. Na Render o serviço não tem um único evento naquele dia.
+Rastreadores de status falam de uma pausa nas publicações de serviços gratuitos a
+partir de ~20:41 UTC; a página de status da própria Render não abre daqui, então
+isso não foi conferido na fonte. Na manhã seguinte o Rodrigo viu a lista do "Já
+tratei" na ordem antiga, e a aba **Atualizações do banco** dizia **"Em dia"**.
+Ela estava certa para a ponte que estava no ar, que não conhecia script nenhum
+depois do 024. Resolveu com **Manual Deploy → Deploy latest commit**.
+
+**Já tinha acontecido em 20/08.** Daquela vez nasceu a linha `versão no ar: commit …`
+que a ponte escreve no log ao subir. Nas duas vezes ela dizia a verdade, num lugar
+que ninguém abre.
+
+Hoje `GET /scripts/estado` devolve `versao` em toda resposta, também com os scripts
+desligados — "qual ponte está no ar?" não depende deles:
+
+| campo | de onde |
+|---|---|
+| `commit` | `RENDER_GIT_COMMIT`, **inteiro** — é com ele que o painel acha a versão no GitHub |
+| `ramo` | `RENDER_GIT_BRANCH` |
+| `repositorio` | `RENDER_GIT_REPO_SLUG` |
+| `servico` | `RENDER_SERVICE_NAME` — o nome que a frase do Manual Deploy manda abrir |
+| `ultimo_script` | o último `.sql` de `sql/automaticos/` (o `LEIA-ME.md` não conta) |
+
+**Fora da Render, as quatro primeiras vêm NULAS.** Nulo quer dizer "não sei"; um
+texto vazio o painel leria como uma versão chamada "". E só entram variáveis que a
+Render documenta: as outras `RENDER_*` são de uso interno dela e mudam sem aviso.
+
+**Quem compara com o GitHub é o PAINEL, e não a ponte.** O repositório é público e
+o GitHub responde a qualquer um, mas limita as perguntas sem senha **por
+endereço**. A Render sai para a internet por endereços que muitos serviços
+dividem; o navegador do escritório usa um endereço que é só dele. Ver "Qual ponte
+está no ar" no CLAUDE.md do painel.
+
+**`ultimo_script` vai junto porque é o número que o Rodrigo confere sozinho**
+("conhece as atualizações até a 027"). É ele que mostra que "em dia" quer dizer
+em dia com ESTA ponte.
+
+**A lista dos scripts tem uma escrita só** (`nomesDosScripts`): a rodada e o
+"último script" saem dela, e duas listas poderiam discordar sobre qual é o último.
+
+Prova: seção 20, agora com 15 conferências e **10 sabotagens, todas pegas** e
+lidas uma a uma, rodadas em cópias. Entre elas: a versão fora da janela, o commit
+encurtado, o vazio no lugar do nulo, o `LEIA-ME.md` contado como script, a versão
+só com os scripts ligados, e a versão indo para quem atende. As cenas sobem **sem**
+`DATABASE_URL`, de propósito.
+
 ## Uazapi — formato real (confirmado em teste)
 
 Servidor do usuário: `https://novaera.uazapi.com`. Uma instância por advogado.

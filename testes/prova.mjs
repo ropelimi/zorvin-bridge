@@ -1938,6 +1938,90 @@ console.log("\n18. O anexo não fica vazio");
        `dizia: "${linha}"`);
     await t.parar();
   }
+
+  // ----------------------------------------------------------------
+  //  E A JANELA DO PAINEL DIZ O MESMO (15/10)
+  //
+  //  Em 14/10 aconteceu de novo: três PRs da ponte mesclados e nenhum
+  //  publicado, e a aba "Atualizações do banco" dizendo "Em dia" — certa,
+  //  para a ponte que estava no ar. A linha do log acima dizia a verdade num
+  //  lugar que ninguém abre. Agora a versão vai na janela (`/scripts/estado`),
+  //  e o painel a compara com o GitHub.
+  //
+  //  As cenas sobem SEM `DATABASE_URL`, de propósito: a pergunta "qual ponte
+  //  está no ar?" não pode depender de os scripts automáticos estarem ligados.
+  // ----------------------------------------------------------------
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const COMO_ADMIN = { tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }] } };
+  const janela = (t) => fetch(`http://127.0.0.1:${t.porta}/scripts/estado`,
+    { headers: { Authorization: "Bearer jwt-bom" } })
+    .then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) }),
+          () => ({ status: 0, corpo: null }));
+  // O commit INTEIRO, como a Render o dá: é com ele que o painel acha a versão
+  // na lista do GitHub e monta o endereço dela.
+  const COMMIT = "efc32ba0123456789abcdef0123456789abcdef0";
+  const NA_RENDER = { RENDER_GIT_COMMIT: COMMIT, RENDER_GIT_BRANCH: "main",
+                      RENDER_GIT_REPO_SLUG: "ropelimi/zorvin-bridge", RENDER_SERVICE_NAME: "zorvin-bridge" };
+  const FORA_DA_RENDER = { RENDER_GIT_COMMIT: "", RENDER_GIT_BRANCH: "",
+                           RENDER_GIT_REPO_SLUG: "", RENDER_SERVICE_NAME: "" };
+
+  {
+    // A PASTA DE VERDADE — e ela tem um `LEIA-ME.md`, que na ordem alfabética
+    // vem DEPOIS dos números. Contado como script, ele seria "o último".
+    const ultimoDeVerdade = fs.readdirSync(new URL("../sql/automaticos/", import.meta.url))
+      .filter((n) => n.endsWith(".sql")).sort().pop();
+    const t = await subirTudo({ DATABASE_URL: "", ...NA_RENDER }, COMO_ADMIN);
+    const r = await janela(t);
+    const v = (r.corpo && r.corpo.versao) || {};
+    ok("a janela do painel diz a versão, mesmo com os scripts automáticos desligados",
+       r.status === 200 && r.corpo.situacao === "desligado" && Boolean(r.corpo.versao),
+       `${r.status} ${JSON.stringify(r.corpo)}`);
+    ok("com o commit INTEIRO, e não encurtado", v.commit === COMMIT, JSON.stringify(v));
+    ok("o ramo, o repositório e o nome do serviço na Render",
+       v.ramo === "main" && v.repositorio === "ropelimi/zorvin-bridge" && v.servico === "zorvin-bridge",
+       JSON.stringify(v));
+    ok("e o último script da pasta — o LEIA-ME não conta",
+       Boolean(ultimoDeVerdade) && v.ultimo_script === ultimoDeVerdade,
+       `esperava ${ultimoDeVerdade}, veio ${JSON.stringify(v.ultimo_script)}`);
+    await t.parar();
+  }
+
+  {
+    // FORA DA RENDER: "não sei" é nulo, e não um texto vazio que o painel
+    // leria como uma versão chamada "".
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "versao-"));
+    for (const nome of ["010-b.sql", "009-a.sql", "LEIA-ME.md", "002-c.sql"]) {
+      fs.writeFileSync(path.join(dir, nome), "select 1;");
+    }
+    const t = await subirTudo({ DATABASE_URL: "", SCRIPTS_PASTA: dir, ...FORA_DA_RENDER }, COMO_ADMIN);
+    const v = ((await janela(t)).corpo || {}).versao || {};
+    ok("fora da Render, commit, ramo, repositório e serviço vêm nulos",
+       v.commit === null && v.ramo === null && v.repositorio === null && v.servico === null, JSON.stringify(v));
+    ok("e o último script é o de número maior", v.ultimo_script === "010-b.sql", JSON.stringify(v));
+    await t.parar();
+  }
+
+  {
+    const t = await subirTudo({ DATABASE_URL: "", ...NA_RENDER,
+      SCRIPTS_PASTA: path.join(os.tmpdir(), "pasta-que-nao-existe-de-jeito-nenhum") }, COMO_ADMIN);
+    const v = ((await janela(t)).corpo || {}).versao || {};
+    ok("sem a pasta dos scripts, o último script é nulo — e a versão continua lá",
+       v.ultimo_script === null && v.commit === COMMIT, JSON.stringify(v));
+    await t.parar();
+  }
+
+  {
+    // A janela é só de quem administra, e a versão vai junto com ela.
+    const t = await subirTudo({ DATABASE_URL: "", ...NA_RENDER },
+      { tabelas: { usuarios: [{ id: "u1", nome: "Rodrigo", admin: false, ativo: true }] } });
+    const r = await janela(t);
+    ok("quem atende não lê a versão pela janela",
+       r.status === 403 && !JSON.stringify(r.corpo || {}).includes(COMMIT.slice(0, 7)),
+       `${r.status} ${JSON.stringify(r.corpo)}`);
+    await t.parar();
+  }
 }
 
 // ==================================================================
