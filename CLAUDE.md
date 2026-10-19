@@ -1975,6 +1975,26 @@ vem instalado na máquina do GitHub, que não baixa nada.
 A lição é a de 25/09 com outra roupa: **antes de procurar defeito no código,
 olhe em qual passo o X vermelho parou.**
 
+**Apareceu em 19/10, e o passo seguinte foi dado.** A PR do script 028 ficou
+vermelha duas rodadas seguidas, em 11 segundos, com o espelho da Amazon
+respondendo `toomanyrequests: Data limit exceeded` às três tentativas de cada
+uma. Hoje o banco de teste é o **Postgres que já vem na máquina do GitHub**: o
+passo "Ligar o Postgres da máquina" o liga (`systemctl start`), põe a senha e
+escreve a versão no registro da rodada. Não baixa nada, e não há limite de
+ninguém para esbarrar.
+
+**A máquina ficou escrita (`ubuntu-24.04`, e não `ubuntu-latest`)**, porque a
+versão desse Postgres é a do Ubuntu: a 24.04 traz o 16. Com `ubuntu-latest`,
+no dia em que o GitHub trocasse a máquina, o banco das provas mudaria de versão
+sozinho.
+
+**E ele é o MESMO em que as provas são rodadas à mão** — conferido em 19/10:
+Ubuntu 24.04, Postgres 16, `ssl = on` e as regras de entrada de fábrica do
+Ubuntu (senha pela rede, `peer` pela porta local). A imagem de antes era outra
+coisa (Debian, `ssl = off`). As provas falam com o banco com `sslmode=disable`,
+então a diferença do `ssl` não muda nada nelas; a do resto, a suíte inteira
+rodada aqui (1095 de 1095) já mostrava.
+
 ## A saída (publicação) — a ponte termina o que está no meio
 
 Toda publicação derruba o processo. Ao receber `SIGTERM` (que é o que a Render manda),
