@@ -1759,6 +1759,11 @@ mensagem —, senão o número diria uma coisa e a lista outra. `arquivada` vem
 por `to_jsonb`: a coluna foi criada à mão e não está em script nenhum, e uma
 função `sql` que a citasse pelo nome não seria criada num banco sem ela.
 
+**E as não lidas de cada aba vêm na mesma resposta** (`nao_lidas`): a pílula
+"Não lidas" do painel filtra a lista DA ABA, e com o número do telefone
+inteiro ela diria 10 numa aba em que o filtro mostra 6 — as outras 4 parecem
+ter sumido, quando estão na aba ao lado.
+
 **A ponte só faz uma coisa nova:** depois de juntar duas conversas
 (`mudarDeConversa`), pede `zorvin_recontar_situacao` para a conversa que
 fica. Mudar mensagem de casa é um UPDATE, e o gatilho só vê mensagem que
@@ -1793,7 +1798,7 @@ primeira resposta, tempo até finalizar). Os campos nascem aqui (`aberto_em`,
 ### As provas
 
 Seção 67, num Postgres de verdade, obrigatória na integração contínua:
-**78 conferências, 33 sabotagens e 33 pegas**, todas limpas, rodadas em
+**79 conferências, 35 sabotagens e 35 pegas**, todas limpas, rodadas em
 cópias e lidas uma a uma. E a 57c-bis e a 57c-ter, da junção: **5 sabotagens
 e 5 pegas**.
 

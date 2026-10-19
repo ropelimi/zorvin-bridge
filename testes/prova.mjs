@@ -10743,14 +10743,20 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
         const ab = await d.conversa(); await d.msg(ab, "contato", H(4)); await d.msg(ab, "advogado", H(5));
         const fz = await d.conversa(); await d.msg(fz, "contato", H(6)); await d.clique(fz, U.ana, H(7));
         const sdc = await d.conversa(d.F.sdc); await d.msg(sdc, "contato", H(8));
+        // AS NÃO LIDAS: uma aguardando, a finalizada (finalizar não lê nada) e a
+        // arquivada — que, como na lista, não conta.
+        await d.query("update conversas set nao_lidas = 2 where id = any($1)", [[a1, fz, arq]]);
         const conta = (tel) => guardado(() => comoPessoa(d, U.ana, async () =>
           (await d.query("select zorvin_contar_situacoes($1) n", [tel])).rows[0]?.n));
         const igual = (n, a, b, f) => Boolean(n) && n.aguardando === a && n.aberto === b && n.finalizado === f;
         const doSac = await conta(d.F.sac);
         ok("as abas contam o que a lista mostra: 2 aguardando, 1 em aberto, 1 finalizada (sem a arquivada nem a vazia)",
            igual(doSac, 2, 1, 1), JSON.stringify(doSac));
+        ok("e as não lidas de cada aba: 1 aguardando, 0 em aberto, 1 finalizada (sem a arquivada)",
+           Boolean(doSac) && igual(doSac.nao_lidas, 1, 0, 1), JSON.stringify(doSac && doSac.nao_lidas));
         const doSdc = await conta(d.F.sdc);
-        ok("e o telefone que ela não atende conta zero, e não o que o banco tem", igual(doSdc, 0, 0, 0), JSON.stringify(doSdc));
+        ok("e o telefone que ela não atende conta zero, e não o que o banco tem",
+           igual(doSdc, 0, 0, 0) && igual(doSdc.nao_lidas, 0, 0, 0), JSON.stringify(doSdc));
       }
 
       // ---- 67g. a mensagem nunca é perdida ----

@@ -879,6 +879,11 @@ begin
   --  `arquivada` vem por `to_jsonb`: a coluna foi criada à mão no começo do
   --  projeto e não está em script nenhum, e uma função `sql` que a citasse
   --  pelo nome não seria criada num banco sem ela.
+  --
+  --  E AS NÃO LIDAS DE CADA ABA, na mesma passada: a pílula "Não lidas" do
+  --  painel filtra a lista DA ABA, e o número dela tem de ser o da aba. Com
+  --  o do telefone inteiro, ela diria 10 numa aba em que o filtro mostra 6 —
+  --  e as outras 4 parecem ter sumido, quando estão na aba ao lado.
   -- ----------------------------------------------------------
   execute $x$
     create or replace function public.zorvin_contar_situacoes(p_telefone uuid)
@@ -886,7 +891,11 @@ begin
       select jsonb_build_object(
                'aguardando', count(*) filter (where c.situacao = 'aguardando'),
                'aberto',     count(*) filter (where c.situacao = 'aberto'),
-               'finalizado', count(*) filter (where c.situacao = 'finalizado'))
+               'finalizado', count(*) filter (where c.situacao = 'finalizado'),
+               'nao_lidas',  jsonb_build_object(
+                 'aguardando', count(*) filter (where c.situacao = 'aguardando' and coalesce(c.nao_lidas, 0) > 0),
+                 'aberto',     count(*) filter (where c.situacao = 'aberto' and coalesce(c.nao_lidas, 0) > 0),
+                 'finalizado', count(*) filter (where c.situacao = 'finalizado' and coalesce(c.nao_lidas, 0) > 0)))
         from public.conversas c
        where c.advogado_id = p_telefone
          and not coalesce((to_jsonb(c) ->> 'arquivada')::boolean, false)
