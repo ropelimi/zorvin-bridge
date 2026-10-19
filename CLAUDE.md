@@ -1677,6 +1677,142 @@ Duas pegas trouxeram, além da conferência certa, falhas de assunto alheio
 conferência certa estava em todas; a suíte normal, uma prova de cada vez, não
 tem esse atropelo. Pega se lê, e não só se conta.
 
+## Aguardando, em aberto e finalizados (script 028, 19/10)
+
+Pedido do Rodrigo: o que o DataCrazy faz nas conversas, *"para facilitar a
+organização"* — três abas que separam a lista, e um protocolo por
+atendimento. `sql/automaticos/028-aguardando-em-aberto-e-finalizados.sql`.
+
+Decidido com ele: o **"Já tratei" vira o "Finalizar"** (um botão só, com a
+mesma checklist, e o relatório continua contando); **o que já existe não muda
+de sentido** (*"o que estiver como Já tratei fica como finalizado. Caso o
+cliente tenha enviado mensagem após já ter sido finalizado, então a conversa
+deve ficar aberta novamente, porém já com a tratativa"*); Aguardando e Em
+aberto são **abas separadas**; e o protocolo é **só da equipe**.
+
+### As regras
+
+| a conversa | fica |
+|---|---|
+| a equipe **nunca agiu** nela (nenhuma mensagem nossa, nem do celular; nenhum "Já tratei" que valha) | **aguardando** |
+| a equipe já agiu, e o atendimento de agora não foi fechado | **em aberto** |
+| o atendimento de agora foi fechado por um "Já tratei" | **finalizada** |
+
+- **A resposta automática fora do horário não é gente**, e mora fora de
+  `mensagens`: não tira ninguém de "aguardando".
+- **Só o cliente reabre sozinho.** A mensagem do cliente depois da
+  finalização abre um **atendimento novo, com protocolo novo**, e a conversa
+  volta para *em aberto* — e não para *aguardando*: "o cliente em si já foi
+  tratado". A mensagem da equipe numa finalizada não reabre nada (é o
+  "obrigado, até mais" depois de finalizar).
+- **A mensagem atrasada com data de antes da finalização não reabre** — a
+  régua da fila de espera (005): o que o cliente escreveu antes do "Já
+  tratei" está coberto por ele.
+- **Finalizar tira da fila de espera**, em toda finalização: o gatilho grava
+  `tratada_em` e apaga `esperando_desde`. Antes, o "Já tratei" de uma conversa
+  respondida só registrava — e uma finalizada dizendo "esperando há 5 dias"
+  seria a aba e a fila dizendo coisas opostas.
+
+### O Reabrir tem dois sentidos, e os dois existem
+
+- **Reabrir, para continuar** — o pedido do DataCrazy. Em aberto, com
+  **protocolo novo**; a finalização de antes **continua contando**. A tela
+  pede gravando `situacao = 'aberto'` numa finalizada.
+- **Desfazer, porque foi engano** — o "Voltar para a fila" de sempre (marcar
+  o clique como desfeito). O **mesmo** atendimento volta a ficar aberto, e o
+  relatório deixa de contá-lo. Se outro clique sobrou nele (duas pessoas
+  finalizaram juntas), continua fechado pelo que sobrou.
+
+**Reabrir para continuar não desfaz o registro de ninguém**, e é decisão: um
+"Reabrir" que apagasse do relatório o "Já tratei" de verdade de uma colega,
+só porque alguém quis voltar a falar com o cliente, seria trabalho sumindo
+calado.
+
+### Quem escreve a situação é o banco
+
+`conversas.situacao` e `conversas.protocolo` ficam na própria conversa — a
+lista filtra por elas, e o tempo real já leva a mudança a todo painel —, mas
+quem as escreve são os gatilhos: a mensagem que entra
+(`zorvin_situacao_da_mensagem`), o clique (`zorvin_situacao_do_clique`,
+**antes** de gravá-lo, para ligar o clique ao atendimento em
+`zorvin_tratamentos.atendimento_id`) e o clique desfeito
+(`zorvin_situacao_desfeita`).
+
+**A guarda** (`zorvin_situacao_guardada`, `before update of situacao,
+protocolo`) recusa com 42501 qualquer outra mudança feita pela tela. Passam:
+os gatilhos (gravam de dentro de outro gatilho — `pg_trigger_depth() > 1`) e
+quem não entrou (`auth.uid()` nulo: a ponte, o editor, a montagem). Ela só
+dispara quando a gravação **menciona** as duas colunas: a prévia, as não
+lidas e a espera, que mexem na conversa a cada mensagem, nem passam por ali.
+
+`zorvin_atendimentos` é o histórico, um por protocolo (`2026-000123`: o ano
+de quando começou, no fuso de São Paulo, e um número que só cresce — **e
+nunca é cortado**: `lpad` corta o texto maior que a largura, e o milionésimo
+viraria o número de outro). Quem entrou **lê** os das conversas que vê e
+**não escreve nenhum** — a tabela nasce aberta pela herança da Supabase, e
+tudo é tirado antes de a leitura ser devolvida.
+
+**O número ao lado de cada aba** vem de `zorvin_contar_situacoes(p_telefone)`,
+uma pergunta só (`security invoker`: conta o que quem pergunta enxerga). Fica
+de fora o que a lista também não mostra — a arquivada e a conversa sem
+mensagem —, senão o número diria uma coisa e a lista outra. `arquivada` vem
+por `to_jsonb`: a coluna foi criada à mão e não está em script nenhum, e uma
+função `sql` que a citasse pelo nome não seria criada num banco sem ela.
+
+**A ponte só faz uma coisa nova:** depois de juntar duas conversas
+(`mudarDeConversa`), pede `zorvin_recontar_situacao` para a conversa que
+fica. Mudar mensagem de casa é um UPDATE, e o gatilho só vê mensagem que
+entra: sem a conta, a finalizada que recebeu da outra uma pergunta do cliente
+continuaria nas finalizadas. Sem o 028, a função não existe e nada muda.
+
+### A montagem, e as travas do começo
+
+Na rodada que **cria** a tabela, cada "Já tratei" não desfeito fecha um
+atendimento e o que o cliente escreveu depois abre o seguinte; os protocolos
+saem numerados **pela data** em que cada atendimento começou. **Rodar de novo
+não renumera nada** — protocolo que muda de número deixa de ser protocolo. O
+que rodar de novo faz é **consertar** quem ficou fora da regra
+(`zorvin_situacao_fora_da_regra`, a mesma pergunta da conferência).
+
+**As travas do começo são a ordem do webhook**: `zorvin_tratamentos` e
+`mensagens` primeiro, `conversas` depois. **Medido na sabotagem que as
+tira:** a mensagem que chega no meio da instalação trava com ela — o
+Postgres derruba uma das duas com `deadlock detected`. Com as travas, o
+webhook espera um segundo e entra com o gatilho já valendo.
+
+Medido num banco do tamanho do escritório (2.500 conversas, 100 mil
+mensagens): a instalação leva **0,8 s**, e o gatilho custa ~0,08 ms por
+mensagem.
+
+### O que isto não faz, ainda
+
+A **contabilização** do DataCrazy (relatório por protocolo, tempo até a
+primeira resposta, tempo até finalizar). Os campos nascem aqui (`aberto_em`,
+`primeira_resposta_em`, `finalizado_em`); a tela, não.
+
+### As provas
+
+Seção 67, num Postgres de verdade, obrigatória na integração contínua:
+**78 conferências, 33 sabotagens e 33 pegas**, todas limpas, rodadas em
+cópias e lidas uma a uma. E a 57c-bis e a 57c-ter, da junção: **5 sabotagens
+e 5 pegas**.
+
+**Três vazaram primeiro, e as três eram minhas:**
+
+- **A trava da conversa** (`for update`) vazou porque o gatilho da espera
+  também trava a mesma linha, por acaso, antes do nosso. A cena das duas
+  mensagens ao mesmo tempo desliga o gatilho da espera: quem segura a
+  corrida tem de ser a trava do 028, e não um efeito colateral de outro
+  script.
+- **A finalizada fora da fila estava escrita em dois lugares** — na montagem
+  e no conserto do fim —, e um cobria a falta do outro: as duas sabotagens
+  vazavam. Ficou uma escrita só (o conserto), e a sabotagem que a tira é
+  pega.
+
+**E duas sabotagens pegavam estourando a prova** — uma conferência lia o
+segundo atendimento que a sabotagem não deixava existir. Prova que estoura
+não diz qual conferência viu o defeito: os acessos passaram a ser guardados.
+
 ## A auditoria de 07/10
 
 Varredura inteira da ponte e dos scripts, cada achado conferido antes de
@@ -1943,8 +2079,9 @@ Documentação: https://docs.uazapi.com/ (carrega via JS; não dá para ler com 
 
 - `advogados` — id, nome, numero, instancia, token, servidor, foto_url, ativo
 - `contatos` — id, numero (unique), nome, foto_url
-- `conversas` — id, advogado_id, contato_id (unique juntos), ultima_mensagem, ultima_atividade, nao_lidas
+- `conversas` — id, advogado_id, contato_id (unique juntos), ultima_mensagem, ultima_atividade, nao_lidas; e, desde o 028, situacao ('aguardando'|'aberto'|'finalizado') e protocolo, escritos só pelos gatilhos
 - `mensagens` — id, conversa_id, origem ('contato'|'advogado'), tipo, texto, midia_url, midia_mime, id_uazapi (unique), status
+- `zorvin_atendimentos` — um por protocolo (028): quando abriu, por quê, a primeira resposta, quando e quem finalizou
 - `fila_envio` — id, conversa_id, texto, status ('pendente'|'enviando'|'enviada'|'erro'), erro_detalhe
 
 Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realtime ligado em `mensagens`, `conversas`, `fila_envio`. RLS ligado com políticas para `authenticated` (a ponte não é afetada — usa service_role).
