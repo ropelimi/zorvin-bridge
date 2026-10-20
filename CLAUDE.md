@@ -1690,6 +1690,12 @@ cliente tenha enviado mensagem após já ter sido finalizado, então a conversa
 deve ficar aberta novamente, porém já com a tratativa"*); Aguardando e Em
 aberto são **abas separadas**; e o protocolo é **só da equipe**.
 
+**Os nomes das abas na tela mudaram em 20/10**, a pedido do Rodrigo:
+"Aguardando" virou **"Novos"** e "Em aberto" virou **"Em Atendimento"**. Os
+valores do banco (`conversas.situacao`) continuam `aguardando`, `aberto` e
+`finalizado`: trocar o nome é coisa da tela, e trocar o valor seria regravar
+cada conversa e mexer nos gatilhos daqui.
+
 ### As regras
 
 | a conversa | fica |
@@ -1791,9 +1797,10 @@ mensagem.
 
 ### O que isto não faz, ainda
 
-A **contabilização** do DataCrazy (relatório por protocolo, tempo até a
+~~A **contabilização** do DataCrazy (relatório por protocolo, tempo até a
 primeira resposta, tempo até finalizar). Os campos nascem aqui (`aberto_em`,
-`primeira_resposta_em`, `finalizado_em`); a tela, não.
+`primeira_resposta_em`, `finalizado_em`); a tela, não.~~ **Feita** — ver "A
+contabilização dos atendimentos (script 029, 20/10)", logo abaixo.
 
 ### As provas
 
@@ -1817,6 +1824,84 @@ e 5 pegas**.
 **E duas sabotagens pegavam estourando a prova** — uma conferência lia o
 segundo atendimento que a sabotagem não deixava existir. Prova que estoura
 não diz qual conferência viu o defeito: os acessos passaram a ser guardados.
+
+## A contabilização dos atendimentos (script 029, 20/10)
+
+Pedido do Rodrigo, depois das abas do 028: a "contabilização" do DataCrazy —
+quantos atendimentos houve, quanto o cliente esperou pela primeira resposta e
+quanto levou até finalizar.
+`sql/automaticos/029-a-contabilizacao-dos-atendimentos.sql` cria
+`zorvin_relatorio_atendimentos(p_desde, p_ate, p_quem, p_fuso, p_telefone,
+p_departamento, p_limite)`. A tela é a seção "Protocolos de atendimento", no
+alto do Painel de números (ver o CLAUDE.md do painel).
+
+**Um atendimento é um protocolo, e ele só entra no total quando a equipe
+começa**: alguém respondeu, alguém finalizou, ou foi a própria equipe que
+abriu (a conversa começada por nós, o Reabrir). É a regra que o Rodrigo
+copiou do DataCrazy: *"as mensagens que permanecem com o status de Aguardando
+não somam no volume de 'Quantidade Total' até que a interação humana de fato
+comece"*. O protocolo que o cliente abriu e em que ninguém mexeu vem à parte,
+como **esperando resposta**.
+
+**O cliente que volta é decisão.** A conversa finalizada em que o cliente
+escreve de novo vai para "Em Atendimento" (o 028), mas o protocolo novo dela
+só entra no total quando alguém responder: contá-lo antes seria contar
+trabalho que ainda não aconteceu. É a mensagem que "não teve resposta", nas
+palavras dele.
+
+| | o que é |
+|---|---|
+| total | protocolos abertos no período em que a equipe começou |
+| em atendimento | começados e ainda não finalizados |
+| finalizados | fechados pelo "Finalizar" — o total é a soma dos dois de cima |
+| esperando resposta | abertos pelo cliente e que ninguém tocou — fora do total |
+| até a primeira resposta | só nos que o CLIENTE abriu: nos nossos e no Reabrir não houve espera |
+| até finalizar | da abertura do protocolo ao "Finalizar" |
+
+**O período é o da abertura, para tudo**: um eixo só faz as contas fecharem.
+**O período anterior, do mesmo tamanho, vem só para o total** — comparar
+quantos ainda estão em atendimento entre dois meses mediria só que o mês
+velho teve mais tempo para ser finalizado. Os tempos vêm em segundos, com
+mediana e média.
+
+**Quem deu a primeira resposta** sai da mensagem que o 028 anotou
+(`primeira_resposta_em`): `enviado_por_id`; a mandada pelo celular
+(`enviado_por` = "WhatsApp", sem id) vira a linha **"Pelo celular"**; a de
+antes de ago/2026, sem id, vale pelo nome. As duas colunas vêm por
+`to_jsonb(m)`, porque nasceram à mão em `sql/` — e em `mensagens` isso é
+seguro: nenhuma coluna dela é fechada (a régua do 012).
+
+**Quem não administra recebe os de que participou** (respondeu primeiro,
+finalizou ou reabriu), com o recorte feito aqui; os tempos são de quem fez; o
+"esperando resposta" vem nulo, porque ainda não é de ninguém. O "por pessoa"
+mostra todo mundo, para comparar. **Sem sessão o recorte continua ligado**:
+`v_so_meu` é separado de `v_quem`, e o `auth.uid()` nulo não vira "todo
+mundo". `security invoker`, e de `advogados` só `departamento_id`, pelo nome.
+
+**Sem o 028, `{"falta": "028"}`**, e não números zerados — que se leriam como
+"ninguém atendeu ninguém". **A conferência chama a função como
+`authenticated`**, sem filtro, com um telefone e com um departamento: a régua
+do 012 e do 019.
+
+Prova: seção 68, num Postgres de verdade, obrigatória na integração contínua:
+**52 conferências**, sobre dez protocolos com as contas feitas à mão (o
+celular, o nome antigo, o Reabrir, o cliente que voltou, o SDC que a atendente
+não vê) e com a chave da Uazapi **fechada** em `advogados`, como em produção —
+é nela que se vê se a função lê a linha inteira do telefone. **23 sabotagens,
+22 pegas e uma que vaza com razão**, todas rodadas em cópias e lidas uma a
+uma. A que vaza tira a guarda do "sem sessão": sem sessão, a regra de acesso
+de `conversas` já não deixa ver nada, e o recorte da função é a segunda
+guarda — a régua de 25/09.
+
+**Duas lições da primeira rodada:**
+
+- **a conferência que rodava como dona do banco passava.** A sabotagem que
+  tirava a troca de papel vazou, porque nenhuma cena fazia a função quebrar
+  SÓ para quem atende. Entrou a cena que tira de `authenticated` a leitura da
+  vista `equipe`: a conferência tem de dizer "NÃO — permission denied", e diz;
+- **duas sabotagens estouravam a seção** em vez de reprovar pelo nome — um
+  campo lido de uma resposta que já tinha falhado, e uma conferência que
+  esperava lista e recebeu o erro. Os acessos passaram a ser guardados.
 
 ## A auditoria de 07/10
 
