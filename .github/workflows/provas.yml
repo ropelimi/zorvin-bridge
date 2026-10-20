@@ -60,49 +60,23 @@ concurrency:
 jobs:
   ponte:
     name: Prova da ponte
-    runs-on: ubuntu-latest
-    # A suíte leva cerca de dois minutos (uma seção espera de propósito os 20s
-    # da rodada de sincronismo). Dez minutos é folga para uma máquina lenta, e
-    # é curto o bastante para uma prova pendurada não ficar horas de pé.
+    # A VERSÃO DO UBUNTU FICA ESCRITA, E NÃO "ubuntu-latest" (19/10).
+    #
+    # O banco de teste é o Postgres que vem instalado na máquina (ver o passo
+    # "Ligar o Postgres da máquina", abaixo), e a versão dele é a do Ubuntu:
+    # a 24.04 traz o Postgres 16, o mesmo em que as provas são escritas e
+    # rodadas à mão. Com "ubuntu-latest", no dia em que o GitHub trocasse a
+    # máquina por uma mais nova, o banco das provas mudaria de versão sozinho,
+    # sem ninguém ter pedido — e uma diferença de versão aparece como X
+    # vermelho com cara de defeito de código.
+    runs-on: ubuntu-24.04
+    # Quando este teto foi escrito a suíte levava uns dois minutos. MEDIDO em
+    # 19/10, na rodada semanal: 7min14s no passo das provas — e a seção 67, do
+    # script 028, acrescenta uns 3 segundos. Dez minutos ainda deixam quase
+    # três de folga para uma máquina lenta, e é curto o bastante para uma
+    # prova pendurada não ficar horas de pé. Ao acrescentar prova, olhe quanto
+    # a suíte já leva: o corte por relógio é um X vermelho igual ao de defeito.
     timeout-minutes: 10
-
-    # UM POSTGRES DE VERDADE, SÓ PARA A SEÇÃO DOS SCRIPTS AUTOMÁTICOS.
-    #
-    # Ela prova `create table`, `begin`/`rollback` e travas — coisas que o
-    # Supabase de mentira não tem como ter, porque ele fala PostgREST, que lê e
-    # escreve LINHAS. Provar isto contra o falso seria provar o falso.
-    #
-    # E a seção FALHA se este serviço não estiver aqui (ela confere `CI`), em
-    # vez de se pular sozinha em silêncio. Prova que se pula no lugar onde
-    # importa é prova que não existe — e este projeto já teve duas.
-    services:
-      postgres:
-        # A IMAGEM VEM DO ESPELHO DA AMAZON, E NÃO DO DOCKER HUB (13/10).
-        #
-        # É a mesma imagem oficial (`docker/library/postgres`), copiada pela
-        # Amazon para o registro público dela. Em 09/10 a PR do script 022
-        # ficou vermelha duas vezes SEM RODAR PROVA NENHUMA: este passo não
-        # conseguiu baixar `postgres:16` do Docker Hub — primeiro pelo limite
-        # de downloads de quem não tem conta (`toomanyrequests`), depois por
-        # o Docker Hub não responder. O X vermelho era igual ao de defeito de
-        # código.
-        #
-        # O espelho também tem limite para quem baixa sem conta: medido de
-        # outra máquina em 13/10, ele respondeu `Data limit exceeded`. Se isso
-        # aparecer aqui, o caminho é o Postgres que já vem instalado na
-        # máquina do GitHub, que não baixa nada.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_PASSWORD: prova
-        # Sem isto o `npm test` começa antes de o banco aceitar conexão, e a
-        # seção reprova falando de um assunto que não é o dela.
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-        ports:
-          - 5432:5432
 
     steps:
       - name: Baixar o código
@@ -139,9 +113,47 @@ jobs:
       - name: Instalar as dependências
         run: npm install --no-audit --no-fund
 
+      # UM POSTGRES DE VERDADE, PARA AS SEÇÕES DOS SCRIPTS DE BANCO.
+      #
+      # Elas provam `create table`, `begin`/`rollback`, travas, gatilhos e
+      # regras de acesso — coisas que o Supabase de mentira não tem como ter,
+      # porque ele fala PostgREST, que lê e escreve LINHAS. Provar isto contra
+      # o falso seria provar o falso.
+      #
+      # E as seções FALHAM se este banco não estiver aqui (elas conferem `CI`),
+      # em vez de se pularem sozinhas em silêncio. Prova que se pula no lugar
+      # onde importa é prova que não existe — e este projeto já teve duas.
+      #
+      # É O POSTGRES QUE JÁ VEM NA MÁQUINA, E NÃO UMA IMAGEM BAIXADA (19/10).
+      #
+      # Até aqui ele vinha numa imagem (`postgres:16`), baixada a cada rodada.
+      # Em 09/10 o Docker Hub recusou o download duas vezes (`toomanyrequests`,
+      # o limite de quem baixa sem conta) e a imagem passou a vir do espelho
+      # da Amazon. Em 19/10 a Amazon recusou também, duas rodadas seguidas da
+      # PR do script 028 (`toomanyrequests: Data limit exceeded`). Nas quatro
+      # vezes a PR ficou vermelha SEM RODAR PROVA NENHUMA, em 11 segundos — o
+      # X vermelho igual ao de defeito de código.
+      #
+      # A máquina do GitHub já traz o Postgres instalado e desligado. Ligá-lo
+      # não baixa nada, e não há limite de ninguém para esbarrar. É também o
+      # mesmo Postgres em que as provas são rodadas à mão: Ubuntu 24.04,
+      # versão 16, com a configuração de fábrica do Ubuntu.
+      #
+      # A senha é posta aqui porque, pela rede (`127.0.0.1`), o Ubuntu pede
+      # senha a todo mundo; pela porta local, `sudo -u postgres` entra sem
+      # ela. A última linha escreve a versão no registro da rodada: se um dia
+      # uma prova de banco reprovar sem explicação, é a primeira coisa a olhar.
+      - name: Ligar o Postgres da máquina
+        run: |
+          sudo systemctl start postgresql.service
+          for i in $(seq 1 30); do pg_isready -q -h 127.0.0.1 -p 5432 && break; sleep 1; done
+          pg_isready -h 127.0.0.1 -p 5432
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c "alter user postgres password 'prova'"
+          sudo -u postgres psql -At -c "select version()"
+
       - name: Rodar as provas
         run: npm test
         env:
-          # O endereço do serviço acima. A prova cria um banco novo por
-          # conferência, para uma não sujar a outra.
+          # O endereço do Postgres ligado no passo acima. A prova cria um banco
+          # novo por conferência, para uma não sujar a outra.
           PROVA_DATABASE_URL: postgresql://postgres:prova@127.0.0.1:5432/postgres

@@ -337,6 +337,16 @@ async function mudarDeConversa(origemId, destinoId) {
   const soma = (duas || []).reduce((t, c) => t + (c.nao_lidas || 0), 0);
   if (soma) await supabase.from('conversas').update({ nao_lidas: soma }).eq('id', destinoId);
 
+  // E A SITUAÇÃO DA CONVERSA QUE FICA (script 028). Mudar mensagem de casa é
+  // um UPDATE, e o gatilho que põe a conversa em "aguardando", "em aberto" ou
+  // "finalizada" só vê mensagem que ENTRA: sem esta conta, a conversa
+  // finalizada que recebeu da outra uma pergunta do cliente continuaria nas
+  // finalizadas. Sem o script, a função não existe e nada muda.
+  const { error: erroSituacao } = await supabase.rpc('zorvin_recontar_situacao', { p_conversa: destinoId });
+  if (erroSituacao && !semAFuncao(erroSituacao)) {
+    console.log(`Junção: não recontei a situação da conversa (${erroSituacao.message}).`);
+  }
+
   return { movidas: count || 0 };
 }
 
