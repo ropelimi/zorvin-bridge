@@ -132,6 +132,29 @@ Rotas:
 
 Envio: `setInterval` a cada 3s lê `fila_envio` (status `pendente`), envia e marca como `enviada`/`erro`.
 
+## O controle de atendimento do Vantoro — `POST /vantoro/atendimento` (21/10)
+
+A tela **Controle de atendimento** do Vantoro mostra as conversas abertas pela
+ordem de quem espera há mais tempo, com quando foi e quem mandou a última
+mensagem. O Vantoro **não lê o banco do Zorvin**: ele pede o resumo a esta
+porta, e a ponte responde com a função `zorvin_controle_atendimento` (script
+`sql/automaticos/030`).
+
+- **Assinada** como `nota-mudou` e `cliente-mudou`: HMAC-SHA256 do corpo com
+  `VANTORO_WEBHOOK_SECRET` no cabeçalho `X-Vantoro-Assinatura`. Sem o segredo,
+  recusa tudo.
+- **O pedido vence em 5 minutos** (`pedido_em` no corpo assinado). As outras
+  duas portas escrevem; esta LÊ a lista de conversas, e um pedido assinado
+  guardado não pode abri-la para sempre. Relógio da Render e do Vantoro
+  desencontrados em mais de 5 minutos fazem a porta recusar — o log diz.
+- **Devolve todos os telefones.** Quem vê o quê é decidido no Vantoro, com a
+  mesma permissão que ele manda para cá em `/usuarios`. Por isso a função do
+  banco só é executável pela `service_role` — liberada para quem entrou no
+  painel, ela seria um atalho por cima das permissões.
+- A espera é `conversas.esperando_desde` (a mesma do painel, com a carência e o
+  "Já tratei"); quem mandou por último vem da última linha de `mensagens`.
+- Provas: seções 69 (a porta) e 70 (a função, num Postgres de verdade).
+
 ## A entrada de mensagens — a caixa de entrada do webhook
 
 O "OK" que a ponte responde à Uazapi é uma **promessa**: dali em diante ela considera a
