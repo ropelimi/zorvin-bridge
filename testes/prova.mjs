@@ -11543,5 +11543,202 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
   }
 }
 
+// ==================================================================
+// 71. O controle de atendimento com departamento e finalizados (031)
+// ==================================================================
+//  Pedido de 22/10: a tela do Vantoro com os filtros do Zorvin — departamento,
+//  e as abas Novos, Em atendimento e Finalizados. O 031 manda o departamento
+//  de cada conversa e passa a mandar as finalizadas, cada grupo com o seu corte.
+{
+  console.log("\n71. O controle de atendimento com departamento e finalizados, num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 031 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const ANTES = ["004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql",
+                   "006-a-espera-nao-comeca-no-rabicho.sql", "020-a-auditoria-do-banco.sql",
+                   "028-aguardando-em-aberto-e-finalizados.sql", "030-o-controle-de-atendimento.sql"].map(ler);
+    const S031 = ler("031-o-controle-com-departamento-e-finalizados.sql");
+    const ESQUEMA = `
+-- O Zorvin mínimo da seção 68, com o que o 030 lê a mais: os nomes do contato,
+-- o elo com o Vantoro, o tipo da mensagem e o responsável da conversa.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, slug text unique, ordem int default 0);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text,
+  nome_zorvin text, vantoro_nome text, vantoro_cliente_id bigint);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, responsavel_id uuid references usuarios(id), unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, tipo text default 'texto', texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+create view equipe as select id, nome from usuarios;
+revoke all on equipe from anon;
+grant select on equipe to authenticated;
+revoke all on advogados from authenticated;
+grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b" };
+    const HA = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of ANTES) await c.query(s);
+      const conf = await guardado(() => aplicar(c, S031));
+      ok("o 031 aplica depois do 030, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("e sobra uma versão só da função", item(conf, /uma versão só/) === "true", JSON.stringify(conf));
+
+      await c.query("insert into departamentos (nome, slug, ordem) values ('Acordos', 'acordos', 2), ('Comercial', 'comercial', 1)");
+      await c.query(`insert into usuarios (id, nome) values ('${U.ana}', 'Ana'), ('${U.bia}', 'Bia')`);
+      const tel = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $2, $3) returning id",
+        [nome, `5511${crypto.randomInt(10 ** 8, 10 ** 9)}`, dep])).rows[0].id;
+      const ACORDOS = await tel("Linha Acordos", 1), COMERCIAL = await tel("Linha Comercial", 2), SEMDEP = await tel("Linha sem departamento", null);
+      let n = 0;
+      const conversa = async (linha = ACORDOS) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+                                  [`5511${String(++n).padStart(8, "0")}`, `Contato ${n}`])).rows[0].id;
+        const cv = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [linha, ct])).rows[0].id;
+        await c.query("update conversas set ultima_atividade = '-infinity' where id = $1", [cv]);
+        return cv;
+      };
+      const msg = async (cv, origem, horasAtras, porId = null) => {
+        await c.query(`insert into mensagens (conversa_id, origem, criado_em, texto, enviado_por, enviado_por_id, id_uazapi)
+                       values ($1, $2, $3, 'x', $4, $5, $6)`,
+          [cv, origem, HA(horasAtras), porId ? "Ana" : null, porId, `id-${crypto.randomBytes(4).toString("hex")}`]);
+        await c.query("update conversas set ultima_atividade = greatest(ultima_atividade, $2) where id = $1", [cv, HA(horasAtras)]);
+      };
+      const finalizar = async (cv, horasAtras, quem) => {
+        await c.query("update conversas set situacao = 'finalizado' where id = $1", [cv]);
+        await c.query(`update zorvin_atendimentos set finalizado_em = $2, finalizado_por = $3
+                        where protocolo = (select protocolo from conversas where id = $1)`, [cv, HA(horasAtras), quem]);
+      };
+
+      // A cena:
+      //   NOVO     no Acordos: o cliente escreveu há 2 h, ninguém da equipe agiu
+      //   ATEND    no Comercial: o cliente escreveu, a Ana respondeu
+      //   SEMDEPC  num telefone sem departamento: o cliente escreveu há 1 h
+      //   FIN1     finalizada pela Bia há 3 h (a mais recente)
+      //   FIN2     finalizada pela Ana há 10 h
+      //   FIN3     finalizada há 20 h
+      //   FINVELHA finalizada, sem movimento há 70 dias — sai
+      const NOVO = await conversa(ACORDOS); await msg(NOVO, "contato", 2);
+      const ATEND = await conversa(COMERCIAL); await msg(ATEND, "contato", 6); await msg(ATEND, "advogado", 5, U.ana);
+      const SEMDEPC = await conversa(SEMDEP); await msg(SEMDEPC, "contato", 1);
+      const FIN1 = await conversa(ACORDOS); await msg(FIN1, "contato", 4); await msg(FIN1, "advogado", 3.5, U.ana); await finalizar(FIN1, 3, U.bia);
+      const FIN2 = await conversa(ACORDOS); await msg(FIN2, "contato", 12); await msg(FIN2, "advogado", 11, U.ana); await finalizar(FIN2, 10, U.ana);
+      const FIN3 = await conversa(COMERCIAL); await msg(FIN3, "contato", 22); await msg(FIN3, "advogado", 21, U.ana); await finalizar(FIN3, 20, U.ana);
+      const FINVELHA = await conversa(ACORDOS); await msg(FINVELHA, "contato", 71 * 24); await msg(FINVELHA, "advogado", 70 * 24, U.ana);
+      await finalizar(FINVELHA, 70 * 24, U.ana);
+
+      // COMO A PONTE CHAMA: só p_dias e p_limite, por nome — o que o PostgREST manda.
+      const resumo = (await c.query("select public.zorvin_controle_atendimento(p_dias => 60, p_limite => 3000) r")).rows[0].r;
+      const linhas = resumo?.conversas || [];
+      const de = (cv) => linhas.find((l) => l.conversa_id === cv);
+      ok("a ponte chama como sempre chamou, e a função responde", linhas.length > 0, JSON.stringify(resumo));
+      ok("vêm as três abertas e as três finalizadas recentes",
+         linhas.length === 6 && [NOVO, ATEND, SEMDEPC, FIN1, FIN2, FIN3].every((cv) => de(cv)),
+         JSON.stringify(linhas.map((l) => [l.situacao, l.conversa_id])));
+      ok("a finalizada parada há 70 dias fica de fora", !de(FINVELHA), "");
+      ok("a situação vem de cada uma: novo, em atendimento e finalizado",
+         de(NOVO)?.situacao === "aguardando" && de(ATEND)?.situacao === "aberto" && de(FIN1)?.situacao === "finalizado",
+         JSON.stringify([de(NOVO)?.situacao, de(ATEND)?.situacao, de(FIN1)?.situacao]));
+      ok("as abertas vêm antes, e as finalizadas da mais recente para a mais antiga",
+         JSON.stringify(linhas.slice(3).map((l) => l.conversa_id)) === JSON.stringify([FIN1, FIN2, FIN3])
+           && linhas.slice(0, 3).every((l) => l.situacao !== "finalizado"),
+         JSON.stringify(linhas.map((l) => l.conversa_id)));
+      ok("a finalizada diz quando e por quem", de(FIN1)?.finalizado_por === "Bia"
+         && Math.abs(Date.parse(de(FIN1)?.finalizado_em) - Date.parse(HA(3))) < 5000, JSON.stringify(de(FIN1)));
+      ok("a aberta não traz finalização", de(ATEND)?.finalizado_em === null && de(ATEND)?.finalizado_por === null, JSON.stringify(de(ATEND)));
+      ok("o departamento vem com nome, chave e ordem", de(NOVO)?.departamento === "Acordos"
+         && de(NOVO)?.departamento_slug === "acordos" && de(NOVO)?.departamento_ordem === 2
+         && de(ATEND)?.departamento === "Comercial", JSON.stringify([de(NOVO), de(ATEND)]));
+      ok("o telefone sem departamento vem sem departamento, e não some", Boolean(de(SEMDEPC)) && de(SEMDEPC)?.departamento === null,
+         JSON.stringify(de(SEMDEPC)));
+      ok("as colunas que só ordenam não saem na resposta", !("grupo" in (de(NOVO) || {})) && !("o1" in (de(NOVO) || {})),
+         JSON.stringify(Object.keys(de(NOVO) || {})));
+
+      // CADA GRUPO COM O SEU CORTE.
+      const duasFin = (await c.query("select public.zorvin_controle_atendimento(60, 3000, 2) r")).rows[0].r?.conversas || [];
+      ok("o limite das finalizadas leva as mais antigas, e não mexe nas abertas",
+         duasFin.filter((l) => l.situacao === "finalizado").map((l) => l.conversa_id).join() === [FIN1, FIN2].join()
+           && duasFin.filter((l) => l.situacao !== "finalizado").length === 3, JSON.stringify(duasFin.map((l) => l.conversa_id)));
+      const semFin = (await c.query("select public.zorvin_controle_atendimento(60, 3000, 0) r")).rows[0].r?.conversas || [];
+      ok("pedindo zero finalizadas, só as abertas", semFin.length === 3 && semFin.every((l) => l.situacao !== "finalizado"), String(semFin.length));
+      const umaAberta = (await c.query("select public.zorvin_controle_atendimento(60, 1) r")).rows[0].r?.conversas || [];
+      ok("e o limite das abertas não corta finalizada", umaAberta.filter((l) => l.situacao !== "finalizado").length === 1
+         && umaAberta.filter((l) => l.situacao === "finalizado").length === 3, JSON.stringify(umaAberta.map((l) => l.situacao)));
+
+      const priv = (await c.query(`select has_function_privilege('anon', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') a,
+                                          has_function_privilege('authenticated', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') b,
+                                          has_function_privilege('service_role', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') s`)).rows[0];
+      ok("só a ponte chama a função nova", priv && priv.a === false && priv.b === false && priv.s === true, JSON.stringify(priv));
+
+      const de_novo = await guardado(() => aplicar(c, S031));
+      ok("rodar de novo não estraga nada", Array.isArray(de_novo) && !defeito(de_novo), JSON.stringify(de_novo));
+
+      const limpo = await bancoNovo();
+      await limpo.query(ESQUEMA.split("create table departamentos")[0]);
+      const r0 = await guardado(() => aplicar(limpo, S031));
+      ok("num banco sem o Zorvin, o 031 aplica e não acusa defeito", Array.isArray(r0) && !defeito(r0), JSON.stringify(r0));
+    } catch (e) {
+      ok("a seção 71 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
