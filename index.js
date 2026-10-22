@@ -5703,6 +5703,79 @@ app.post('/vantoro/cliente-mudou', async (req, res) => {
   return res.status(200).json({ ok: true, ligados: ligados.length, renomeados, desligados });
 });
 
+// =====================================================================
+//  O CONTROLE DE ATENDIMENTO DO VANTORO — POST /vantoro/atendimento
+// =====================================================================
+//
+//  Pedido do escritório (21/10): uma tela no Vantoro com as conversas pela
+//  ordem de quem espera há mais tempo, com quando foi e quem mandou a última
+//  mensagem. O Vantoro não lê o banco do Zorvin — dar a ele a chave daqui seria
+//  dar a chave de todas as conversas a mais um servidor. Ele pede o RESUMO a
+//  esta porta, e a ponte, que já tem a chave, responde.
+//
+//  POR QUE POST, E NÃO GET: o que prova que o pedido veio do Vantoro é a
+//  assinatura do CORPO, a mesma régua das duas portas acima. Um GET não tem
+//  corpo para assinar.
+//
+//  E O PEDIDO VENCE EM CINCO MINUTOS. As duas portas acima ESCREVEM, e repetir
+//  um aviso velho delas não faz estrago (a nota mais nova vence). Esta LÊ — e
+//  um pedido assinado, se alguém o guardasse, abriria a lista de conversas para
+//  sempre. Com `pedido_em` dentro do que é assinado, guardar não adianta.
+//
+//  A REGRA DE QUEM VÊ O QUÊ fica do lado do Vantoro: ela é definida lá (é a
+//  mesma lista que a ponte busca em /usuarios), e quem decide o que cada pessoa
+//  vê na tela de lá é ele. Daqui sai o resumo de todos os telefones — por isso
+//  a porta só atende a assinatura, e a função do banco só atende a ponte.
+const ATENDIMENTO_VALE_MS = 5 * 60 * 1000;
+
+function inteiroEntre(valor, minimo, maximo, padrao) {
+  const n = Number.parseInt(valor, 10);
+  if (!Number.isFinite(n)) return padrao;
+  return Math.min(Math.max(n, minimo), maximo);
+}
+
+app.post('/vantoro/atendimento', async (req, res) => {
+  const conferencia = assinaturaDoVantoroConfere(req);
+  if (!conferencia.ok) {
+    console.warn(`Pedido do controle de atendimento recusado: ${conferencia.motivo}.`
+      + (conferencia.motivo === 'sem-segredo'
+        ? ' VANTORO_WEBHOOK_SECRET não está preenchida na ponte — preencha com o'
+          + ' MESMO valor de ZORVIN_WEBHOOK_SECRET no Vantoro.'
+        : ''));
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  const corpo = req.body || {};
+  const pedidoEm = Date.parse(String(corpo.pedido_em || ''));
+  if (!Number.isFinite(pedidoEm) || Math.abs(Date.now() - pedidoEm) > ATENDIMENTO_VALE_MS) {
+    // A MESMA RESPOSTA da assinatura errada, e o motivo só no log: quem guardou
+    // um pedido velho não precisa saber que foi a data que o entregou.
+    console.warn('Pedido do controle de atendimento recusado: pedido vencido ou sem data'
+      + ' (o relógio da Render e o do Vantoro discordam em mais de 5 minutos?).');
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  const dias = inteiroEntre(corpo.dias, 1, 365, 60);
+  const limite = inteiroEntre(corpo.limite, 1, 5000, 3000);
+  const { data, error } = await supabase.rpc('zorvin_controle_atendimento',
+    { p_dias: dias, p_limite: limite });
+  if (error) {
+    // SEM A FUNÇÃO, A FRASE DIZ QUAL SCRIPT. É o caso do primeiro dia: o
+    // Vantoro publicado antes de a ponte aplicar o 030.
+    const semFuncao = error.code === 'PGRST202' || /zorvin_controle_atendimento/.test(error.message || '');
+    console.error('Controle de atendimento: o banco não respondeu o resumo:', error.message);
+    return res.status(503).json({
+      ok: false,
+      erro: semFuncao
+        ? 'O banco do Zorvin ainda não tem o resumo das conversas (script 030).'
+        : 'O banco do Zorvin não respondeu o resumo das conversas.',
+    });
+  }
+  const conversas = Array.isArray(data && data.conversas) ? data.conversas : [];
+  return res.json({ ok: true, gerado_em: (data && data.gerado_em) || new Date().toISOString(),
+                    conversas });
+});
+
 // ============================================================
 //  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
 // ============================================================
