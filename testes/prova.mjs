@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { subirFalsoSupabase, subirFalsaUazapi, subirFalsoVantoro } from "./falso-supabase.mjs";
 
 let falhas = 0, feitas = 0;
@@ -41,12 +42,12 @@ async function portaLivre() {
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false, rpcs = {} } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false, rpcs = {}, deposito = {} } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar, semColunas, semTabelas, bilhetesQueFalham, rpcs,
+    quebrar, semColunas, semTabelas, bilhetesQueFalham, rpcs, deposito,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
@@ -69,6 +70,12 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
     env: { ...process.env, PORT: String(porta),
            SUPABASE_URL: sb.url, SUPABASE_SERVICE_KEY: "chave-de-mentira",
            VANTORO_API_URL: van ? van.url : "", VANTORO_API_TOKEN: van ? "tok-vantoro" : "",
+           // O RESGATE DEPOIS DE SUBIR fica para daqui a uma hora, e não para
+           // daqui a um minuto: uma prova longa veria, no meio dela, a ponte
+           // indo atrás de um anexo vazio que a própria prova plantou — e a
+           // conta de pedidos dela mudaria de assunto. A seção 72, que é a
+           // dele, encurta.
+           RESGATE_AO_SUBIR_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -11736,6 +11743,432 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
       await raiz.end();
+    }
+  }
+}
+
+// ==================================================================
+//  72. O ANEXO GRANDE NÃO DERRUBA A PONTE (22/10)
+//
+//  E-mail da Render, 22/10 às 11:13: "zorvin-bridge exceeded its memory
+//  limit". Um PDF de 19,9 MB num grupo com cinco telefones do escritório:
+//  cinco avisos da mesma mensagem em 365 ms, cinco downloads do mesmo
+//  arquivo, inteiros na memória, ao mesmo tempo. Na bancada, a ponte de antes
+//  foi a 586 MB; o plano gratuito da Render tem 512.
+//
+//  A MEDIDA É A MEMÓRIA DO PROCESSO — VmHWM, o pico desde que ele subiu,
+//  lido em /proc. E ao lado dela os números que não dependem do coletor de
+//  lixo: quantas vezes o arquivo foi pedido à Uazapi, quantas vezes subiu ao
+//  depósito, quantos downloads estiveram no ar juntos, e a impressão digital
+//  do que chegou.
+// ==================================================================
+{
+  console.log("\n72. O anexo grande não derruba a ponte");
+
+  const picoDeMemoria = (t) => {
+    try {
+      const s = fs.readFileSync(`/proc/${t.filho.pid}/status`, "utf8");
+      const kb = Number((s.match(/VmHWM:\s+(\d+)/) || [])[1]);
+      return kb ? Math.round(kb / 1024) : null;
+    } catch (_) { return null; }
+  };
+  const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
+  // Bytes ALEATÓRIOS, e não "AAAA…": o base64 deles tem "/" e "+", que é
+  // onde um corte no lugar errado ou uma barra escapada estragam o arquivo.
+  const arquivoDe = (mb) => crypto.randomBytes(Math.round(mb * 1024 * 1024));
+  const MBs = (mb) => String(Math.round(mb * 1024 * 1024));
+  const TELEFONES = [TELEFONE, ...[2, 3, 4, 5].map((n) => ({
+    id: `adv-${n}`, nome: `Linha ${n}`, numero: `55119000000${n}`, token: `tok-${n}`,
+    servidor: null, ativo: true, departamento_id: 1 }))];
+  const GRUPO = "120363000000022010@g.us";
+  const CLIENTE = "5511988887777@s.whatsapp.net";
+  // O aviso de um documento, como o de 22/10: com `fileLength` em texto,
+  // que é como a Uazapi mandou nas cinco cópias.
+  const documento = ({ dono = TELEFONE.numero, id, mb = null, grupo = false, nome = "relatorio.pdf" }) => ({
+    EventType: "messages", owner: dono,
+    ...(grupo ? { chat: { id: GRUPO, name: "Equipe", isGroup: true } } : {}),
+    message: {
+      id, messageid: id, chatid: grupo ? GRUPO : CLIENTE, sender: CLIENTE, isGroup: grupo,
+      fromMe: false, wasSentByApi: false, type: "media", mediaType: "document",
+      messageType: "DocumentMessage", messageTimestamp: Date.now(), senderName: "Fulano",
+      content: { mimetype: "application/pdf", fileName: nome, ...(mb ? { fileLength: MBs(mb) } : {}) },
+    },
+  });
+  const mandarA = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo) });
+  const copiasDe = (t, id) => (t.sb.dados.mensagens || []).filter((m) => m.id_uazapi === id);
+  const comArquivo = (m) => String((m && m.midia_url) || "").includes("/storage/v1/object/public/anexos/recebidos/");
+  const todasComArquivo = (t, id, n) => copiasDe(t, id).length === n && copiasDe(t, id).every(comArquivo);
+  async function esperarAte(cond, ms = 30000) {
+    const limite = Date.now() + ms;
+    while (Date.now() < limite) { if (cond()) return true; await espera(100); }
+    return Boolean(cond());
+  }
+  // O pedido do arquivo: o da rota que serve. A primeira tentativa de cada
+  // ponte recém-subida passa antes pela rota que não serve (404), e essa não
+  // traz arquivo nenhum.
+  const pedidosDe = (t, id) => t.uaz.recebidas.filter((c) => c.caminho === "/message/download"
+    && c.corpo && c.corpo.id === id).length;
+  const pedidosDeDownload = (t) => t.uaz.recebidas.filter((c) => /download/.test(c.caminho)).length;
+  const subidasDe = (t, id) => t.sb.chamadas.filter((c) => c.metodo === "POST"
+    && c.caminho.startsWith(`/storage/v1/object/anexos/recebidos/${id}.`)).length;
+  const digitalDe = (t, id) => t.sb.digitais.get(`anexos/recebidos/${id}.pdf`) || null;
+  const subirCom = async (env = {}, uazapi = {}, extra = {}) => {
+    const t = await subirTudo(env, {
+      ...extra,
+      tabelas: { advogados: TELEFONES.map((x) => ({ ...x })), ...(extra.tabelas || {}) },
+      uazapi: { rotaDeDownload: "/message/download", mimeDoDownload: "application/pdf", ...uazapi },
+    });
+    for (const a of t.sb.dados.advogados) a.servidor = t.uaz.url;
+    return t;
+  };
+
+  // ---- 72a. o caso de 22/10: o mesmo PDF de 20 MB por cinco telefones ----
+  {
+    const pdf = arquivoDe(20);
+    const t = await subirCom({}, { arquivo: pdf, demoraDoDownload: 800 });
+    const ID = "PDF-GRUPO-1113";
+    await Promise.all(TELEFONES.map((tel) => mandarA(t, documento({ dono: tel.numero, id: ID, mb: 20, grupo: true }))));
+    await esperarAte(() => todasComArquivo(t, ID, 5));
+    const pico = picoDeMemoria(t);
+    console.log(`     cinco telefones, o mesmo PDF de 20 MB: pico de ${pico} MB (a ponte de antes ia a 586)`);
+    ok("as cinco cópias da mensagem ficam com o arquivo", todasComArquivo(t, ID, 5),
+       JSON.stringify(copiasDe(t, ID).map((m) => String(m.midia_url || "").slice(-30))));
+    ok("o arquivo é pedido à Uazapi uma vez, e não cinco", pedidosDe(t, ID) === 1, `foram ${pedidosDe(t, ID)}`);
+    ok("e sobe para o depósito uma vez", subidasDe(t, ID) === 1, `foram ${subidasDe(t, ID)}`);
+    ok("e chega inteiro e igual: a mesma impressão digital", digitalDe(t, ID) === sha(pdf),
+       `${digitalDe(t, ID)} ≠ ${sha(pdf)}`);
+    ok("e a memória da ponte fica longe dos 512 MB da Render", pico !== null && pico < 400,
+       pico === null ? "não consegui medir: /proc não respondeu" : `pico de ${pico} MB`);
+    await t.parar();
+  }
+
+  // ---- 72b. quatro PDFs diferentes de 20 MB, de uma vez ----
+  {
+    // O mesmo estouro por outro caminho: um cliente que manda quatro
+    // documentos escaneados juntos. Aqui não há o que juntar — são quatro
+    // arquivos —, e o que segura a memória é a fila.
+    const t = await subirCom({}, { arquivo: arquivoDe(20), demoraDoDownload: 600 });
+    const ids = [1, 2, 3, 4].map((n) => `PDF-DIFERENTE-${n}`);
+    await Promise.all(ids.map((id) => mandarA(t, documento({ id, mb: 20 }))));
+    await esperarAte(() => ids.every((id) => todasComArquivo(t, id, 1)), 45000);
+    const pico = picoDeMemoria(t);
+    console.log(`     quatro PDFs de 20 MB juntos: pico de ${pico} MB (a ponte de antes ia a 569)`);
+    ok("os quatro chegam", ids.every((id) => todasComArquivo(t, id, 1)),
+       JSON.stringify(ids.map((id) => comArquivo(copiasDe(t, id)[0]))));
+    ok("um arquivo grande de cada vez", t.uaz.picoDeDownloadsJuntos() === 1,
+       `${t.uaz.picoDeDownloadsJuntos()} downloads no ar ao mesmo tempo`);
+    ok("e a memória fica longe dos 512 MB", pico !== null && pico < 400,
+       pico === null ? "não consegui medir" : `pico de ${pico} MB`);
+    await t.parar();
+  }
+
+  // ---- 72c. os pequenos não esperam em fila indiana ----
+  {
+    // A fila existe para o grande. Quatro fotos de um cliente baixam três de
+    // cada vez — esperar uma por uma deixaria a conversa enchendo devagar sem
+    // necessidade nenhuma.
+    const t = await subirCom({}, { arquivo: arquivoDe(0.1), demoraDoDownload: 700 });
+    const ids = [1, 2, 3, 4].map((n) => `FOTO-PEQUENA-${n}`);
+    await Promise.all(ids.map((id) => mandarA(t, documento({ id, mb: 0.1 }))));
+    await esperarAte(() => ids.every((id) => todasComArquivo(t, id, 1)));
+    ok("os quatro pequenos chegam", ids.every((id) => todasComArquivo(t, id, 1)));
+    ok("três de cada vez, e não um por um", t.uaz.picoDeDownloadsJuntos() === 3,
+       `${t.uaz.picoDeDownloadsJuntos()} no ar juntos`);
+    await t.parar();
+  }
+
+  // ---- 72d. acima de 50 MB, nem se pede ----
+  {
+    const t = await subirCom({ ESPERA_DO_ANEXO_MS: "200,200" }, { arquivo: arquivoDe(0.1) });
+    await mandarA(t, documento({ id: "PDF-ENORME", mb: 60 }));
+    await esperarAte(() => copiasDe(t, "PDF-ENORME")[0]?.midia_erro, 8000);
+    await espera(800);   // tempo para as tentativas de novo, se houvesse
+    const m = copiasDe(t, "PDF-ENORME")[0];
+    ok("o arquivo de 60 MB não é pedido à Uazapi", pedidosDeDownload(t) === 0,
+       `foram ${pedidosDeDownload(t)} pedidos`);
+    ok("a mensagem diz por quê: o tamanho e o teto",
+       Boolean(m && /arquivo grande demais/.test(m.midia_erro || "") && /60,0 MB/.test(m.midia_erro || "")
+         && /50 MB/.test(m.midia_erro || "")), m && m.midia_erro);
+    ok("e diz o que fazer", /abra a conversa no celular/.test((m && m.midia_erro) || ""), m && m.midia_erro);
+    ok("e não promete um arquivo que não vem", Boolean(m && !comArquivo(m)), m && m.midia_url);
+    await t.parar();
+  }
+
+  // ---- 72e. sem tamanho no aviso, a leitura para no teto ----
+  {
+    // O aviso sem `fileLength` (63 desde 08/09) pode trazer um arquivo de
+    // qualquer tamanho. Com o teto em 2 MB, um arquivo de 3 MB tem de ser
+    // recusado lendo — nos dois formatos, com e sem o tamanho no cabeçalho —,
+    // e um de 1,5 MB tem de passar: um teto que recusa o que cabe é outro
+    // defeito.
+    const cenas = [
+      { nome: "o arquivo dentro do JSON", uazapi: {} },
+      { nome: "o arquivo dentro do JSON, aos pedaços", uazapi: { respostaEmPedacos: true } },
+      { nome: "o arquivo por endereço", uazapi: { formatoDoDownload: "endereco" } },
+      { nome: "o arquivo por endereço, aos pedaços", uazapi: { formatoDoDownload: "endereco", respostaEmPedacos: true } },
+    ];
+    for (const cena of cenas) {
+      const grande = await subirCom({ ANEXO_TETO_MB: "2" }, { arquivo: arquivoDe(3), ...cena.uazapi });
+      await mandarA(grande, documento({ id: "SEM-TAMANHO-3MB" }));
+      await esperarAte(() => copiasDe(grande, "SEM-TAMANHO-3MB")[0]?.midia_erro, 8000);
+      const m = copiasDe(grande, "SEM-TAMANHO-3MB")[0];
+      ok(`${cena.nome}: 3 MB sem tamanho no aviso é recusado lendo`,
+         Boolean(m && /arquivo grande demais/.test(m.midia_erro || "") && !comArquivo(m)),
+         JSON.stringify({ erro: m && m.midia_erro, url: m && m.midia_url }));
+      ok(`${cena.nome}: e nada sobe ao depósito`, subidasDe(grande, "SEM-TAMANHO-3MB") === 0,
+         `subiu ${subidasDe(grande, "SEM-TAMANHO-3MB")} vez(es)`);
+      await grande.parar();
+
+      const pequeno = arquivoDe(1.5);
+      const cabe = await subirCom({ ANEXO_TETO_MB: "2" }, { arquivo: pequeno, ...cena.uazapi });
+      await mandarA(cabe, documento({ id: "SEM-TAMANHO-1MB" }));
+      await esperarAte(() => todasComArquivo(cabe, "SEM-TAMANHO-1MB", 1), 8000);
+      ok(`${cena.nome}: 1,5 MB passa, e chega igual`,
+         todasComArquivo(cabe, "SEM-TAMANHO-1MB", 1) && digitalDe(cabe, "SEM-TAMANHO-1MB") === sha(pequeno),
+         JSON.stringify({ url: copiasDe(cabe, "SEM-TAMANHO-1MB")[0]?.midia_url,
+                          igual: digitalDe(cabe, "SEM-TAMANHO-1MB") === sha(pequeno) }));
+      await cabe.parar();
+    }
+  }
+
+  // ---- 72f. o arquivo que vem dentro do JSON chega igual ----
+  {
+    // Decodificado aos pedaços direto da resposta, e não pelo `JSON.parse`.
+    // A impressão digital é a única prova de que o corte entre os pedaços
+    // está no lugar certo: o tamanho seria o mesmo com o arquivo estragado.
+    const cenas = [
+      { nome: "dentro do JSON, com o tamanho no cabeçalho", uazapi: {} },
+      { nome: "dentro do JSON, aos pedaços", uazapi: { respostaEmPedacos: true } },
+      { nome: "dentro do JSON com as barras escapadas", uazapi: { escaparBarras: true } },
+      { nome: "por endereço", uazapi: { formatoDoDownload: "endereco" } },
+    ];
+    for (const cena of cenas) {
+      const pdf = arquivoDe(5);
+      const t = await subirCom({}, { arquivo: pdf, ...cena.uazapi });
+      await mandarA(t, documento({ id: "PDF-5MB", mb: 5 }));
+      await esperarAte(() => todasComArquivo(t, "PDF-5MB", 1), 15000);
+      ok(`${cena.nome}: o arquivo de 5 MB chega igual`,
+         todasComArquivo(t, "PDF-5MB", 1) && digitalDe(t, "PDF-5MB") === sha(pdf),
+         JSON.stringify({ url: copiasDe(t, "PDF-5MB")[0]?.midia_url, igual: digitalDe(t, "PDF-5MB") === sha(pdf) }));
+      await t.parar();
+    }
+  }
+
+  // ---- 72g. depois de subir, a ponte completa o que a queda deixou ----
+  {
+    // A cena de 22/10, como a ponte nova a encontra ao subir: as cinco cópias
+    // sem arquivo, e o arquivo no depósito desde 11:13:33.
+    const agora = Date.now();
+    const hora = 3600 * 1000;
+    const quando = (ms) => new Date(agora + ms).toISOString();
+    const contatos = [{ id: "ct-grupo", numero: `grupo:${GRUPO}`, nome: "Equipe" },
+                      { id: "ct-cli", numero: "5511988887777", nome: "Cliente" }];
+    const conversas = [
+      ...TELEFONES.map((tel, i) => ({ id: `cv-g${i}`, advogado_id: tel.id, contato_id: "ct-grupo" })),
+      { id: "cv-cli", advogado_id: TELEFONE.id, contato_id: "ct-cli" },
+    ];
+    const anexo = (id, conversa, criado, extra = {}) => ({
+      id: `m-${id}-${conversa}`, conversa_id: conversa, origem: "contato", tipo: "documento",
+      texto: null, midia_url: null, midia_mime: "application/pdf", midia_nome: "relatorio.pdf",
+      id_uazapi: id, status: "recebida", criado_em: quando(criado), ...extra });
+    // A JANELA DA PERSEGUIÇÃO, com as esperas de sempre (20 s, 1 min e
+    // 5 min) mais a folga de dez minutos: uns 16 minutos. O que chegou cinco
+    // minutos antes de a ponte subir estava no meio da perseguição do
+    // processo que caiu; o de duas horas antes já tinha sido perseguido até o
+    // fim, e pedir de novo a cada subida é o que a ponte que dorme e acorda
+    // faria a noite inteira.
+    const minuto = 60 * 1000;
+    const mensagens = [
+      ...conversas.slice(0, 5).map((c) => anexo("PDF-1113", c.id, -hora)),
+      ...conversas.slice(0, 3).map((c) => anexo("DOC-SO-NA-UAZAPI", c.id, -5 * minuto)),
+      anexo("DOC-ANTIGO-SO-NA-UAZAPI", "cv-cli", -2 * hora),
+      anexo("DOC-VELHO", "cv-cli", -72 * hora),
+      // A RECUSA DEFINITIVA DE CINCO MINUTOS ATRÁS: dentro da janela, e é por
+      // isso que só a recusa a segura. Duas horas atrás, a janela já a
+      // seguraria, e esta cena não diria nada sobre a recusa.
+      anexo("DOC-RECUSADO", "cv-cli", -5 * minuto, { midia_erro: "Message does not contain downloadable media" }),
+      anexo("DOC-DESTA-SUBIDA", "cv-cli", 10 * minuto),
+    ];
+    const pdf = arquivoDe(1);
+    const t = await subirCom({ RESGATE_AO_SUBIR_MS: "1500" }, { arquivo: pdf },
+      { tabelas: { contatos, conversas, mensagens },
+        // O DE TRÊS DIAS ATRÁS TAMBÉM ESTÁ NO DEPÓSITO: é assim que se vê que
+        // o resgate olha dois dias, e não mais. Sem ele lá, o resgate de um
+        // mês passaria por ele sem achar nada, e pareceria olhar dois dias.
+        deposito: { "anexos/recebidos/PDF-1113.pdf": 20889483, "anexos/recebidos/DOC-VELHO.pdf": 1000 } });
+    await esperarAte(() => todasComArquivo(t, "PDF-1113", 5) && todasComArquivo(t, "DOC-SO-NA-UAZAPI", 3), 15000);
+    await espera(1000);
+
+    ok("as cinco cópias de 22/10 ficam com o arquivo que já estava no depósito",
+       todasComArquivo(t, "PDF-1113", 5)
+         && copiasDe(t, "PDF-1113").every((m) => m.midia_url.endsWith("/recebidos/PDF-1113.pdf")),
+       JSON.stringify(copiasDe(t, "PDF-1113").map((m) => String(m.midia_url || "").slice(-30))));
+    ok("sem pedir o arquivo de novo à Uazapi", pedidosDe(t, "PDF-1113") === 0, `foram ${pedidosDe(t, "PDF-1113")}`);
+    ok("o que a queda cortou e não está no depósito é pedido à Uazapi, uma vez para as três cópias",
+       todasComArquivo(t, "DOC-SO-NA-UAZAPI", 3) && pedidosDe(t, "DOC-SO-NA-UAZAPI") === 1,
+       `${pedidosDe(t, "DOC-SO-NA-UAZAPI")} pedido(s); ${copiasDe(t, "DOC-SO-NA-UAZAPI").filter(comArquivo).length} de 3 com arquivo`);
+    ok("e chega igual", digitalDe(t, "DOC-SO-NA-UAZAPI") === sha(pdf));
+    ok("o de duas horas antes, que a perseguição já tinha terminado, não é pedido de novo à Uazapi",
+       !comArquivo(copiasDe(t, "DOC-ANTIGO-SO-NA-UAZAPI")[0]) && pedidosDe(t, "DOC-ANTIGO-SO-NA-UAZAPI") === 0,
+       `foram ${pedidosDe(t, "DOC-ANTIGO-SO-NA-UAZAPI")} pedido(s)`);
+    ok("o de três dias atrás fica como está, mesmo com o arquivo no depósito (o resgate olha dois dias)",
+       !comArquivo(copiasDe(t, "DOC-VELHO")[0]) && pedidosDe(t, "DOC-VELHO") === 0,
+       copiasDe(t, "DOC-VELHO")[0]?.midia_url);
+    ok("o que a Uazapi já disse que não tem não é perguntado de novo",
+       !comArquivo(copiasDe(t, "DOC-RECUSADO")[0]) && pedidosDe(t, "DOC-RECUSADO") === 0);
+    ok("o que chegou depois de subir é da perseguição desta ponte, e não do resgate",
+       !comArquivo(copiasDe(t, "DOC-DESTA-SUBIDA")[0]) && pedidosDe(t, "DOC-DESTA-SUBIDA") === 0);
+    ok("e o log diz quantos voltaram, e quantos ficaram para a porta",
+       /Resgate depois de subir: 9 anexo\(s\).*8 voltaram.* 1 anexo\(s\) ficaram para a porta \/anexos\/resgatar/
+         .test(t.registro.join("")),
+       (t.registro.join("").match(/Resgate depois de subir[^\n]*/) || ["(nenhuma linha)"])[0]);
+    await t.parar();
+  }
+
+  // ---- 72h. a porta de resgate pede uma vez por mensagem ----
+  {
+    const conversas = TELEFONES.map((tel, i) => ({ id: `cv-p${i}`, advogado_id: tel.id, contato_id: "ct-grupo" }));
+    const mensagens = conversas.map((c) => ({
+      id: `m-porta-${c.id}`, conversa_id: c.id, origem: "contato", tipo: "documento", texto: null,
+      midia_url: null, midia_mime: "application/pdf", midia_nome: "ata.pdf", id_uazapi: "PDF-PORTA",
+      status: "recebida", criado_em: new Date(Date.now() - 3600 * 1000).toISOString() }));
+    const t = await subirCom({ IMPORT_TOKEN: "senha-boa" }, {},
+      { tabelas: { contatos: [{ id: "ct-grupo", numero: `grupo:${GRUPO}`, nome: "Equipe" }], conversas, mensagens } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/anexos/resgatar?token=senha-boa&dias=7`);
+    const corpo = await r.json().catch(() => ({}));
+    ok("a porta enche as cinco cópias", corpo.recuperados === 5 && todasComArquivo(t, "PDF-PORTA", 5),
+       JSON.stringify(corpo).slice(0, 200));
+    ok("com um pedido à Uazapi, e não cinco", pedidosDe(t, "PDF-PORTA") === 1, `foram ${pedidosDe(t, "PDF-PORTA")}`);
+    await t.parar();
+  }
+
+  // ---- 72i. o envio em base64 espera a vez do arquivo grande ----
+  {
+    // A segunda tentativa de mandar um anexo (quando a Uazapi recusa o
+    // endereço) põe o arquivo inteiro na memória três vezes. Junto de um
+    // download grande, seria a queda de 22/10 por outro caminho: ela entra
+    // na mesma fila.
+    const DEMORA = 6000;
+    const t = await subirCom({}, { arquivo: arquivoDe(0.5), demoraDoDownload: DEMORA,
+                                   falharEnvio: { status: 400, corpo: { error: "url recusada" } } },
+      { tabelas: { contatos: [{ id: "ct-cli", numero: "5511988887777", nome: "Cliente" }],
+                   conversas: [{ id: "cv-cli", advogado_id: TELEFONE.id, contato_id: "ct-cli" }] } });
+    await mandarA(t, documento({ id: "PDF-CHEGANDO", mb: 20 }));
+    // O ENVIO ENTRA NA FILA COM O DOWNLOAD JÁ NO AR. O "OK" do aviso sai
+    // antes de a ponte tratá-lo, e na primeira escrita desta cena o envio
+    // chegou à fila antes do download começar: entrou primeiro, como a fila
+    // manda, e a cena não tinha o que medir.
+    await esperarAte(() => t.uaz.recebidas.some((c) => c.caminho === "/message/download"), 8000);
+    t.sb.dados.fila_envio.push({
+      id: 7101, conversa_id: "cv-cli", tipo: "documento", texto: "", status: "pendente",
+      midia_url: `${t.sb.url}/storage/v1/object/public/anexos/enviados/contrato.pdf`,
+      midia_mime: "application/pdf", midia_nome: "contrato.pdf", tentativas: 0,
+      criado_em: new Date().toISOString() });
+    await esperarAte(() => t.uaz.recebidas.some((c) => c.caminho === "/send/media"
+      && String(c.corpo && c.corpo.file || "").startsWith("data:")), DEMORA + 8000);
+    const download = t.uaz.recebidas.find((c) => c.caminho === "/message/download");
+    const porUrl = t.uaz.recebidas.find((c) => c.caminho === "/send/media"
+      && !String(c.corpo && c.corpo.file || "").startsWith("data:"));
+    const emBase64 = t.uaz.recebidas.find((c) => c.caminho === "/send/media"
+      && String(c.corpo && c.corpo.file || "").startsWith("data:"));
+    ok("a primeira tentativa, pelo endereço, sai sem esperar",
+       Boolean(download && porUrl && porUrl.quando < download.quando + DEMORA - 1000),
+       JSON.stringify({ download: download && download.quando, porUrl: porUrl && porUrl.quando }));
+    ok("a segunda, em base64, espera o arquivo grande terminar de chegar",
+       Boolean(download && emBase64 && emBase64.quando >= download.quando + DEMORA - 200),
+       JSON.stringify({ download: download && download.quando, base64: emBase64 && emBase64.quando,
+                        diferenca: download && emBase64 && emBase64.quando - download.quando }));
+    await t.parar();
+  }
+
+  // ---- 72j. o endereço que chega no meio do download não baixa de novo ----
+  {
+    // O resgate pelo `FileURL` (seção 18) e o download do aviso são duas
+    // portas para o MESMO arquivo. Chegando o endereço enquanto o download
+    // ainda está no ar, o resgate espera por ele, e não baixa uma segunda
+    // cópia por fora.
+    const pdf = arquivoDe(2);
+    const t = await subirCom({}, { arquivo: pdf, demoraDoDownload: 2000 });
+    await mandarA(t, documento({ id: "PDF-ENDERECO", mb: 2 }));
+    await esperarAte(() => t.uaz.recebidas.some((c) => c.caminho === "/message/download"), 8000);
+    await mandarA(t, { BaseUrl: t.uaz.url, EventType: "messages_update",
+      event: { Chat: CLIENTE, FileURL: `${t.uaz.url}/files/abc.pdf?assinatura=xyz`,
+               MessageIDs: ["PDF-ENDERECO"], Type: "Delivered" } });
+    await esperarAte(() => todasComArquivo(t, "PDF-ENDERECO", 1), 10000);
+    await espera(500);
+    const peloEndereco = t.uaz.recebidas.filter((c) => c.caminho.startsWith("/files/")).length;
+    ok("a mensagem fica com o arquivo", todasComArquivo(t, "PDF-ENDERECO", 1));
+    ok("o endereço que chegou no meio não é baixado por fora", peloEndereco === 0,
+       `o endereço foi baixado ${peloEndereco} vez(es)`);
+    ok("o arquivo sobe uma vez, e é o do download", subidasDe(t, "PDF-ENDERECO") === 1
+       && digitalDe(t, "PDF-ENDERECO") === sha(pdf), `subiu ${subidasDe(t, "PDF-ENDERECO")} vez(es)`);
+    await t.parar();
+  }
+
+  // ---- 72k. o arquivo dentro do JSON não passa pelo heap do JavaScript ----
+  {
+    // A leitura direta (`arquivoDentroDoJson`) economiza memória, e memória
+    // depende do coletor de lixo: um arquivo de 48 MB levou a ponte a 462 MB
+    // pelo caminho de sempre e a 355 pela leitura direta. Uma régua no meio
+    // disso seria sorte — e a primeira rodada de sabotagens deixou a leitura
+    // direta desligada passar, porque o arquivo chegava igual pelos dois.
+    //
+    // O que não depende de sorte é POR ONDE o arquivo passa. Pelo caminho de
+    // sempre, o base64 vira texto do JavaScript duas vezes (o da resposta e o
+    // do `JSON.parse`): 128 MB de texto para um arquivo de 48. Pela leitura
+    // direta, ele fica em buffers, fora do heap. Com o heap limitado a 96 MB,
+    // o caminho de sempre derruba a ponte, e a leitura direta passa.
+    const pdf = arquivoDe(48);
+    const t = await subirCom({ NODE_OPTIONS: "--max-old-space-size=96" },
+                             { arquivo: pdf, nomeNaResposta: "Contrato – João.pdf" });
+    await mandarA(t, documento({ id: "PDF-48MB", mb: 48 }));
+    // A PONTE QUE ESTOURA O HEAP MORRE POR SINAL (o Node aborta), e não com
+    // um código de saída: `exitCode` continua nulo, e é `signalCode` que diz.
+    // Na primeira escrita esta cena olhava só o código, e a ponte morta
+    // passava por viva.
+    const morreu = () => t.filho.exitCode !== null || t.filho.signalCode !== null;
+    await esperarAte(() => todasComArquivo(t, "PDF-48MB", 1) || morreu(), 30000);
+    ok("com o heap do JavaScript em 96 MB, um PDF de 48 MB dentro do JSON chega igual",
+       todasComArquivo(t, "PDF-48MB", 1) && digitalDe(t, "PDF-48MB") === sha(pdf),
+       JSON.stringify({ url: copiasDe(t, "PDF-48MB")[0]?.midia_url || null,
+                        igual: digitalDe(t, "PDF-48MB") === sha(pdf) }));
+    ok("e a ponte continua de pé", !morreu(),
+       `a ponte saiu (código ${t.filho.exitCode}, sinal ${t.filho.signalCode}): `
+       + (t.registro.join("").match(/(heap limit|out of memory)[^\n]*/i) || ["sem frase no log"])[0]);
+    await t.parar();
+  }
+
+  // ---- 72l. a leitura direta escolhe o mesmo campo que o caminho de sempre ----
+  {
+    // A leitura direta acha os nomes do arquivo pelos BYTES, em qualquer
+    // lugar do JSON. Um campo de dentro com o mesmo nome — uma miniatura —
+    // viria antes do arquivo e seria guardado no lugar dele: um "documento"
+    // de 3 KB, com cara de certo. O `JSON.parse` de sempre só olha o primeiro
+    // nível, e é a escolha dele que vale.
+    const cenas = [
+      { nome: "a miniatura em \"data\", lá dentro, e o arquivo em \"base64\"", isca: { nome: "data" } },
+      { nome: "a miniatura em \"file\", lá dentro, e o arquivo em \"file\"", isca: { nome: "file" } },
+      // O NOME QUE VEM ANTES NA ORDEM, com valor curto: o caminho de sempre
+      // olha `file` primeiro, vê um nome de arquivo e vai para o endereço. A
+      // leitura direta pula o texto curto e acharia o `data` longo — outro
+      // arquivo, que o caminho de sempre nunca escolheria. A isca aqui passa
+      // de 1 MB, senão a leitura direta nem entraria.
+      { nome: "um nome curto em \"file\", outra coisa em \"data\" e o arquivo no endereço",
+        isca: { forma: "nome-antes" }, tamanhoDaIsca: 1.5 * 1024 * 1024 },
+    ];
+    for (const cena of cenas) {
+      const pdf = arquivoDe(2);
+      const miniatura = crypto.randomBytes(cena.tamanhoDaIsca || 3000);
+      const t = await subirCom({}, { arquivo: pdf, isca: { ...cena.isca, bytes: miniatura } });
+      await mandarA(t, documento({ id: "PDF-COM-ISCA", mb: 2 }));
+      await esperarAte(() => todasComArquivo(t, "PDF-COM-ISCA", 1), 15000);
+      const digital = digitalDe(t, "PDF-COM-ISCA");
+      ok(`${cena.nome}: guarda o arquivo, e não a miniatura`,
+         todasComArquivo(t, "PDF-COM-ISCA", 1) && digital === sha(pdf),
+         digital === sha(miniatura) ? "guardou a miniatura no lugar do arquivo"
+           : JSON.stringify({ url: copiasDe(t, "PDF-COM-ISCA")[0]?.midia_url || null, digital }));
+      await t.parar();
     }
   }
 }
