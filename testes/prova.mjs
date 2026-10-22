@@ -12173,5 +12173,271 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
   }
 }
 
+// ==================================================================
+//  73. QUEM NÃO ENTROU NÃO ALCANÇA NADA (032), NUM POSTGRES DE VERDADE
+//
+//  O banco desta seção imita a Supabase onde ela importa: a HERANÇA. Toda
+//  tabela, sequência e função que o `postgres` cria em `public` nasce para
+//  `anon`, `authenticated` e `service_role` — e é por ela que, no escritório,
+//  13 funções com poder de dono e 15 tabelas chegaram abertas para quem não
+//  entrou (medido em 22/10). Os scripts que criam as 13 rodam a partir dos
+//  próprios arquivos, e o defeito é conferido ANTES do 032: sem isso, a prova
+//  aprovaria um banco que nunca esteve aberto.
+//
+//  E a outra metade importa tanto quanto: fechar DEMAIS derruba o painel de
+//  todo mundo. Depois do 032, quem atende continua lendo as conversas,
+//  chamando as funções do painel e — por gatilho — finalizando, reabrindo,
+//  desfazendo e mexendo no funil; a ponte continua refazendo a aba; e a conta
+//  nova continua virando gente.
+// ==================================================================
+{
+  console.log("\n73. Quem não entrou não alcança nada (032), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o fechamento (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    // OS QUE CRIAM AS 13 (001, 017 e 028), e os de que eles dependem.
+    const ANTES = ["001-quem-entra-vira-gente.sql", "004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql",
+                   "006-a-espera-nao-comeca-no-rabicho.sql", "017-o-funil-de-etapas.sql",
+                   "018-tarefas-e-lembretes.sql", "020-a-auditoria-do-banco.sql",
+                   "028-aguardando-em-aberto-e-finalizados.sql"].map(ler);
+    const S032 = ler("032-quem-nao-entrou-nao-alcanca-nada.sql");
+    const INTERNAS = ["zorvin_aberta_ou_aguardando(uuid)", "zorvin_atendimento_ciclos(uuid)",
+                      "zorvin_proximo_protocolo(timestamptz)", "zorvin_recontar_situacao(uuid)",
+                      "zorvin_situacao_fora_da_regra(uuid)",
+                      "zorvin_atendimento_abre(uuid, timestamptz, text, uuid, timestamptz)"];
+    const U = { rod: "00000000-0000-0000-0000-0000000000a1", ana: "00000000-0000-0000-0000-0000000000a2" };
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+-- A PONTE PASSA POR CIMA DA REGRA DE ACESSO, como na Supabase. O papel é do
+-- servidor inteiro, e um criado sem isto por outra seção valeria aqui também.
+-- SÓ QUANDO FALTA: duas provas mexendo no mesmo papel ao mesmo tempo se
+-- derrubam ("tuple concurrently updated") — a lição da seção 51.
+do $$ begin
+  if not (select rolbypassrls from pg_roles where rolname = 'service_role') then
+    alter role service_role bypassrls;
+  end if;
+end $$;
+-- A HERANÇA DA SUPABASE, as três: é ela que abre o que o 032 fecha.
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table auth.users (id uuid primary key default gen_random_uuid(), email text, raw_user_meta_data jsonb not null default '{}');
+create table departamentos (id bigint generated always as identity primary key, nome text not null);
+create table usuarios (id uuid primary key, login text, nome text not null default '', email text,
+  admin boolean not null default false, ativo boolean not null default true, visto_em timestamptz);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text,
+  ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(), unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+-- AS DA REGRA DE ACESSO chegaram ao escritório sem public e sem anon, só com
+-- quem entrou (sql/2026-09-as-quatro-funcoes…): o 032 tem de deixá-las assim.
+revoke execute on function zorvin_admin() from public, anon;
+revoke execute on function pode_ver_conversa(uuid) from public, anon;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+create policy conversas_criar on conversas for insert to authenticated with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+alter table contatos enable row level security;
+create policy contatos_todos on contatos for all to authenticated using (true) with check (true);
+-- UMA ANTIGA, liberada SÓ por public, com poder de dono e usada pelo painel:
+-- tirar public sem devolver a quem entrou derrubaria o aviso de que algo parou.
+create or replace function zorvin_saude() returns jsonb language sql stable security definer set search_path = public as $f$
+  select jsonb_build_object('fila_parada', 0) $f$;
+grant execute on function zorvin_saude() to public;
+revoke execute on function zorvin_saude() from anon, authenticated, service_role;
+-- Os departamentos vêm ANTES dos scripts: o 017 semeia as etapas dos que existem.
+insert into departamentos (nome) values ('SAC');
+insert into usuarios (id, nome, admin) values ('${U.rod}', 'Rodrigo', true), ('${U.ana}', 'Ana', false);
+insert into permissoes (usuario_id, departamento_id) values ('${U.ana}', 1);
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    // NO PAPEL DE ALGUÉM — e volta, aconteça o que acontecer. `quem` é o
+    // `auth.uid()` de quem entrou; anon e a ponte não têm.
+    const como = async (c, papel, quem, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [quem || ""]);
+      await c.query(`set role ${papel}`);
+      try { return await fn(); } finally {
+        await c.query("reset role");
+        await c.query("select set_config('request.jwt.claim.sub', '', false)");
+      }
+    };
+    const pode = async (c, papel, assinatura) =>
+      (await c.query("select has_function_privilege($1, $2, 'execute') as p", [papel, `public.${assinatura}`])).rows[0].p;
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of ANTES) await c.query(s);
+      const SAC = (await c.query("insert into advogados (nome, numero, departamento_id) values ('SAC', '551130000001', 1) returning id")).rows[0].id;
+      const ct = (await c.query("insert into contatos (numero, nome) values ('5511980000001', 'Cliente') returning id")).rows[0].id;
+      const cv = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [SAC, ct])).rows[0].id;
+      await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'contato', 'oi', 'M1', now() - interval '2 hours')", [cv]);
+      await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'advogado', 'bom dia', 'M2', now() - interval '1 hour')", [cv]);
+
+      // ---- 73a. o defeito, ANTES do 032 ----
+      ok("antes: quem não entrou CHAMA a função que gasta um número de protocolo",
+         await pode(c, "anon", "zorvin_proximo_protocolo(timestamptz)")
+         && !(await guardado(() => como(c, "anon", null, () => c.query("select public.zorvin_proximo_protocolo(now())")))).erro);
+      ok("antes: e alcança a tabela do \"Já tratei\"",
+         (await c.query("select has_table_privilege('anon', 'public.zorvin_tratamentos', 'select') as p")).rows[0].p);
+
+      // ---- 73b. o 032 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S032));
+      ok("o 032 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/nenhuma função com poder de dono/, /nenhuma função dá permissão/, /funções internas não podem/, /ponte continua podendo/,
+                        /não alcança tabela nenhuma/, /nem sequência/, /tabela nova nasce fechada/,
+                        /continua nascendo aberta/, /função nova nasce fechada/]) {
+        ok(`a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+      ok("e lê as conversas no papel de quem atende", item(conf, /continua lendo as conversas/) === "sim",
+         JSON.stringify(item(conf, /continua lendo/)));
+      ok("e o aviso de que algo parou continua respondendo", item(conf, /aviso de que algo parou/) === "sim");
+      ok("e o número de cada aba também", item(conf, /número de cada aba/) === "sim");
+
+      // ---- 73c. quem não entrou não alcança mais nada ----
+      for (const f of INTERNAS) {
+        ok(`quem não entrou não chama ${f.split("(")[0]}`, !(await pode(c, "anon", f)));
+      }
+      const anonProtocolo = await guardado(() => como(c, "anon", null, () => c.query("select public.zorvin_proximo_protocolo(now())")));
+      ok("e chamando, o banco recusa (42501)", anonProtocolo.codigo === "42501", JSON.stringify(anonProtocolo));
+      const anonTabela = await guardado(() => como(c, "anon", null, () => c.query("select * from public.zorvin_tratamentos")));
+      ok("nem lê a tabela do \"Já tratei\" (42501)", anonTabela.codigo === "42501", JSON.stringify(anonTabela));
+      ok("nem a função antiga que era só de public", !(await pode(c, "anon", "zorvin_saude()")));
+      ok("nem as que a herança tinha dado a ela pelo nome (o número das abas, do 028)",
+         !(await pode(c, "anon", "zorvin_contar_situacoes(uuid)")));
+
+      // ---- 73d. quem atende continua trabalhando ----
+      for (const f of INTERNAS) {
+        ok(`quem atende não chama ${f.split("(")[0]} pelo nome`, !(await pode(c, "authenticated", f)));
+      }
+      const rodSaude = await guardado(() => como(c, "authenticated", U.rod, () => c.query("select public.zorvin_saude() as s")));
+      ok("quem atende continua chamando a antiga que era só de public (devolvida)",
+         !rodSaude.erro && rodSaude.rows?.[0]?.s?.fila_parada === 0, JSON.stringify(rodSaude.erro || rodSaude.rows));
+      const anaLe = await guardado(() => como(c, "authenticated", U.ana, () => c.query("select id from public.conversas")));
+      ok("quem atende lê as conversas (a regra de acesso continua de pé)", !anaLe.erro && anaLe.rows?.length === 1,
+         JSON.stringify(anaLe.erro || anaLe.rows));
+      const contar = await guardado(() => como(c, "authenticated", U.ana, () => c.query("select public.zorvin_contar_situacoes(null) as n")));
+      ok("e chama o número das abas", !contar.erro, JSON.stringify(contar));
+
+      // OS GATILHOS DISPARAM PARA QUEM ATENDE, e chamam as internas no papel
+      // do dono: finalizar, desfazer, reabrir, conversa nova, mexer no funil.
+      const assunto = (await c.query("select id from public.zorvin_assuntos order by ordem limit 1")).rows[0].id;
+      const finalizar = await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "insert into public.zorvin_tratamentos (conversa_id, assunto_id, quem) values ($1, $2, $3) returning id",
+        [cv, assunto, U.ana])));
+      const sit1 = (await c.query("select situacao, protocolo from conversas where id = $1", [cv])).rows[0];
+      ok("quem atende finaliza (o gatilho do clique abre e fecha o protocolo)",
+         !finalizar.erro && sit1.situacao === "finalizado" && Boolean(sit1.protocolo),
+         JSON.stringify(finalizar.erro || sit1));
+      const desfazer = await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "update public.zorvin_tratamentos set desfeito_em = now(), desfeito_por = $2 where id = $1",
+        [finalizar.rows?.[0]?.id, U.ana])));
+      const sit2 = (await c.query("select situacao from conversas where id = $1", [cv])).rows[0];
+      ok("e desfaz (o gatilho do desfeito reabre o mesmo protocolo)",
+         !desfazer.erro && sit2.situacao === "aberto", JSON.stringify(desfazer.erro || sit2));
+      await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "insert into public.zorvin_tratamentos (conversa_id, assunto_id, quem) values ($1, $2, $3)", [cv, assunto, U.ana])));
+      const reabrir = await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "update public.conversas set situacao = 'aberto' where id = $1", [cv])));
+      const sit3 = (await c.query("select situacao from conversas where id = $1", [cv])).rows[0];
+      ok("e reabre para continuar (a guarda da situação deixa, e abre protocolo novo)",
+         !reabrir.erro && sit3.situacao === "aberto", JSON.stringify(reabrir.erro || sit3));
+      const ct2 = (await c.query("insert into contatos (numero, nome) values ('5511980000002', 'Novo') returning id")).rows[0].id;
+      const nova = await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "insert into public.conversas (advogado_id, contato_id) values ($1, $2) returning id", [SAC, ct2])));
+      const cartao = (await c.query("select id, etapa_id from public.zorvin_cartoes where contato_id = $1", [ct2])).rows[0];
+      ok("a conversa nova entra no funil (o gatilho do cliente novo)",
+         !nova.erro && Boolean(cartao), JSON.stringify(nova.erro || cartao || null));
+      const proxima = cartao && (await c.query(
+        "select id from public.zorvin_etapas where departamento_id = 1 and id <> $1 order by ordem limit 1", [cartao.etapa_id])).rows[0];
+      const mover = cartao && proxima ? await guardado(() => como(c, "authenticated", U.ana, () => c.query(
+        "update public.zorvin_cartoes set etapa_id = $2 where id = $1", [cartao.id, proxima.id]))) : { erro: "sem cartão" };
+      const passos = cartao ? (await c.query("select count(*)::int n from public.zorvin_movimentos where contato_id = $1", [ct2])).rows[0].n : 0;
+      ok("e mover o cartão deixa o rastro (o gatilho do histórico)", !mover.erro && passos >= 2,
+         JSON.stringify(mover.erro || { passos }));
+
+      // ---- 73e. a ponte e o Auth ----
+      await c.query("update public.zorvin_tratamentos set desfeito_em = null where conversa_id = $1", [cv]);
+      const ponteMsg = await guardado(() => como(c, "service_role", null, () => c.query(
+        "insert into public.mensagens (conversa_id, origem, texto, id_uazapi) values ($1, 'contato', 'voltei', 'M9')", [cv])));
+      ok("a mensagem que a ponte grava continua mexendo na aba (o gatilho da mensagem)", !ponteMsg.erro,
+         JSON.stringify(ponteMsg));
+      const recontar = await guardado(() => como(c, "service_role", null, () => c.query(
+        "select public.zorvin_recontar_situacao($1) as s", [cv])));
+      ok("e a ponte continua refazendo a aba de uma conversa", !recontar.erro, JSON.stringify(recontar));
+      const novaConta = "00000000-0000-0000-0000-0000000000a9";
+      await c.query("insert into auth.users (id, email) values ($1, 'nova@escritorio.com')", [novaConta]);
+      ok("a conta nova continua virando gente (o gatilho do 001)",
+         (await c.query("select count(*)::int n from usuarios where id = $1", [novaConta])).rows[0].n === 1);
+
+      // ---- 73f. o que nasce depois, e o 032 de novo ----
+      await c.query("create table public.zorvin_tabela_depois (id int)");
+      await c.query("create function public.zorvin_funcao_depois() returns int language sql security definer as 'select 1'");
+      ok("a tabela de um script futuro nasce fechada para quem não entrou",
+         !(await c.query("select has_table_privilege('anon', 'public.zorvin_tabela_depois', 'select') as p")).rows[0].p);
+      ok("e aberta para quem entrou e para a ponte",
+         (await c.query("select has_table_privilege('authenticated', 'public.zorvin_tabela_depois', 'select') and has_table_privilege('service_role', 'public.zorvin_tabela_depois', 'select') as p")).rows[0].p);
+      ok("a função de um script futuro nasce fechada para quem não entrou", !(await pode(c, "anon", "zorvin_funcao_depois()")));
+      ok("e aberta para quem entrou e para a ponte",
+         (await pode(c, "authenticated", "zorvin_funcao_depois()")) && (await pode(c, "service_role", "zorvin_funcao_depois()")));
+      const deNovo = await guardado(() => aplicar(c, S032));
+      ok("rodar o 032 de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo), JSON.stringify(deNovo));
+      ok("e fecha também o que nasceu depois da primeira vez",
+         !(await pode(c, "authenticated", "zorvin_recontar_situacao(uuid)")) && !(await pode(c, "anon", "zorvin_funcao_depois()")));
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

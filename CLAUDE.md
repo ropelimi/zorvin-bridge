@@ -65,8 +65,8 @@ Variáveis de ambiente (no Render):
 - `COPILOTO_MODELO` — o modelo do copiloto. **Opcional**, padrão
   `claude-haiku-5-5`. Trocar aqui não pede publicação.
 - `ANEXO_TETO_MB` — acima de quantos MB um anexo recebido não é baixado.
-  **Opcional**, padrão 50, que é o teto do depósito no plano gratuito do
-  Supabase. Ver "A memória da ponte", abaixo.
+  **Opcional**, padrão 50, que é o que a memória da ponte aguenta com folga.
+  Ver "A memória da ponte", abaixo.
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -397,8 +397,16 @@ bancada mede os dois.
    tentativa de mandar um anexo) entra na mesma fila, porque também põe o
    arquivo inteiro na memória.
 3. **Acima de 50 MB, não baixa** (`ANEXO_TETO_MB`, opcional, padrão 50). É o
-   teto do depósito no plano gratuito do Supabase (*"For Free projects, the
-   limit can't exceed 50 MB"*). O tamanho é conferido de dois jeitos:
+   que a memória da ponte aguenta com folga: um arquivo de 48 MB já a leva a
+   uns 370 MB dos 512 da Render (ver a tabela logo abaixo). **Uma correção do
+   que ficou escrito em 22/10:** este parágrafo dizia que 50 MB era o teto do
+   depósito no plano gratuito do Supabase — e o Zorvin está no plano **Pro**,
+   onde o teto do depósito é uma configuração do projeto, que não se lê pelo
+   SQL (o balde `anexos` não tem teto próprio: `file_size_limit` nulo). A
+   razão do número é a memória da ponte, e não o depósito, e a frase que vai
+   para `midia_erro` passou a dizer isso: *"acima dos 50 MB que o Zorvin
+   baixa"*, e não mais *"que o depósito do Zorvin aceita"*. O tamanho é
+   conferido de dois jeitos:
    - pelo tamanho do aviso, antes de pedir;
    - sem tamanho no aviso, **lendo com teto** (`lerComTeto`): a leitura para
      quando passa dele, em vez de descobrir depois de ter tudo na memória.
@@ -2178,6 +2186,82 @@ guarda — a régua de 25/09.
   campo lido de uma resposta que já tinha falhado, e uma conferência que
   esperava lista e recebeu o erro. Os acessos passaram a ser guardados.
 
+## Quem não entrou não alcança nada (script 032, 22/10)
+
+Pedido do Rodrigo, depois de ler comigo os avisos de segurança da Supabase:
+fechar as funções que até quem não entrou no Zorvin consegue chamar.
+`sql/automaticos/032-quem-nao-entrou-nao-alcanca-nada.sql`.
+
+**Medido no banco do escritório, só lendo:**
+
+| | |
+|---|---|
+| funções com poder de dono (`security definer`) que `anon` chamava | **13** |
+| delas, as que fazem alguma coisa quando chamadas pelo nome | 6 — criar um protocolo (`zorvin_atendimento_abre`), gastar um número (`zorvin_proximo_protocolo`), refazer a aba de uma conversa, ler as datas dos atendimentos |
+| tabelas abertas para `anon` (ler, gravar, alterar, apagar, esvaziar) | **15**, todas criadas pelos scripts desta pasta |
+| política que deixasse `anon` passar | nenhuma — por isso nada vazou |
+
+**A causa das duas é a herança**, a armadilha nº 5 de volta: tudo o que o
+`postgres` cria em `public` nasce para `anon`. O arquivo de 09/26 que a
+fechava não está valendo, e não dá para saber se não rodou ou se foi
+desfeito. **E o 001 já tinha tentado**, só para a função dele: `revoke all …
+from public`, com o comentário "ninguém recebe de volta" — e `anon` continuava
+lá, porque a Supabase dá a `anon` PELO NOME, e não por `public`.
+
+**O que o 032 faz:**
+
+1. `anon` sai de toda tabela e sequência de `public`;
+2. nenhuma função com poder de dono fica para `anon` nem para `public` — e a
+   que estava liberada só por `public` é **devolvida** a `authenticated` e
+   `service_role` na mesma passada (a régua da armadilha nº 5);
+3. as 13 **internas** saem também de `authenticated`: só gatilhos e outras
+   funções de dono as chamam. Conferido no banco antes de escrever (`prosrc`
+   e `pg_policies`): nenhuma é chamada pelo painel, por política, ou por
+   função que roda no papel de quem atende. A ponte continua chamando
+   `zorvin_recontar_situacao`;
+4. a herança fecha, para o que vier depois.
+
+**Gatilho dispara sem permissão de executar.** O Postgres confere o EXECUTE
+ao CRIAR o gatilho, e não ao disparar — por isso tirar as funções de gatilho
+de quem atende não muda nada na tela. A prova confere disparando cada um no
+papel de quem atende.
+
+**A armadilha que a conferência pegou, na primeira escrita:** tirar `public`
+da herança com `in schema public` **não faz nada**. O Postgres dá EXECUTE a
+`public` em toda função nova por conta própria, e a herança de um esquema só
+ACRESCENTA ao que a geral dá. A função de mentira da conferência continuou
+nascendo executável por `anon`. Hoje o `public` sai pela herança geral do
+`postgres` (sem `in schema`); `anon` sai pela do esquema, que é onde a
+Supabase o pôs.
+
+**A conferência cria uma tabela e uma função de mentira**, dentro da
+transação do script, e pergunta quem as alcança — a diferença entre "a regra
+diz que não deveria" e "não acontece". E **lê as conversas e chama as funções
+do painel no papel de quem atende** (a régua do 012): fechar demais é o outro
+jeito de errar isto, e esse aparece na tela de todo mundo.
+
+Prova: seção 73, num Postgres de verdade que imita a herança da Supabase, com
+o defeito conferido ANTES do 032 (sem isso a prova aprovaria um banco que
+nunca esteve aberto). 48 conferências, **10 sabotagens e 10 pegas**, todas
+limpas, rodadas em cópias e lidas uma a uma:
+
+- sem tirar as tabelas;
+- sem tirar as sequências;
+- as internas ficando para quem entrou;
+- tirar `public` sem devolver (o aviso de que algo parou cai para quem atende);
+- as internas saindo também da ponte;
+- a herança de `public` só no esquema (o engano da primeira escrita);
+- sem fechar a herança das tabelas;
+- fechar demais: tudo de quem entrou (a leitura das conversas cai);
+- só as internas, sem olhar as outras de dono;
+- `anon` tirada só das de dono.
+
+**Quatro sabotagens estouraram na primeira rodada**, sem placar: a prova
+garante que a ponte passa por cima da regra de acesso (`alter role
+service_role bypassrls`), e três cópias fazendo isso ao mesmo tempo se
+derrubaram com *"tuple concurrently updated"* — a lição da seção 51. Hoje a
+prova só mexe no papel quando falta.
+
 ## A auditoria de 07/10
 
 Varredura inteira da ponte e dos scripts, cada achado conferido antes de
@@ -2517,6 +2601,10 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
    só para `anon`; `authenticated` continua herdando o que sempre herdou, e
    tabela nova segue servindo o painel sem passo extra. Ao criar tabela, o que
    continua sendo obrigatório é a POLÍTICA junto.
+   **E ela estava aberta de novo em 22/10** — 15 tabelas e 13 funções com
+   poder de dono abertas para `anon`. Fechada pela ponte no script 032, com a
+   conferência guardada: ver "Quem não entrou não alcança nada (script 032,
+   22/10)".
 6. **Cache curto em mídia derruba o atendimento** (21/08/2026): a biblioteca do
    Supabase manda `max-age=3600` quando ninguém diz nada, então de hora em hora
    cada atendente rebaixava todas as fotos e áudios das conversas que abrisse.
