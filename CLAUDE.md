@@ -19,7 +19,7 @@ WhatsApp ⇄ Uazapi ⇄ [zorvin-bridge] ⇄ Supabase ⇄ [zorvin-painel]
                      (este repo)                   (repo separado)
 ```
 
-- **zorvin-bridge** (ESTE REPO) — Node.js + Express. Recebe webhooks da Uazapi e grava no Supabase; processa a `fila_envio` e envia mensagens via Uazapi. Hospedado no **Render** como Web Service (plano free + cronjob a cada 10 min para não dormir).
+- **zorvin-bridge** (ESTE REPO) — Node.js + Express. Recebe webhooks da Uazapi e grava no Supabase; processa a `fila_envio` e envia mensagens via Uazapi. Hospedado no **Render** como Web Service, no plano free: dorme 15 minutos depois da última chamada, e o cronjob que a mantinha acordada parou em 05/08 — ver "A ponte dorme à noite" abaixo.
 - **zorvin-painel** — Vite + React. Interface estilo WhatsApp Web. Hospedado no Render como **Static Site**.
 - **Supabase** — banco Postgres + Auth + Realtime + Storage. Projeto **separado** do Vantoro.
 
@@ -130,7 +130,7 @@ e isso não tem como ser contornado. Numa queda, só a primeira entrada da vida 
 alguém falha.
 
 Rotas:
-- `GET /` → health check ("Zorvin bridge online"), usada pelo cronjob
+- `GET /` → health check ("Zorvin bridge online"), que o cronjob chamava até 05/08
 - `POST /webhook` → recebe mensagens da Uazapi
 
 Envio: `setInterval` a cada 3s lê `fila_envio` (status `pendente`), envia e marca como `enviada`/`erro`.
@@ -567,9 +567,9 @@ perguntado, e não o que faltou perguntar.**
 **A ponte dorme.** Na madrugada de 22/10 ela ficou de pé em janelas de **15
 minutos exatos**, e às 09:55 dormiu **5 minutos** em pleno expediente. É o plano
 gratuito da Render: 15 minutos sem ninguém chamar, e o serviço para. O
-`cronjob` de 10 minutos descrito no alto deste arquivo existe para impedir
-isso, e **não está batendo**: com uma chamada a cada 10 minutos, uma janela de
-15 sem nenhuma não existiria. Nenhuma mensagem da equipe ficou esperando
+`cronjob` de 10 minutos que impedia isso **parou em 05/08**, e religá-lo como
+era estouraria a franquia da Render — ver "A ponte dorme à noite", logo
+abaixo. Nenhuma mensagem da equipe ficou esperando
 naquela manhã: ninguém mandou nada naqueles 5 minutos. Mas, enquanto ela
 dorme, a fila de envio para, e uma agendada da madrugada sai só quando alguém
 acorda a ponte.
@@ -596,6 +596,66 @@ rodadas em cópias e lidas uma a uma:
 mais lenta que a do GitHub (a suíte inteira, 11min27s aqui; a rodada da `main`
 de 22/10, sem a seção 72, 6min50s lá). O teto da integração contínua é de 10
 minutos (`provas.yml`), e a conta dá uns 7min30s.
+
+## A ponte dorme à noite — e por que o cronjob não volta como era (22/10)
+
+Um dos três pedidos do Rodrigo em 22/10: *investigar por que o cron-job.org não
+está mantendo a ponte acordada, e consertar.*
+
+**Medido nos registros do Supabase, só lendo.** Acordada, a ponte pergunta à
+caixa de entrada a cada 30 segundos e à fila a cada 3, então cada minuto em
+que ela está de pé deixa pedidos com a chave dela (`service_role`) nos
+registros do portão da API. Minuto sem pedido dela é minuto dormindo.
+
+| período | minutos acordada |
+|---|---|
+| até 05/08 | **1.440 de 1.440 por dia** — de pé o dia inteiro |
+| a partir das 20h de 05/08 | dorme 15 minutos depois de cada acordada |
+| semana de 15 a 21/10 | de 490 a 897 por dia útil, 176 no domingo — **~83 h na semana** |
+
+**O cronjob parou de bater às 20h de 05/08** (23:00 UTC; a ponte dormiu às
+20:15). Não houve commit da ponte nesse dia: a mudança foi fora do código — o
+job foi desligado no cron-job.org, ou passou a chamar um endereço que não é o
+dela. O painel do cron-job.org não se alcança daqui.
+
+**De madrugada, quem acorda a ponte é a mensagem do cliente, e ela entra.**
+Em 22/10, cada acordada da madrugada coincide com um evento novo na caixa de
+entrada, gravado no minuto em que a ponte subiu (a Render segura o pedido
+enquanto ela acorda). O que fica parado enquanto ela dorme:
+
+- a fila de envio — uma agendada da madrugada sai quando algo acordar a ponte.
+  Nos 30 dias até 22/10 não houve nenhuma agendada fora do expediente;
+- os avisos de audiência do Vantoro.
+
+### Religar o cronjob como era estouraria a franquia
+
+A Render dá **750 horas de máquina por mês para o workspace inteiro**, somadas
+entre os serviços gratuitos, e suspende TODOS eles quando elas acabam, até o
+mês seguinte. O workspace tem dois serviços gratuitos — a ponte e o Vantoro
+(`plan: free` no `render.yaml` dele; e a ponte o mantém acordado de dia, em
+"MANTER O VANTORO ACORDADO", no `index.js`):
+
+| | horas por mês |
+|---|---|
+| a ponte, como está hoje (medido) | ~356 |
+| o Vantoro, acordado das 7h às 20h de segunda a sábado (estimado) | ~338 |
+| **total hoje** | **~694 de 750** |
+| a ponte de pé 24 horas, com o cronjob de antes | ~744 |
+| **total com o cronjob de antes** | **~1.080 — a franquia acabaria por volta do dia 21** |
+
+**Religar o cronjob de 10 minutos trocaria a ponte que dorme de madrugada pela
+ponte E o Vantoro suspensos nos últimos dez dias de cada mês.** É o que não se
+faz. Fica escrito porque o conserto "óbvio" é religar o job, e ele parece
+grátis.
+
+**O conserto que não divide a franquia é pago:** o plano Starter da Render
+para a ponte, US$ 7 por mês. Ela deixa de dormir, as horas dela deixam de sair
+das 750, e o cronjob deixa de ser preciso. **A decisão é do Rodrigo**; enquanto
+ela não vem, a ponte dorme de madrugada, e é seguro — o que chega a acorda.
+
+**Uma suposição, dita como tal:** a conta supõe o Vantoro no mesmo workspace e
+no plano gratuito, como diz o comentário do `index.js`. Quem confirma é a
+página de cobrança da Render ("Free usage", com as horas do mês).
 
 ## Desativar um telefone — o que ele para de fazer, e o que continua
 

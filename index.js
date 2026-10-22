@@ -381,7 +381,9 @@ function numeroRealDoContato(body, m) {
 }
 
 // ------------------------------------------------------------
-//  Verificação de saúde (usada pelo cronjob para não "dormir").
+//  Verificação de saúde. O cronjob que mantinha a ponte acordada a chamava;
+//  ele parou em 05/08, e religá-lo como era estouraria a franquia da Render —
+//  ver "A ponte dorme à noite" no CLAUDE.md.
 // ------------------------------------------------------------
 app.get('/', (req, res) => {
   res.status(200).send('Zorvin bridge online');
@@ -394,7 +396,9 @@ app.get('/', (req, res) => {
 
 // Endereço enxuto para o cronjob de keep-alive: responde 200 com corpo VAZIO
 // (evita o "output too large" que desativava o job no cron-job.org) e ainda
-// aproveita para despachar a fila. Aponte o cronjob para .../ping.
+// aproveita para despachar a fila. O painel também o chama, na tela de entrada.
+// O cronjob está parado desde 05/08 — antes de religá-lo, ler "A ponte dorme à
+// noite" no CLAUDE.md: 24 horas de pé estouram a franquia da Render.
 app.get('/ping', (req, res) => {
   res.status(200).end();
   processarFilaDeEnvio().catch(() => {});
@@ -9399,8 +9403,10 @@ setTimeout(() => { buscarAvisosDeAudiencia().catch(() => {}); }, 4000).unref?.()
 //  do lado de cá isso vira "Resposta inválida do Vantoro": a ficha do cliente
 //  falha sem motivo e volta sozinha minutos depois.
 //
-//  A ponte já é mantida acordada por um cronjob de fora. Ela aproveita o mesmo
-//  ciclo para bater no /ping do Vantoro — sem serviço novo, sem custo novo.
+//  A ponte bate no /ping do Vantoro pelo relógio dela, enquanto está de pé —
+//  sem serviço novo, sem custo novo. De dia ela está: o cronjob que a mantinha
+//  acordada parou em 05/08, e quem a acorda é o movimento do escritório (ver
+//  "A ponte dorme à noite" no CLAUDE.md).
 //
 //  POR QUE NÃO O DIA INTEIRO. O plano gratuito dá 750 horas de máquina por mês
 //  para o workspace, e são DOIS serviços. Acordado 24 horas, cada um consome
