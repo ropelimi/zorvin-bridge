@@ -2381,95 +2381,249 @@ app.get('/anexos/resgatar', async (req, res) => {
 
     const dias = Math.min(Math.max(parseInt(req.query.dias || '7', 10) || 7, 1), 90);
     const limite = Math.min(Math.max(parseInt(req.query.limite || '30', 10) || 30, 1), 200);
-    const desde = new Date(Date.now() - dias * 86400000).toISOString();
-
-    // MAIS DO QUE O LIMITE, de propósito: a peneira do arquivo vazio é feita
-    // aqui (uma miniatura `data:` não é "coluna nula", e o banco não sabe
-    // disso), então pedir só `limite` linhas devolveria quase só mensagens que
-    // já têm arquivo e o resgate acharia meia dúzia.
-    const { data: candidatas, error } = await supabase.from('mensagens')
-      .select('id, id_uazapi, conversa_id, tipo, midia_url, midia_mime')
-      .neq('tipo', 'texto')
-      .gte('criado_em', desde)
-      .order('criado_em', { ascending: false })
-      .limit(limite * 20);
-    if (error) return res.status(500).send(`O banco recusou a consulta: ${error.message}`);
-
-    const vazias = (candidatas || [])
-      .filter((c) => c.id_uazapi && ehSoMiniatura(c.midia_url))
-      .slice(0, limite);
-    if (!vazias.length) {
+    const r = await resgatarAnexosVazios({ dias, limite });
+    if (r.erro) return res.status(500).send(`O banco recusou a consulta: ${r.erro}`);
+    if (!r.achadas) {
       return res.json({ ok: true, dias, achadas: 0,
         recado: `Nenhum anexo sem arquivo nos últimos ${dias} dia(s).` });
     }
-
-    // De qual telefone é cada mensagem. Duas idas ao banco para o lote inteiro,
-    // e não duas por mensagem.
-    const idsDeConversa = [...new Set(vazias.map((v) => v.conversa_id).filter(Boolean))];
-    const { data: conversas } = await supabase.from('conversas')
-      .select('id, advogado_id').in('id', idsDeConversa);
-    const advDaConversa = new Map((conversas || []).map((c) => [String(c.id), c.advogado_id]));
-    const { data: advs } = await supabase.from('advogados')
-      .select('id, nome, token, servidor').in('id', [...new Set((conversas || []).map((c) => c.advogado_id))]);
-    const advPorId = new Map((advs || []).map((a) => [String(a.id), a]));
-
-    let encheu = 0;
-    const faltaram = [];
-    for (const v of vazias) {
-      const adv = advPorId.get(String(advDaConversa.get(String(v.conversa_id))));
-      if (!adv || !adv.token) {
-        faltaram.push({ id: v.id_uazapi, telefone: (adv && adv.nome) || '(não achei)',
-                        porque: adv ? 'este telefone está sem token no cadastro'
-                                    : 'não achei o telefone desta conversa' });
-        continue;
-      }
-      const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
-      const relato = { motivo: '' };
-      const url = await baixarMidiaRecebida(servidor, adv.token,
-        { messageid: v.id_uazapi, content: {} }, v.midia_mime, relato);
-      if (!url) {
-        // O QUE JÁ SE SABE PERDIDO FICA DITO NA TELA. O resgate é a única
-        // ocasião em que alguém pergunta de novo por um anexo antigo; deixar a
-        // resposta só nesta página faria a conversa continuar mostrando
-        // "indisponível" para sempre, como se ainda houvesse esperança.
-        if (ehRecusaDefinitiva(relato.motivo)) {
-          await marcarMidiaIndisponivel(v.id_uazapi, relato.motivo);
-        }
-        faltaram.push({ id: v.id_uazapi, telefone: adv.nome || String(adv.id),
-                        porque: relato.motivo || 'não deu, e não sei dizer por quê' });
-        continue;
-      }
-      await trocarMiniaturaPeloArquivo(v.id_uazapi, url, v.midia_mime);
-      encheu++;
-    }
-
-    // OS MOTIVOS CONTADOS, e não só listados. Com 115 anexos vazios, uma lista
-    // de 115 linhas iguais não se lê; "113 por isto, 2 por aquilo" se lê de
-    // relance e diz qual é o conserto.
-    const porMotivo = {};
-    for (const f of faltaram) porMotivo[f.porque] = (porMotivo[f.porque] || 0) + 1;
-    // E POR TELEFONE. Trinta e cinco falhas iguais podem ser o sistema inteiro
-    // ou UM telefone com token vencido — e são consertos opostos. Contadas por
-    // telefone, a diferença se vê de relance.
-    const porTelefone = {};
-    for (const f of faltaram) porTelefone[f.telefone] = (porTelefone[f.telefone] || 0) + 1;
-
-    console.log(`Resgate de anexos: ${vazias.length} sem arquivo, ${encheu} recuperado(s).`);
+    console.log(`Resgate de anexos: ${r.achadas} sem arquivo, ${r.recuperados} recuperado(s).`);
     res.json({
-      ok: true, dias, achadas: vazias.length, recuperados: encheu,
+      ok: true, dias, achadas: r.achadas, recuperados: r.recuperados,
       // Os ids da Uazapi, e não o conteúdo: servem para procurar no log e para
       // saber se vale tentar outra vez daqui a pouco.
-      nao_deram: faltaram,
-      por_motivo: porMotivo,
-      por_telefone: porTelefone,
-      recado: encheu
-        ? `${encheu} anexo(s) voltaram para a conversa. Recarregue o Zorvin para vê-los.`
+      nao_deram: r.nao_deram,
+      por_motivo: r.por_motivo,
+      por_telefone: r.por_telefone,
+      recado: r.recuperados
+        ? `${r.recuperados} anexo(s) voltaram para a conversa. Recarregue o Zorvin para vê-los.`
         : 'Nenhum voltou. A Uazapi já não tem estes arquivos, ou o telefone perdeu o token.',
     });
   } catch (e) {
     res.status(500).send(`Não consegui resgatar: ${(e && e.message) || e}`);
   }
 });
+
+// ============================================================
+//  O ARQUIVO QUE JÁ ESTÁ NO DEPÓSITO
+//
+//  Foi o caso de 22/10: o PDF de 19,9 MB chegou ao depósito às 11:13:33, e a
+//  ponte caiu antes de ligá-lo às cinco mensagens. O arquivo estava lá, e a
+//  conversa dizia "indisponível".
+//
+//  O endereço é o mesmo que o download teria dado — `recebidos/{id}.{ponta}`,
+//  com a ponta tirada do nome e do tipo, pela mesma `extensaoDoArquivo` —,
+//  então perguntar ao depósito custa um HEAD, sem baixar nada. Respondeu 200
+//  com tamanho, o arquivo está lá; qualquer outra coisa (não existe, não deu
+//  para perguntar) segue para o caminho de sempre, que é pedir à Uazapi.
+// ============================================================
+async function arquivoJaNoDeposito(id, mime, nome) {
+  const caminho = `recebidos/${id}.${extensaoDoArquivo(mime, nome)}`;
+  const { data } = supabase.storage.from('anexos').getPublicUrl(caminho);
+  const url = data && data.publicUrl;
+  if (!url) return null;
+  try {
+    const r = await fetchComTimeout(url, { method: 'HEAD' }, 10000);
+    return r.ok && Number(r.headers.get('content-length')) > 0 ? url : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** As mensagens de anexo sem arquivo, com o que o resgate precisa. Pede o
+ *  nome e o motivo da recusa junto; numa base sem essas colunas (nasceram à
+ *  mão), pede sem elas, em vez de não resgatar nada. */
+async function anexosSemArquivo({ desde, ate, limite }) {
+  const consulta = (colunas) => {
+    let q = supabase.from('mensagens').select(colunas)
+      .neq('tipo', 'texto')
+      .gte('criado_em', desde);
+    if (ate) q = q.lt('criado_em', ate);
+    return q.order('criado_em', { ascending: false }).limit(limite);
+  };
+  const basicas = 'id, id_uazapi, conversa_id, tipo, midia_url, midia_mime, criado_em';
+  let r = await consulta(`${basicas}, midia_nome, midia_erro`);
+  if (r.error && ['42703', 'PGRST204'].includes(String(r.error.code))) r = await consulta(basicas);
+  return r;
+}
+
+// ============================================================
+//  O RESGATE DOS ANEXOS VAZIOS — um caminho só, para a porta e para a subida
+//
+//  A porta `/anexos/resgatar` é a pergunta feita por alguém; a subida da
+//  ponte (logo abaixo) é a mesma pergunta feita sozinha. Duas escritas da
+//  mesma regra divergiriam no primeiro conserto.
+//
+//  POR MENSAGEM, E NÃO POR CÓPIA (22/10). Num grupo com cinco telefones nossos
+//  a mesma mensagem é cinco linhas; o resgate pedia o arquivo cinco vezes, uma
+//  por linha. Agora é uma por id da Uazapi, e `trocarMiniaturaPeloArquivo`
+//  põe o arquivo nas cinco. A contagem continua sendo de linhas: é o que a
+//  tela mostra, uma bolha em cada conversa.
+//
+//  O DEPÓSITO PRIMEIRO, a Uazapi depois. E a Uazapi só para o que chegou a
+//  partir de `uazapiDesde`, quando ele vem (é a subida que o manda; a porta,
+//  não): o que ficou de fora volta contado em `deixados`, e não em
+//  `nao_deram` — ninguém pediu e ouviu "não".
+// ============================================================
+async function resgatarAnexosVazios({ dias, limite, ate = null, pularDefinitivos = false, uazapiDesde = null }) {
+  const desde = new Date(Date.now() - dias * 86400000).toISOString();
+  // MAIS DO QUE O LIMITE, de propósito: a peneira do arquivo vazio é feita
+  // aqui (uma miniatura `data:` não é "coluna nula", e o banco não sabe
+  // disso), então pedir só `limite` linhas devolveria quase só mensagens que
+  // já têm arquivo e o resgate acharia meia dúzia.
+  const { data: candidatas, error } = await anexosSemArquivo({ desde, ate, limite: limite * 20 });
+  if (error) return { erro: error.message, achadas: 0, recuperados: 0 };
+
+  const vazias = (candidatas || [])
+    .filter((c) => c.id_uazapi && ehSoMiniatura(c.midia_url))
+    // A RECUSA DEFINITIVA não se pergunta de novo sozinha: a Uazapi já disse
+    // que não tem, ou o arquivo não cabe. A porta, que alguém abriu de
+    // propósito, pergunta assim mesmo — é o jeito de tentar outra vez.
+    .filter((c) => !(pularDefinitivos && c.midia_erro))
+    .slice(0, limite);
+  if (!vazias.length) return { achadas: 0, recuperados: 0, nao_deram: [], por_motivo: {}, por_telefone: {} };
+
+  // De qual telefone é cada mensagem. Duas idas ao banco para o lote inteiro,
+  // e não duas por mensagem.
+  const idsDeConversa = [...new Set(vazias.map((v) => v.conversa_id).filter(Boolean))];
+  const { data: conversas } = await supabase.from('conversas')
+    .select('id, advogado_id').in('id', idsDeConversa);
+  const advDaConversa = new Map((conversas || []).map((c) => [String(c.id), c.advogado_id]));
+  const { data: advs } = await supabase.from('advogados')
+    .select('id, nome, token, servidor').in('id', [...new Set((conversas || []).map((c) => c.advogado_id))]);
+  const advPorId = new Map((advs || []).map((a) => [String(a.id), a]));
+  const advDe = (v) => advPorId.get(String(advDaConversa.get(String(v.conversa_id))));
+
+  const porMensagem = new Map();
+  for (const v of vazias) {
+    if (!porMensagem.has(v.id_uazapi)) porMensagem.set(v.id_uazapi, []);
+    porMensagem.get(v.id_uazapi).push(v);
+  }
+
+  const desdeDaUazapi = uazapiDesde ? new Date(uazapiDesde).getTime() : null;
+  let encheu = 0;
+  let deixados = 0;
+  const faltaram = [];
+  for (const [id, copias] of porMensagem) {
+    // A cópia que pede: a de um telefone que tem token. No grupo, qualquer
+    // um dos cinco serve — é o mesmo arquivo.
+    const pede = copias.find((v) => { const a = advDe(v); return a && a.token; }) || copias[0];
+    const adv = advDe(pede);
+
+    const noDeposito = await arquivoJaNoDeposito(id, pede.midia_mime, pede.midia_nome);
+    if (noDeposito) {
+      await trocarMiniaturaPeloArquivo(id, noDeposito, pede.midia_mime);
+      encheu += copias.length;
+      continue;
+    }
+
+    if (desdeDaUazapi && !copias.some((v) => new Date(v.criado_em).getTime() >= desdeDaUazapi)) {
+      deixados += copias.length;
+      continue;
+    }
+
+    if (!adv || !adv.token) {
+      for (let i = 0; i < copias.length; i++) {
+        faltaram.push({ id, telefone: (adv && adv.nome) || '(não achei)',
+                        porque: adv ? 'este telefone está sem token no cadastro'
+                                    : 'não achei o telefone desta conversa' });
+      }
+      continue;
+    }
+    const servidor = (adv.servidor || 'https://novaera.uazapi.com').replace(/\/$/, '');
+    const relato = { motivo: '' };
+    // O NOME VAI JUNTO: é dele que sai a ponta do arquivo no depósito, e sem
+    // ele uma planilha seria guardada como ".bin".
+    const conteudo = pede.midia_nome ? { fileName: pede.midia_nome } : {};
+    const url = await baixarMidiaRecebida(servidor, adv.token,
+      { messageid: id, content: conteudo }, pede.midia_mime, relato);
+    if (!url) {
+      // O QUE JÁ SE SABE PERDIDO FICA DITO NA TELA. O resgate é a única
+      // ocasião em que alguém pergunta de novo por um anexo antigo; deixar a
+      // resposta só nesta página faria a conversa continuar mostrando
+      // "indisponível" para sempre, como se ainda houvesse esperança.
+      if (ehRecusaDefinitiva(relato.motivo)) {
+        await marcarMidiaIndisponivel(id, relato.motivo);
+      }
+      for (let i = 0; i < copias.length; i++) {
+        faltaram.push({ id, telefone: adv.nome || String(adv.id),
+                        porque: relato.motivo || 'não deu, e não sei dizer por quê' });
+      }
+      continue;
+    }
+    await trocarMiniaturaPeloArquivo(id, url, pede.midia_mime);
+    encheu += copias.length;
+  }
+
+  // OS MOTIVOS CONTADOS, e não só listados. Com 115 anexos vazios, uma lista
+  // de 115 linhas iguais não se lê; "113 por isto, 2 por aquilo" se lê de
+  // relance e diz qual é o conserto.
+  const porMotivo = {};
+  for (const f of faltaram) porMotivo[f.porque] = (porMotivo[f.porque] || 0) + 1;
+  // E POR TELEFONE. Trinta e cinco falhas iguais podem ser o sistema inteiro
+  // ou UM telefone com token vencido — e são consertos opostos. Contadas por
+  // telefone, a diferença se vê de relance.
+  const porTelefone = {};
+  for (const f of faltaram) porTelefone[f.telefone] = (porTelefone[f.telefone] || 0) + 1;
+
+  return { achadas: vazias.length, recuperados: encheu, deixados, nao_deram: faltaram,
+           por_motivo: porMotivo, por_telefone: porTelefone };
+}
+
+// ============================================================
+//  E A MESMA PERGUNTA, SOZINHA, DEPOIS DE SUBIR (22/10)
+//
+//  As tentativas de novo de um anexo (20 s, 1 min, 5 min) moram em relógios
+//  deste processo. A ponte que cai — a queda de memória de 22/10, ou só uma
+//  publicação — leva os relógios junto, e o anexo que estava no meio fica
+//  "indisponível" para sempre, ainda que o arquivo esteja no depósito.
+//
+//  Então, um minuto depois de subir, a ponte procura o que o processo
+//  anterior deixou: anexos dos últimos dois dias, sem arquivo, chegados ANTES
+//  desta subida (os de depois têm a perseguição deste processo cuidando
+//  deles), sem recusa definitiva. No máximo trinta, um de cada vez, pelas
+//  mesmas portas de todo download.
+//
+//  O DEPÓSITO, PARA OS DOIS DIAS; A UAZAPI, SÓ PARA O QUE A QUEDA CORTOU.
+//  Perguntar ao depósito é um HEAD, sem custo. Pedir à Uazapi é um download,
+//  e a ponte do plano gratuito SOBE MUITAS VEZES: ela dorme depois de 15
+//  minutos sem ninguém chamar, e cada mensagem da madrugada a acorda de novo.
+//  Um anexo que a perseguição já tentou até o fim, e que não veio, seria
+//  pedido outra vez a cada acordada, para ouvir a mesma resposta. Então a
+//  Uazapi é perguntada só pelo que chegou dentro da JANELA DA PERSEGUIÇÃO
+//  antes desta subida — as esperas somadas, mais dez minutos de folga para as
+//  tentativas e para a fila dos grandes. Um processo que caiu antes disso
+//  ainda estava perseguindo esse anexo; depois disso, ele já tinha
+//  terminado. E o que ficou de fora continua ao alcance da porta
+//  `/anexos/resgatar`, que pergunta por tudo.
+//
+//  Um minuto, e não na hora: a subida já tem a caixa de entrada, as
+//  permissões e os avisos de audiência, e os atrasados podem esperar o
+//  primeiro minuto sem ninguém notar. `RESGATE_AO_SUBIR_MS` é OPCIONAL, para
+//  a bancada encurtar — como `CAIXA_INTERVALO_MS`.
+// ============================================================
+const RESGATE_AO_SUBIR_MS = Number(process.env.RESGATE_AO_SUBIR_MS) || 60 * 1000;
+setTimeout(() => {
+  // Aqui dentro, e não lá fora: `ESPERAS_DO_ANEXO` é declarada mais abaixo
+  // neste arquivo, e lida na hora de carregar ele ainda não existiria.
+  const janela = ESPERAS_DO_ANEXO.reduce((soma, ms) => soma + ms, 0) + 10 * 60 * 1000;
+  resgatarAnexosVazios({ dias: 2, limite: 30, ate: new Date(PONTE_SUBIU_EM).toISOString(),
+                         pularDefinitivos: true,
+                         uazapiDesde: new Date(PONTE_SUBIU_EM - janela).toISOString() })
+    .then((r) => {
+      if (r.erro) console.log(`Resgate depois de subir: o banco recusou a consulta — ${r.erro}`);
+      else if (r.achadas) {
+        console.log(`Resgate depois de subir: ${r.achadas} anexo(s) dos últimos 2 dias estavam `
+          + `sem arquivo; ${r.recuperados} voltaram para a conversa.`
+          + (r.deixados
+            ? ` ${r.deixados} anexo(s) ficaram para a porta /anexos/resgatar: chegaram mais de `
+              + `${Math.round(janela / 60000)} min antes desta subida, quando a perseguição já `
+              + 'tinha terminado, e não foram pedidos de novo à Uazapi.'
+            : ''));
+      }
+    })
+    .catch((e) => console.log('Resgate depois de subir:', (e && e.message) || e));
+}, RESGATE_AO_SUBIR_MS).unref();
 
 app.post('/webhook', async (req, res) => {
   // JÁ ESTAMOS SAINDO: é melhor recusar do que aceitar e não terminar.
@@ -2790,7 +2944,288 @@ function extensaoDoArquivo(mime, nome) {
   return sub;
 }
 
+// ============================================================
+//  UM DOWNLOAD POR MENSAGEM, E UM ARQUIVO GRANDE POR VEZ (22/10)
+//
+//  E-MAIL DA RENDER, 22/10 às 11:13: "zorvin-bridge exceeded its memory
+//  limit". A ponte foi derrubada e religada sozinha 12 segundos depois.
+//
+//  MEDIDO no Supabase, só lendo: às 11:13:19 um PDF de 19,9 MB foi mandado
+//  num GRUPO em que estão CINCO telefones do escritório. Chegaram cinco
+//  avisos da mesma mensagem em 365 ms, e cada um saiu baixando o mesmo
+//  arquivo, inteiro, na memória. O plano gratuito da Render tem 512 MB.
+//
+//  REPRODUZIDO na bancada com o `index.js` de verdade: um telefone recebendo
+//  um PDF de 20 MB leva a ponte de 73 MB a 202 MB; cinco telefones recebendo
+//  o mesmo PDF levam a 586 MB. Cada MB de arquivo custa uns seis enquanto
+//  passa por aqui: o JSON da Uazapi, o texto dele, o base64 lido e o arquivo
+//  decodificado ficam na memória juntos.
+//
+//  E A QUEDA LEVOU O ARQUIVO JUNTO. A primeira cópia chegou ao depósito às
+//  11:13:33; a ponte morreu antes de ligá-la às mensagens, e as tentativas
+//  de novo (20 s, 1 min, 5 min) moravam em relógios do processo que morreu.
+//  As cinco cópias ficaram dizendo "indisponível", com o arquivo guardado.
+//
+//  TRÊS REGRAS, e as três medem a mesma coisa — memória:
+//
+//  1. UM DOWNLOAD POR MENSAGEM (`umaVezPorMensagem`). O mesmo id da Uazapi
+//     pedido por cinco telefones é um arquivo só: os outros quatro esperam o
+//     primeiro, e `trocarMiniaturaPeloArquivo` já põe o arquivo em TODAS as
+//     cópias.
+//  2. ARQUIVO GRANDE BAIXA SOZINHO (`naVez`). Um cliente que manda quatro
+//     PDFs de 20 MB de uma vez seria a mesma queda, por outro caminho. São
+//     três vagas: o pequeno ocupa uma, o grande (10 MB ou mais) ocupa as
+//     três. O tamanho vem do próprio aviso do WhatsApp (`fileLength`, que
+//     chegou certo nas cinco cópias: 20.889.483 bytes, o que foi guardado).
+//     O que chega SEM tamanho conta como grande: não saber é o caso em que o
+//     arquivo pode ter qualquer tamanho.
+//  3. ACIMA DE 50 MB, NÃO BAIXA (`TETO_DO_ANEXO_BYTES`). É o teto do
+//     depósito no plano gratuito do Supabase ("For Free projects, the limit
+//     can't exceed 50 MB"): baixar um arquivo de 100 MB para o depósito
+//     recusar seria derrubar a ponte por nada. Pelo tamanho do aviso, antes
+//     de pedir; e, sem tamanho no aviso, lendo com teto — a leitura para
+//     quando passa dele, em vez de descobrir depois de ter tudo na memória.
+//     Desde 08/09 chegaram 5.599 anexos, e o maior tinha 25,7 MB: o teto é
+//     uma rede, e não o caminho de todo dia.
+//
+//  O que cabe na memória, por isto, MEDIDO na bancada: os cinco telefones
+//  com o PDF de 20 MB ficam entre 175 e 210 MB; quatro PDFs diferentes de
+//  20 MB, entre 215 e 235; um arquivo de 48 MB sozinho, em até uns 370. A
+//  ponte parada ocupa uns 75.
+// ============================================================
+const MB = 1024 * 1024;
+const TETO_DO_ANEXO_BYTES = Math.round((Number(process.env.ANEXO_TETO_MB) || 50) * MB);
+// O base64 é 4/3 do arquivo, e o JSON em volta dele, um pouco mais.
+const TETO_DO_JSON_BYTES = Math.ceil(TETO_DO_ANEXO_BYTES * 4 / 3) + MB;
+const ANEXO_GRANDE_BYTES = 10 * MB;
+const VAGAS_DE_ARQUIVO = 3;
+
+/** O tamanho que o próprio aviso do WhatsApp diz que o arquivo tem.
+ *  `null` quando não diz — e quem chama trata "não sei" como grande. */
+function tamanhoDeclarado(m) {
+  const c = (m && m.content && typeof m.content === 'object') ? m.content : {};
+  const n = Number(c.fileLength ?? c.filelength ?? (m && m.fileLength));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+const emMB = (bytes) => (bytes / MB).toFixed(1).replace('.', ',');
+
+/** A frase do arquivo que não cabe. Ela vai para `midia_erro`, e é ela que
+ *  a pessoa lê ao passar o mouse na bolha: diz o tamanho, o teto e o que
+ *  fazer. Começa sempre igual, e é por esse começo que `ehRecusaDefinitiva`
+ *  a reconhece. */
+function fraseDoGrandeDemais(bytes, soOComeco) {
+  return `arquivo grande demais: ${soOComeco ? 'passa de' : 'tem'} ${emMB(bytes)} MB, `
+    + `acima dos ${Math.round(TETO_DO_ANEXO_BYTES / MB)} MB que o depósito do Zorvin aceita. `
+    + 'Ele não foi baixado — abra a conversa no celular para vê-lo.';
+}
+
+class GrandeDemais extends Error {
+  constructor(bytes, soOComeco) {
+    super(fraseDoGrandeDemais(bytes, soOComeco));
+    this.bytes = bytes;
+  }
+}
+
+/** Lê o corpo de uma resposta, mas só até `teto` bytes.
+ *
+ *  `arrayBuffer()` e `json()` leem TUDO antes de devolver qualquer coisa: um
+ *  arquivo de 300 MB derrubaria a ponte antes de alguém conferir o tamanho.
+ *  Aqui o cabeçalho é perguntado primeiro, e a contagem acompanha a leitura
+ *  quando ele não vem. Passou do teto, a leitura é cancelada e o que já veio
+ *  é solto.
+ *
+ *  COM O TAMANHO NO CABEÇALHO, UM BUFFER SÓ: cada pedaço é copiado para
+ *  dentro dele assim que chega, e vira lixo pequeno na hora. Juntar os
+ *  pedaços no fim (`concat`) teria o arquivo duas vezes na memória ao mesmo
+ *  tempo. Se vierem mais bytes do que o cabeçalho disse (resposta comprimida,
+ *  em que ele conta o tamanho comprimido), a leitura volta a juntar pedaços. */
+async function lerComTeto(resposta, teto) {
+  const declarado = Number(resposta.headers.get('content-length'));
+  if (Number.isFinite(declarado) && declarado > teto) {
+    try { await resposta.body?.cancel(); } catch (_) { /* já fechou */ }
+    throw new GrandeDemais(declarado, false);
+  }
+  if (!resposta.body) return Buffer.alloc(0);
+  let unico = Number.isFinite(declarado) && declarado > 0 ? Buffer.allocUnsafe(declarado) : null;
+  const pedacos = [];
+  let total = 0;
+  const leitor = resposta.body.getReader();
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    if (total + value.byteLength > teto) {
+      unico = null;
+      pedacos.length = 0;
+      try { await leitor.cancel(); } catch (_) { /* já fechou */ }
+      throw new GrandeDemais(total + value.byteLength, true);
+    }
+    if (unico && total + value.byteLength <= unico.length) {
+      unico.set(value, total);
+    } else {
+      if (unico) { pedacos.push(unico.subarray(0, total)); unico = null; }
+      pedacos.push(value);
+    }
+    total += value.byteLength;
+  }
+  return unico ? unico.subarray(0, total) : Buffer.concat(pedacos, total);
+}
+
+// ------------------------------------------------------------
+//  O ARQUIVO QUE VEM DENTRO DO JSON
+//
+//  A Uazapi pode devolver o arquivo em base64 dentro do JSON. Lido do jeito
+//  comum, os bytes da resposta viram TEXTO antes do `JSON.parse` — uma cópia
+//  inteira. MEDIDO na bancada, com um arquivo de 48 MB:
+//
+//  - com o JSON todo em letras simples, o Node guarda esse texto fora do
+//    heap do JavaScript, e o pico foi de 403 a 413 MB (contra 368 a 372 pela
+//    leitura direta);
+//  - com UMA letra fora do latim no JSON (o travessão que o Word põe no nome
+//    do arquivo), o texto vai para o heap, a dois bytes por letra: 128 MB de
+//    texto para um arquivo de 48. Com o heap limitado a 96 MB, a ponte morreu
+//    ("Reached heap limit"), e pela leitura direta o arquivo chegou igual.
+//
+//  Então, numa resposta grande, o base64 é decodificado DIRETO dos bytes da
+//  resposta, aos pedaços, e só o resto do JSON (o tipo, o nome) passa pelo
+//  `JSON.parse`. A régua de qual campo é o arquivo é a de sempre: os mesmos
+//  nomes, na mesma ordem, no primeiro nível do JSON, e texto com mais de 100
+//  caracteres — conferida depois do corte, porque a busca pelos bytes acha
+//  o nome em qualquer lugar.
+//
+//  NA DÚVIDA, O CAMINHO DE SEMPRE. Resposta pequena (até 1 MB: quase toda
+//  foto), barra invertida dentro do campo (um JSON que escapa caracteres) ou
+//  JSON que não fecha voltam para o `JSON.parse` inteiro, que é o que sempre
+//  funcionou. O atalho só existe onde a memória pesa.
+// ------------------------------------------------------------
+const CHAVES_DO_ARQUIVO = ['file', 'data', 'base64', 'media', 'buffer'];
+const RESPOSTA_GRANDE_BYTES = MB;
+const BRANCOS = new Set([0x20, 0x09, 0x0a, 0x0d]);
+
+function arquivoDentroDoJson(corpo) {
+  const inteiro = () => {
+    try { return { dados: JSON.parse(corpo.toString('utf8')), bytes: null }; }
+    catch (_) { return { dados: null, bytes: null }; }
+  };
+  if (corpo.length < RESPOSTA_GRANDE_BYTES) return inteiro();
+  for (const chave of CHAVES_DO_ARQUIVO) {
+    const nome = Buffer.from(`"${chave}"`);
+    for (let de = corpo.indexOf(nome); de >= 0; de = corpo.indexOf(nome, de + 1)) {
+      let i = de + nome.length;
+      while (BRANCOS.has(corpo[i])) i++;
+      if (corpo[i] !== 0x3a) continue;          // ":" — era um texto igual à chave, não a chave
+      i++;
+      while (BRANCOS.has(corpo[i])) i++;
+      if (corpo[i] !== 0x22) continue;          // o valor não é texto
+      const inicio = i + 1;
+      const fim = corpo.indexOf(0x22, inicio);
+      if (fim < 0) return inteiro();
+      if (fim - inicio <= 100) continue;        // texto curto: não é arquivo
+      const barra = corpo.indexOf(0x5c, inicio);
+      if (barra >= 0 && barra < fim) return inteiro();
+      let dados;
+      try { dados = JSON.parse(corpo.toString('utf8', 0, inicio) + corpo.toString('utf8', fim)); }
+      catch (_) { return inteiro(); }
+      // O MESMO CAMPO QUE O CAMINHO DE SEMPRE ESCOLHERIA: o primeiro destes
+      // nomes com valor, no PRIMEIRO NÍVEL do JSON. O texto cortado volta
+      // como "" no lugar dele. Se o corte caiu num campo de dentro (uma
+      // miniatura com o mesmo nome, por exemplo), ou se outro nome vem antes
+      // na ordem, o arquivo é outro — e este `dados`, que só perdeu um campo
+      // que o caminho de sempre não leria, segue para ele sem um segundo
+      // `JSON.parse`.
+      const antes = CHAVES_DO_ARQUIVO.slice(0, CHAVES_DO_ARQUIVO.indexOf(chave));
+      if (!dados || typeof dados !== 'object' || dados[chave] !== '' || antes.some((k) => dados[k])) {
+        return { dados, bytes: null };
+      }
+      return { dados, bytes: decodificarBase64(corpo, inicio, fim) };
+    }
+  }
+  return inteiro();
+}
+
+/** O base64 de `corpo[inicio..fim)` decodificado aos pedaços, para um buffer
+ *  já do tamanho certo. Cada pedaço tem um múltiplo de 4 caracteres, que é o
+ *  que faz decodificar por partes dar o mesmo que decodificar tudo.
+ *
+ *  256 KB, e não 1 MB: a partir de ~1 MB o Node guarda cada pedaço fora do
+ *  heap, e o lixo do tamanho do arquivo inteiro fica esperando o coletor.
+ *  MEDIDO com 48 MB: 1 MB deu picos de 369 a 431 MB; 256 KB, de 368 a 372. */
+function decodificarBase64(corpo, inicio, fim) {
+  let i = inicio;
+  if (corpo.toString('latin1', i, Math.min(i + 5, fim)) === 'data:') {
+    const virgula = corpo.indexOf(0x2c, i);
+    if (virgula >= 0 && virgula < fim) i = virgula + 1;
+  }
+  const saida = Buffer.allocUnsafe(Math.ceil((fim - i) * 3 / 4));
+  let escrito = 0;
+  const PASSO = 256 * 1024;   // múltiplo de 4
+  for (let p = i; p < fim; p += PASSO) {
+    escrito += saida.write(corpo.toString('latin1', p, Math.min(p + PASSO, fim)), escrito, 'base64');
+  }
+  return saida.subarray(0, escrito);
+}
+
+// UM DOWNLOAD POR MENSAGEM. A promessa de quem chegou primeiro é a de
+// todos: quem chega com o mesmo id enquanto ela não termina espera por ela, e
+// recebe o mesmo endereço. Terminada, sai do mapa — então o mapa nunca cresce
+// além do que está sendo baixado agora.
+const arquivosEmVoo = new Map();   // id da mensagem → promessa de { url, mime, motivo }
+
+function umaVezPorMensagem(id, fazer) {
+  const chave = String(id);
+  const emVoo = arquivosEmVoo.get(chave);
+  if (emVoo) return emVoo;
+  const promessa = Promise.resolve().then(fazer)
+    .finally(() => { arquivosEmVoo.delete(chave); });
+  arquivosEmVoo.set(chave, promessa);
+  return promessa;
+}
+
+// AS VAGAS. Fila de verdade (quem pediu primeiro entra primeiro): um grande
+// esperando na frente segura os pequenos de trás, senão uma sequência de
+// fotos o deixaria esperando para sempre.
+let vagasOcupadas = 0;
+const esperandoVaga = [];   // { peso, entrar }
+
+function deixarEntrar() {
+  while (esperandoVaga.length && vagasOcupadas + esperandoVaga[0].peso <= VAGAS_DE_ARQUIVO) {
+    const proximo = esperandoVaga.shift();
+    vagasOcupadas += proximo.peso;
+    proximo.entrar();
+  }
+}
+
+const pesoDoArquivo = (bytes) => (!bytes || bytes >= ANEXO_GRANDE_BYTES ? VAGAS_DE_ARQUIVO : 1);
+
+async function naVez(peso, fazer) {
+  const p = Math.min(Math.max(peso || VAGAS_DE_ARQUIVO, 1), VAGAS_DE_ARQUIVO);
+  await new Promise((entrar) => { esperandoVaga.push({ peso: p, entrar }); deixarEntrar(); });
+  try {
+    return await fazer();
+  } finally {
+    vagasOcupadas -= p;
+    deixarEntrar();
+  }
+}
+
 async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
+  const porque = (motivo) => { if (relato) relato.motivo = motivo; return null; };
+  if (!token || !m.messageid) return porque('o telefone está sem token');
+  const tamanho = tamanhoDeclarado(m);
+  if (tamanho && tamanho > TETO_DO_ANEXO_BYTES) return porque(fraseDoGrandeDemais(tamanho, false));
+  try {
+    const feito = await umaVezPorMensagem(m.messageid, () => naVez(pesoDoArquivo(tamanho), async () => {
+      const deste = { motivo: '', mime: null };
+      const url = await baixarMidiaDeVerdade(servidor, token, m, mimeInformado, deste);
+      return { url, mime: deste.mime, motivo: deste.motivo };
+    }));
+    return feito.url || porque(feito.motivo || 'não deu, e não sei dizer por quê');
+  } catch (e) {
+    return porque(`estourou: ${(e && e.message) || e}`);
+  }
+}
+
+async function baixarMidiaDeVerdade(servidor, token, m, mimeInformado, relato) {
   // POR QUE NÃO DEU — dito para quem chamou, e não só para o log.
   //
   // A porta de resgate devolve uma lista de ids que não deram, e um id sem
@@ -2806,6 +3241,7 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
     const lembrada = rotaQueServe.get(servidor) || null;
 
     let dados = null;
+    let arquivoDoJson = null;   // o arquivo, já decodificado, quando veio dentro do JSON
     // O QUE CADA ROTA RESPONDEU — e não só "nenhuma respondeu".
     //
     // Com 35 anexos dando todos o mesmo motivo, "nenhuma rota respondeu"
@@ -2831,7 +3267,12 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
         const comoFoi = `${metodo} ${rota} respondeu ${r.status}`;
         if (r.ok) {
           respostas.push(comoFoi);
-          dados = await r.json().catch(() => null);
+          // COM TETO: o arquivo pode vir DENTRO deste JSON, em base64, e
+          // `json()` leria tudo antes de alguém conferir o tamanho. E sem
+          // copiar o JSON inteiro (`arquivoDentroDoJson`).
+          const lido = arquivoDentroDoJson(await lerComTeto(r, TETO_DO_JSON_BYTES));
+          dados = lido.dados;
+          arquivoDoJson = lido.bytes;
           if (dados) {
             if (!lembrada || lembrada.rota !== rota || lembrada.metodo !== metodo) {
               console.log(`downloadmedia: este servidor atende por ${metodo} ${rota}.`);
@@ -2852,6 +3293,9 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
           }
         }
       } catch (e) {
+        // GRANDE DEMAIS NÃO É A ROTA FALHANDO: ela serviu, e o arquivo é que
+        // não cabe. Tentar as outras rotas baixaria o mesmo arquivo de novo.
+        if (e instanceof GrandeDemais) throw e;
         respostas.push(`${metodo} ${rota} estourou (${(e && e.message) || e})`);
         if (lembrada && lembrada.rota === rota && lembrada.metodo === metodo) {
           rotaQueServe.delete(servidor);
@@ -2880,11 +3324,15 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
       mime = dados.mimetype || dados.mime || mimeInformado || 'application/octet-stream';
       const b64 = dados.file || dados.data || dados.base64 || dados.media || dados.buffer;
       const urlBaixavel = dados.url || dados.fileURL || dados.fileUrl || dados.link || dados.mediaUrl;
-      if (typeof b64 === 'string' && b64.length > 100) {
+      if (arquivoDoJson && arquivoDoJson.length) {
+        bytes = arquivoDoJson;
+        if (bytes.length > TETO_DO_ANEXO_BYTES) throw new GrandeDemais(bytes.length, false);
+      } else if (typeof b64 === 'string' && b64.length > 100) {
         bytes = Buffer.from(b64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+        if (bytes.length > TETO_DO_ANEXO_BYTES) throw new GrandeDemais(bytes.length, false);
       } else if (urlBaixavel) {
         const arq = await fetchComTimeout(urlBaixavel, {}, 20000);
-        if (arq.ok) bytes = Buffer.from(await arq.arrayBuffer());
+        if (arq.ok) bytes = await lerComTeto(arq, TETO_DO_ANEXO_BYTES);
       }
       if (!bytes || !bytes.length) {
         console.log('downloadmedia respondeu sem arquivo reconhecível:',
@@ -2905,9 +3353,11 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
           const salvo = await guardarArquivoDoEndereco(m.messageid, guardado);
           if (salvo.url) {
             console.log(`Anexo salvo pelo endereço que a Uazapi mandou à parte (${m.messageid}).`);
+            if (relato) relato.mime = salvo.mime;
             return salvo.url;
           }
         } catch (e) {
+          if (e instanceof GrandeDemais) throw e;
           console.log(`O endereço guardado também não serviu (${m.messageid}): ${(e && e.message) || e}`);
         }
       }
@@ -2931,8 +3381,13 @@ async function baixarMidiaRecebida(servidor, token, m, mimeInformado, relato) {
       return porque(`o Storage recusou: ${upErr.message}`);
     }
     const { data: pub } = supabase.storage.from('anexos').getPublicUrl(caminho);
+    if (relato) relato.mime = mime;
     return pub?.publicUrl || porque('o Storage guardou e não devolveu endereço');
   } catch (e) {
+    if (e instanceof GrandeDemais) {
+      console.log(`Anexo ${m.messageid}: ${e.message}`);
+      return porque(e.message);
+    }
     console.error('Erro em baixarMidiaRecebida:', e.message);
     return porque(`estourou: ${e.message}`);
   }
@@ -3000,6 +3455,10 @@ const RECUSAS_DEFINITIVAS = [
   // "failed to parse message content: unrecognized message type".
   /failed to parse message content/i,
   /unrecognized message type/i,
+  // E esta é NOSSA, e não da Uazapi: o arquivo existe, mas não cabe no
+  // depósito (`fraseDoGrandeDemais`). Tentar de novo daqui a cinco minutos
+  // baixaria o mesmo arquivo grande para ouvir a mesma recusa.
+  /arquivo grande demais:/i,
 ];
 
 /** A Uazapi disse NÃO, ou apenas não disse nada?
@@ -3220,7 +3679,7 @@ async function guardarArquivoDoEndereco(messageid, url) {
   const mime = mimePelaPonta(url);
   const arq = await fetchComTimeout(url, {}, 20000);
   if (!arq.ok) throw new Error(`o endereço respondeu ${arq.status}`);
-  const bytes = Buffer.from(await arq.arrayBuffer());
+  const bytes = await lerComTeto(arq, TETO_DO_ANEXO_BYTES);
   if (!bytes.length) throw new Error('o endereço respondeu vazio');
   const ext = (String(mime).split('/')[1] || 'bin').split(';')[0];
   const caminho = `recebidos/${messageid}.${ext}`;
@@ -3256,12 +3715,21 @@ async function resgatarAnexoVazio(id, url) {
     if (!vazias.length) return;   // não existe, ou já tem arquivo
 
     // O ARQUIVO É BAIXADO UMA VEZ SÓ, e não uma por cópia: é o mesmo arquivo, e
-    // baixá-lo duas vezes gastaria a rede e o Storage por nada.
-    const guardado = await guardarArquivoDoEndereco(id, url);
-    if (!guardado.url) return;
+    // baixá-lo duas vezes gastaria a rede e o Storage por nada. E pelas mesmas
+    // portas do download do aviso (22/10): se ele já está baixando este
+    // arquivo, espera por ele; e um arquivo grande entra na vez dele.
+    const peloEndereco = () => naVez(VAGAS_DE_ARQUIVO, () => guardarArquivoDoEndereco(id, url));
+    let guardado = await umaVezPorMensagem(id, peloEndereco);
+    // A promessa que estava no ar podia ser a do download do aviso — e ele
+    // ter voltado sem arquivo, que é justamente o caso deste resgate. Aí a
+    // vez é do endereço.
+    if (!guardado || !guardado.url) guardado = await umaVezPorMensagem(id, peloEndereco);
+    if (!guardado || !guardado.url) return;
     for (const alvo of vazias) {
+      const remendo = { midia_url: guardado.url };
+      if (guardado.mime) remendo.midia_mime = guardado.mime;
       let escrita = supabase.from('mensagens')
-        .update({ midia_url: guardado.url, midia_mime: guardado.mime })
+        .update(remendo)
         .eq('id', alvo.id);
       escrita = alvo.midia_url === null || alvo.midia_url === undefined
         ? escrita.is('midia_url', null)
@@ -3271,6 +3739,9 @@ async function resgatarAnexoVazio(id, url) {
     }
     console.log(`Anexo resgatado: a mensagem ${id} estava sem arquivo em ${vazias.length} conversa(s) e recebeu o que a Uazapi mandou depois.`);
   } catch (e) {
+    // GRANDE DEMAIS É RESPOSTA, e fica dita na mensagem: sem isso a bolha
+    // seguiria prometendo um arquivo que não vai entrar no depósito.
+    if (e instanceof GrandeDemais) await marcarMidiaIndisponivel(id, e.message);
     console.log(`Não consegui resgatar o anexo de ${id}: ${(e && e.message) || e}`);
   }
 }
@@ -4297,7 +4768,11 @@ async function processarFilaDeEnvio() {
             console.log(`Envio por URL falhou (${resposta.status}): ${det.slice(0, 200)}`);
             try {
               const caminho = caminhoDoStorage(item.midia_url);
-              if (caminho) {
+              // NA VEZ DOS ARQUIVOS GRANDES (22/10): aqui o arquivo inteiro
+              // fica na memória três vezes (os bytes, o base64 e o corpo do
+              // pedido), sem saber o tamanho antes. Junto de um download
+              // grande, seria a queda de 22/10 por outro caminho.
+              if (caminho) await naVez(VAGAS_DE_ARQUIVO, async () => {
                 const { data: blob, error: dlErr } = await supabase.storage.from('anexos').download(caminho);
                 if (dlErr) {
                   console.error('Erro ao baixar anexo do Storage:', dlErr.message);
@@ -4306,7 +4781,7 @@ async function processarFilaDeEnvio() {
                   const mime = item.midia_mime || 'application/octet-stream';
                   resposta = await enviarMidia(`data:${mime};base64,${buff.toString('base64')}`, 'base64');
                 }
-              }
+              });
             } catch (prepErro) {
               console.error('Falha na 2ª tentativa (base64):', prepErro.message);
             }

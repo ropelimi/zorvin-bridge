@@ -11,6 +11,7 @@
 // Cobre o que a ponte usa: select com filtros e junções embutidas, insert,
 // upsert com `on_conflict`, patch, delete, a API de admin do Auth e o Storage.
 import http from "node:http";
+import crypto from "node:crypto";
 
 const eq = (a, b) => String(a ?? "") === String(b ?? "");
 
@@ -217,10 +218,22 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
                                     // A que não está aqui continua caindo no caminho de
                                     // sempre (vira "tabela"), como caía antes — e as
                                     // provas de antes não mudam de assunto por isso.
-                                    rpcs = {} } = {}) {
+                                    rpcs = {},
+                                    // O QUE JÁ ESTÁ NO DEPÓSITO quando a ponte sobe:
+                                    // `{ "anexos/recebidos/x.pdf": tamanho }`. É o caso de
+                                    // 22/10 — o arquivo guardado, e a ponte caída antes de
+                                    // ligá-lo à mensagem. Sem poder começar assim, o
+                                    // resgate depois de subir só seria provado com o
+                                    // depósito vazio, que é o caso que não aconteceu.
+                                    deposito = {} } = {}) {
   const dados = tabelas;                       // { nome: [linhas] }
   const contas = usuarios.slice();             // Auth
-  const arquivos = new Map();                  // Storage
+  const arquivos = new Map(Object.entries(deposito));   // Storage
+  // A IMPRESSÃO DIGITAL de cada arquivo que subiu (sha256 dos bytes). O
+  // tamanho sozinho não prova que o arquivo chegou inteiro e certo: um base64
+  // decodificado aos pedaços com o corte no lugar errado dá o mesmo tamanho e
+  // outro arquivo.
+  const digitais = new Map();
   // O CABEÇALHO importa tanto quanto os bytes: é ele que decide se cada
   // navegador vai rebaixar o arquivo de novo daqui a uma hora ou daqui a um ano.
   const cabecalhosDeUpload = new Map();         // caminho → cache-control enviado
@@ -233,8 +246,14 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
   const servidor = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     const caminho = url.pathname;
-    let corpo = "";
-    for await (const p of req) corpo += p;
+    // OS BYTES, e não um texto montado aos pedaços: `corpo += pedaço` passa
+    // cada pedaço por UTF-8, e um arquivo binário chegaria aqui estragado — o
+    // depósito de mentira guardaria outro arquivo, e a impressão digital
+    // acusaria a ponte por um defeito daqui.
+    const pedacosDoCorpo = [];
+    for await (const p of req) pedacosDoCorpo.push(p);
+    const bruto = Buffer.concat(pedacosDoCorpo);
+    let corpo = bruto.toString("utf8");
     const json = corpo ? (() => { try { return JSON.parse(corpo); } catch (_) { return null; } })() : null;
     // `autorizacao` vai junto: há rotas que leem COMO QUEM PEDIU (o bilhete da
     // pessoa, e não a chave da ponte), e é por ele que se prova que a regra de
@@ -333,11 +352,24 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     if (caminho.startsWith("/storage/v1/object/")) {
       const chave = caminho.replace("/storage/v1/object/", "").replace(/^authenticated\//, "");
       if (req.method === "POST" || req.method === "PUT") {
-        arquivos.set(chave, corpo.length);
+        arquivos.set(chave, bruto.length);
+        digitais.set(chave, crypto.createHash("sha256").update(bruto).digest("hex"));
         cabecalhosDeUpload.set(chave, String(req.headers["cache-control"] || ""));
         return responder(200, { Key: chave });
       }
       if (req.method === "GET") { res.writeHead(200); return res.end("bytes"); }
+      // "ESTE ARQUIVO EXISTE?", pelo endereço público, sem baixar nada. O de
+      // verdade responde 200 com o tamanho, e 400 ("Object not found") quando
+      // não existe. O GET acima responde a qualquer chave, de propósito (as
+      // provas antigas baixam arquivos que nunca subiram); a pergunta do HEAD,
+      // não: respondendo sempre que sim, o resgate ligaria a mensagem a um
+      // arquivo que não está lá.
+      if (req.method === "HEAD") {
+        const tamanho = arquivos.get(chave.replace(/^public\//, ""));
+        if (tamanho === undefined) { res.writeHead(400); return res.end(); }
+        res.writeHead(200, { "Content-Length": String(tamanho), "Content-Type": "application/octet-stream" });
+        return res.end();
+      }
     }
 
     // ---------------- Funções (RPC) ----------------
@@ -529,7 +561,7 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
     servidor.listen(porta, "127.0.0.1", () => {
       resolve({
         url: `http://127.0.0.1:${servidor.address().port}`,
-        dados, contas, arquivos, cabecalhosDeUpload, chamadas,
+        dados, contas, arquivos, digitais, cabecalhosDeUpload, chamadas,
         parar: () => new Promise((r) => servidor.close(r)),
       });
     });
@@ -750,16 +782,59 @@ export function subirFalsaUazapi({
   // O corpo da recusa também é de verdade: é nele que a Uazapi diz o que
   // queria receber, e era ele que a ponte jogava fora.
   metodoDoDownload = "POST",
+  // COMO O ARQUIVO VEM NA RESPOSTA DO DOWNLOAD.
+  //
+  // "base64" é o arquivo dentro do JSON (`file`), que é o que esta bancada
+  // sempre fez. "endereco" é o JSON trazendo só um endereço (`fileURL`), e o
+  // arquivo servido nele — a outra forma que a ponte sabe ler. Não se sabe
+  // qual das duas a Uazapi do escritório usa (a resposta não fica guardada
+  // em lugar nenhum), então a prova da memória passa pelas duas.
+  formatoDoDownload = "base64",
+  // A RESPOSTA SEM TAMANHO NO CABEÇALHO, mandada aos pedaços. É o caminho em
+  // que a ponte não sabe o tamanho antes de ler, e tem de contar enquanto lê.
+  respostaEmPedacos = false,
+  // O JSON COM AS BARRAS ESCAPADAS (`\/` no lugar de `/`), como alguns
+  // servidores mandam.
+  // Dentro do base64 isso troca os bytes de lugar, e é por isso que a ponte
+  // volta ao `JSON.parse` inteiro quando vê uma barra invertida no campo.
+  escaparBarras = false,
+  // O NOME DO ARQUIVO DENTRO DA RESPOSTA DO DOWNLOAD (`fileName`). Com uma
+  // letra fora do latim — o travessão que o Word põe no lugar do hífen —, o
+  // JSON inteiro vira texto de dois bytes por letra no JavaScript. É o caso
+  // em que ler o JSON do jeito de sempre custa mais caro.
+  nomeNaResposta = null,
+  // UMA ISCA DENTRO DA RESPOSTA: um texto longo, com um dos nomes que a
+  // ponte procura, num campo DE DENTRO do JSON e antes do arquivo de
+  // verdade — a miniatura que uma resposta poderia trazer junto. A leitura
+  // direta acha os nomes pelos bytes, em qualquer lugar, e tem de escolher o
+  // mesmo campo que o `JSON.parse` de sempre escolheria.
+  // `{ nome: "data", bytes }` põe o arquivo em `base64`; `{ nome: "file",
+  // bytes }`, em `file`, o mesmo nome da isca. E `{ forma: "nome-antes",
+  // bytes }` é o primeiro nível com um nome de arquivo curto em `file`, a
+  // isca em `data` e o arquivo no endereço: o caminho de sempre pega o
+  // endereço, porque `file` vem antes na ordem e não é arquivo.
+  isca = null,
 } = {}) {
   const recebidas = [];
   let downloadsFalhados = 0;
+  // QUANTOS DOWNLOADS ESTÃO NO AR AO MESMO TEMPO, e o máximo que já
+  // estiveram. A memória da ponte é a medida que importa, mas depende do
+  // coletor de lixo; quantos arquivos ela baixa juntos, não — é o número que
+  // diz, sem depender de nada, se a fila por tamanho está de pé.
+  let downloadsNoAr = 0;
+  let picoDeDownloadsJuntos = 0;
+  const contarDownload = (res) => {
+    downloadsNoAr++;
+    picoDeDownloadsJuntos = Math.max(picoDeDownloadsJuntos, downloadsNoAr);
+    res.on("close", () => { downloadsNoAr--; });
+  };
   const ROTAS_DE_DOWNLOAD = ["/message/downloadmedia", "/message/download", "/downloadmedia"];
   const servidor = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     let corpo = "";
     for await (const p of req) corpo += p;
     const json = (() => { try { return JSON.parse(corpo); } catch (_) { return corpo; } })();
-    recebidas.push({ caminho: req.url, corpo: json });
+    recebidas.push({ caminho: req.url, corpo: json, quando: Date.now() });
     const responder = (codigo, obj) => {
       res.writeHead(codigo, { "Content-Type": "application/json" });
       res.end(JSON.stringify(obj));
@@ -789,6 +864,24 @@ export function subirFalsaUazapi({
       return responder(200, foto);
     }
 
+    // AOS PEDAÇOS, sem `Content-Length`: o Node manda em "chunked".
+    const mandarAosPedacos = (codigo, tipo, corpo) => {
+      const tudo = Buffer.isBuffer(corpo) ? corpo : Buffer.from(corpo);
+      res.writeHead(codigo, { "Content-Type": tipo });
+      const PEDACO = 256 * 1024;
+      for (let i = 0; i < tudo.length; i += PEDACO) res.write(tudo.subarray(i, i + PEDACO));
+      return res.end();
+    };
+
+    // O ENDEREÇO QUE O DOWNLOAD DEVOLVE quando o formato é "endereco".
+    if (url.pathname.startsWith("/baixar-arquivo/")) {
+      contarDownload(res);
+      const bytes = arquivo || Buffer.from("uma-foto-de-mentira".repeat(20));
+      if (respostaEmPedacos) return mandarAosPedacos(200, mimeDoDownload, bytes);
+      res.writeHead(200, { "Content-Type": mimeDoDownload });
+      return res.end(bytes);
+    }
+
     // O ARQUIVO SERVIDO POR ENDEREÇO DIRETO. É o que a Uazapi manda no
     // `FileURL` de um `messages_update`, e é por onde o resgate do anexo vazio
     // passa. Sem isto, a prova do resgate provaria só a intenção.
@@ -804,6 +897,7 @@ export function subirFalsaUazapi({
         res.writeHead(405, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: `use ${metodoDoDownload} aqui` }));
       }
+      contarDownload(res);
       if (demoraDoDownload > 0) {
         await new Promise((r) => setTimeout(r, demoraDoDownload));
       }
@@ -828,10 +922,25 @@ export function subirFalsaUazapi({
         downloadsFalhados++;
         return responder(200, { status: "ok", mimetype: mimeDoDownload });
       }
-      return responder(200, {
-        mimetype: mimeDoDownload,
-        file: (arquivo || Buffer.from("uma-foto-de-mentira".repeat(20))).toString("base64"),
-      });
+      const idPedido = (json && json.id) || url.searchParams.get("id") || "x";
+      const doArquivo = (arquivo || Buffer.from("uma-foto-de-mentira".repeat(20))).toString("base64");
+      const resposta = formatoDoDownload === "endereco"
+        ? { mimetype: mimeDoDownload,
+            fileURL: `http://127.0.0.1:${servidor.address().port}/baixar-arquivo/${encodeURIComponent(idPedido)}` }
+        : isca && isca.forma === "nome-antes"
+          ? { file: "contrato.pdf", data: isca.bytes.toString("base64"), mimetype: mimeDoDownload,
+              fileURL: `http://127.0.0.1:${servidor.address().port}/baixar-arquivo/${encodeURIComponent(idPedido)}` }
+        : isca
+          ? { mensagem: { conteudo: { [isca.nome]: isca.bytes.toString("base64") } },
+              mimetype: mimeDoDownload,
+              [isca.nome === "file" ? "file" : "base64"]: doArquivo }
+          : { mimetype: mimeDoDownload,
+              ...(nomeNaResposta ? { fileName: nomeNaResposta } : {}),
+              file: doArquivo };
+      const texto = escaparBarras ? JSON.stringify(resposta).replace(/\//g, "\\/") : JSON.stringify(resposta);
+      if (respostaEmPedacos) return mandarAosPedacos(200, "application/json", texto);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(texto);
     }
 
     responder(200, { id: "uazapi-" + recebidas.length, messageid: "uazapi-" + recebidas.length });
@@ -841,6 +950,7 @@ export function subirFalsaUazapi({
       resolve({
         url: `http://127.0.0.1:${servidor.address().port}`,
         recebidas,
+        picoDeDownloadsJuntos: () => picoDeDownloadsJuntos,
         // O SERVIDOR VOLTA A SERVIR, no meio da prova.
         //
         // É o caso do resgate: o arquivo não veio naquele minuto e vem agora.

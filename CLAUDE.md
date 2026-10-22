@@ -64,6 +64,9 @@ Variáveis de ambiente (no Render):
   variável falta. Ver "O copiloto", abaixo.
 - `COPILOTO_MODELO` — o modelo do copiloto. **Opcional**, padrão
   `claude-haiku-5-5`. Trocar aqui não pede publicação.
+- `ANEXO_TETO_MB` — acima de quantos MB um anexo recebido não é baixado.
+  **Opcional**, padrão 50, que é o teto do depósito no plano gratuito do
+  Supabase. Ver "A memória da ponte", abaixo.
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -343,6 +346,248 @@ de *"por que o anexo não veio?"*.
 **nenhum** fica só na miniatura, e 38 ficam vazios — 20 documentos e 5 imagens
 entre eles. O tamanho do `id_uazapi` **não** é a causa (todos os tamanhos baixam
 na maioria das vezes); a explicação é a que a própria Uazapi deu.
+
+## A memória da ponte — o anexo grande que a derrubou (22/10)
+
+E-mail da Render, 22/10 às 11:13: *"Web Service zorvin-bridge exceeded its
+memory limit"*. O plano gratuito tem **512 MB**, e a Render derruba e religa o
+serviço que passa disso.
+
+**Medido no Supabase, só lendo** — os registros do portão da API com a chave da
+ponte, `storage.objects` e `eventos_recebidos`, só números e nomes de campos:
+
+- às 11:13:19 um **PDF de 19,9 MB** foi mandado num **grupo com cinco telefones
+  do escritório**. Chegaram cinco avisos da mesma mensagem em 365 ms, com
+  `fileLength` = 20.889.483 nos cinco;
+- a ponte subiu o arquivo ao depósito às 11:13:33 e morreu antes de ligá-lo às
+  mensagens. A nova subiu às 11:13:44. **É a cadência da caixa de entrada que dá
+  a hora exata:** ela lê `eventos_recebidos` de 30 em 30 segundos desde que o
+  processo sobe, e o compasso muda de fase quando sobe outro;
+- as cinco cópias ficaram **sem arquivo**, com o arquivo no depósito.
+
+**Reproduzido na bancada**, com o `index.js` de verdade:
+
+| a cena | antes | depois (três medidas) |
+|---|---|---|
+| 1 telefone, PDF de 20 MB | 202 MB | 173 a 188 MB |
+| 5 telefones, o mesmo PDF de 20 MB (arquivo dentro do JSON) | **586 MB**, o arquivo pedido 5 vezes | **175 a 182 MB**, pedido 1 vez |
+| 5 telefones, o mesmo PDF (por endereço) | **500 MB** | 151 a 174 MB |
+| 4 PDFs diferentes de 20 MB juntos | **569 MB** | 217 a 234 MB |
+| 1 arquivo de 48 MB | 462 MB | 307 a 372 MB |
+
+Cada MB de arquivo custava seis a oito MB de memória, todos ao mesmo tempo: os
+bytes da resposta da Uazapi, o texto deles, a cópia do `JSON.parse` e o arquivo
+decodificado. **Não se sabe em qual dos dois formatos a Uazapi do escritório
+responde** (a resposta não fica guardada em lugar nenhum), e por isso a
+bancada mede os dois.
+
+**As regras** (`index.js`, "UM DOWNLOAD POR MENSAGEM, E UM ARQUIVO GRANDE POR VEZ"):
+
+1. **Um download por mensagem** (`umaVezPorMensagem`). O mesmo id da Uazapi
+   pedido por cinco telefones é um arquivo só: os outros esperam o primeiro, e
+   `trocarMiniaturaPeloArquivo` já põe o arquivo nas cinco cópias. Vale também
+   para o resgate pelo `FileURL`, que espera o download em curso em vez de
+   baixar uma segunda cópia por fora.
+2. **O arquivo grande baixa sozinho** (`naVez`, com três vagas). O pequeno ocupa
+   uma vaga, e o grande ocupa as três. Grande é **10 MB ou mais pelo
+   `fileLength` do aviso**, ou o que chega **sem tamanho**: não saber é o caso
+   em que o arquivo pode ter qualquer tamanho. É uma fila de verdade: o grande
+   na frente segura os pequenos de trás, senão uma sequência de fotos o deixaria
+   esperando para sempre. **O envio em base64 da fila de envio** (a segunda
+   tentativa de mandar um anexo) entra na mesma fila, porque também põe o
+   arquivo inteiro na memória.
+3. **Acima de 50 MB, não baixa** (`ANEXO_TETO_MB`, opcional, padrão 50). É o
+   teto do depósito no plano gratuito do Supabase (*"For Free projects, the
+   limit can't exceed 50 MB"*). O tamanho é conferido de dois jeitos:
+   - pelo tamanho do aviso, antes de pedir;
+   - sem tamanho no aviso, **lendo com teto** (`lerComTeto`): a leitura para
+     quando passa dele, em vez de descobrir depois de ter tudo na memória.
+
+   A mensagem ganha `midia_erro` com a frase do tamanho, e a recusa é
+   **definitiva**: está em `RECUSAS_DEFINITIVAS`, e a ponte não tenta de novo.
+4. **O arquivo que vem dentro do JSON é decodificado direto dos bytes da
+   resposta** (`arquivoDentroDoJson`), aos pedaços de 256 KB, quando a
+   resposta passa de 1 MB. Duas coisas voltam ao `JSON.parse` inteiro de
+   sempre: uma barra invertida dentro do campo e um JSON que não fecha. Com o
+   tamanho no cabeçalho, a leitura enche **um buffer só**, sem a segunda cópia
+   do `concat`.
+
+   **O campo é conferido depois do corte**: tem de ser o que o `JSON.parse`
+   de sempre escolheria, o primeiro dos nomes com valor e no **primeiro
+   nível** do JSON. A busca pelos bytes acha o nome em qualquer lugar, e uma
+   miniatura num campo de dentro com o mesmo nome seria guardada no lugar do
+   arquivo, com cara de certo. Não sendo o mesmo campo, o `dados` já lido
+   segue para o caminho de sempre, sem um segundo `JSON.parse`. **A leitura
+   direta muda a memória, e nunca quais bytes são guardados.**
+
+   **O ganho aqui é menor do que eu supus, e foi medido assim.** O Node guarda
+   fora do heap o texto grande feito só de letras simples, e o `JSON.parse`
+   não copia o campo. Por isso, com um arquivo de 48 MB, o jeito de sempre deu
+   picos de 403 a 413 MB, contra 368 a 372 da leitura direta. **O que pesa é a
+   letra fora do latim**: com um travessão no nome do arquivo, o texto inteiro
+   vai para o heap a dois bytes por letra, o que dá 128 MB para um arquivo de
+   48. Com o heap limitado a 96 MB, o jeito de sempre derrubou a ponte
+   (*"Reached heap limit"*), e a leitura direta passou.
+
+   **Os pedaços são de 256 KB, e não de 1 MB**: a partir de ~1 MB o Node guarda
+   cada pedaço fora do heap, e o lixo do tamanho do arquivo inteiro fica
+   esperando o coletor. Com 1 MB, os picos foram de 369 a 431 MB.
+
+**O que cabe na memória, por isto, medido:**
+
+| a cena | o pico |
+|---|---|
+| os cinco telefones com o PDF de 20 MB | 175 a 210 MB |
+| quatro PDFs diferentes de 20 MB | 215 a 235 MB |
+| um arquivo de 48 MB sozinho | até uns 370 MB |
+| a ponte parada | uns 75 MB |
+
+As faixas juntam as duas medições: a da tabela de cima (a mesma régua do
+"antes", feita à parte com a bancada) e a que a seção 72 imprime, com bytes
+aleatórios e o download mais lento. O pico depende do coletor de lixo, e por
+isso a prova não confere um número exato: ela exige menos de 400 MB, e confere
+o que não depende de sorte — quantas vezes o arquivo foi pedido, quantos
+downloads estiveram no ar juntos, e a impressão digital do que chegou.
+
+**E a régua sai do uso.** Desde 08/09 chegaram 5.599 anexos com tamanho no
+aviso. 32 passavam de 10 MB e nenhum de 50; o maior tinha 25,7 MB. E **nos
+últimos 30 dias, 36 anexos chegaram a cinco telefones de uma vez**: o grupo de
+22/10 não é caso único. Em 21/10 um PDF de 10,3 MB passou pelo mesmo grupo sem
+derrubar nada.
+
+### O resgate depois de subir
+
+As tentativas de novo de um anexo (20 s, 1 min, 5 min) moram em relógios do
+processo, e a queda os leva junto. Foi o que deixou as cinco cópias de 22/10
+dizendo "indisponível", com o arquivo guardado.
+
+**Um minuto depois de subir** (`RESGATE_AO_SUBIR_MS`, opcional), a ponte procura
+o que o processo anterior deixou:
+
+- anexos dos **últimos dois dias**, sem arquivo;
+- chegados **antes desta subida**: os de depois têm a perseguição deste processo
+  cuidando deles;
+- **sem recusa definitiva** em `midia_erro`;
+- até trinta.
+
+**Ela pergunta primeiro ao depósito** (`arquivoJaNoDeposito`, um HEAD no endereço
+que o download teria dado, com a mesma `extensaoDoArquivo`). Foi o caso de
+22/10: o arquivo estava lá. Conferido no banco antes de escrever: o objeto é
+`recebidos/{id}.pdf`, com os 20.889.483 bytes, e as cinco linhas têm
+`application/pdf` e um nome terminado em `.pdf` — o HEAD acerta o endereço.
+
+**A Uazapi, só para o que a queda cortou.** Ao depósito pergunta-se pelos dois
+dias, porque um HEAD não custa nada. À Uazapi, só pelo que chegou dentro da
+**janela da perseguição** antes da subida: as esperas somadas (20 s, 1 min e
+5 min) mais dez minutos de folga, uns **16 minutos**. Um processo que caiu antes
+disso ainda estava perseguindo o anexo; depois disso, ele já tinha tentado até
+o fim.
+
+E é a ponte que dorme que obriga a isso. Ela sobe a cada mensagem que a acorda
+de madrugada, e sem a janela pediria à Uazapi, a cada acordada, os mesmos
+anexos que já não vieram, para ouvir a mesma resposta. **Medido em 22/10:** nos
+14 dias anteriores, cinco anexos ficaram sem arquivo e sem recusa definitiva
+(13 linhas, porque dois deles vieram por grupos de cinco telefones); só o de
+22/10 estava no depósito. O que fica de fora da janela é contado à parte no log
+(`deixados`), e não como falha: ninguém pediu e ouviu "não". E continua ao
+alcance da porta `/anexos/resgatar`, que pergunta por tudo.
+
+**É o mesmo caminho da porta `/anexos/resgatar`** (`resgatarAnexosVazios`). Ela
+também passou a pedir **uma vez por mensagem**, e não uma por cópia: num grupo
+de cinco telefones, eram cinco downloads do mesmo arquivo. A conta continua
+sendo de linhas, que é o que a tela mostra. A porta pergunta inclusive pelo que
+já teve recusa definitiva, porque alguém a abriu de propósito.
+
+**A bancada empurra o resgate para daqui a uma hora** (em `subirTudo`). Uma prova
+longa veria, no meio dela, a ponte indo atrás de um anexo vazio que a própria
+prova plantou. A seção 72, que é a dele, encurta.
+
+### O que não mudou, e é decisão
+
+- **Um arquivo perto de 50 MB ainda chega a uns 370 MB.** A ponte em produção
+  começa um pouco acima dos 75 MB da bancada. Abaixar o teto recusaria arquivos
+  que hoje chegam: já houve um de 38 MB. E, se um dia estourar, a ponte se
+  refaz sozinha: a caixa de entrada termina o aviso, e o resgate depois de
+  subir completa o arquivo.
+- **`NODE_OPTIONS=--max-old-space-size` não entrou.** O que pesava eram arquivos
+  inteiros na memória ao mesmo tempo, e um teto do Node só trocaria a queda da
+  Render por um *"heap out of memory"*.
+- **A bolha do painel para o arquivo grande demais ainda diz "não veio — peça
+  para reenviar"**, com a frase certa só no `title`. Nunca aconteceu (nenhum
+  acima de 50 MB em seis semanas). Quando acontecer, o certo é o painel dizer
+  "abra no celular", e isso é mudança no painel.
+
+### Três armadilhas da bancada que este conserto achou
+
+**O depósito de mentira estragava todo arquivo binário.** Ele montava o corpo
+com `corpo += pedaço`, que passa cada pedaço por UTF-8, e guardava só o tamanho.
+Ninguém via. Hoje ele guarda os bytes e a impressão digital (`digitais`), e a
+prova confere que o arquivo chegou igual. Sem isso, um base64 decodificado com o
+corte no lugar errado passaria: o tamanho é o mesmo.
+
+**E uma cena minha media a ordem errada.** O "OK" do aviso sai antes de a ponte
+tratá-lo. Por isso o envio que a cena pôs na fila entrou antes de o download
+grande começar, e saiu primeiro, como a fila manda. Hoje a cena espera o
+download estar no ar antes de pôr o envio na fila.
+
+**E a ponte que estoura o heap passava por viva.** Na primeira rodada, a
+sabotagem que desliga a leitura direta vazou: com o arquivo em letras simples,
+o caminho de sempre também cabia. A cena ganhou um nome de arquivo com
+travessão (o texto vai para o heap) e o heap limitado a 96 MB, e a ponte de
+antes morreu ali — mas a conferência *"a ponte continua de pé"* passava com
+ela morta. **O Node que estoura o heap morre por SINAL** (`signalCode`), e a
+cena olhava só o código de saída (`exitCode`), que fica nulo. Hoje ela olha os
+dois.
+
+### Duas coisas que só apareceram relendo o código antes do commit
+
+Com a seção 72 inteira passando e as 17 sabotagens da época pegas:
+
+- **a leitura direta podia guardar uma miniatura no lugar do arquivo.** Ela acha
+  o nome do campo pelos bytes, em qualquer lugar do JSON, e o caminho de sempre
+  só olha o primeiro nível. Nenhuma prova via isso, porque a Uazapi de mentira
+  nunca mandou um campo de dentro com o mesmo nome. Hoje há a conferência do
+  campo (regra 4) e três cenas com iscas;
+- **o resgate da subida martelaria a Uazapi a cada acordada da ponte**. Ver "A
+  Uazapi, só para o que a queda cortou", acima.
+
+**A régua de sempre, com outra roupa: prova que passa mostra o que foi
+perguntado, e não o que faltou perguntar.**
+
+### Uma observação do mesmo dia, que não é deste conserto
+
+**A ponte dorme.** Na madrugada de 22/10 ela ficou de pé em janelas de **15
+minutos exatos**, e às 09:55 dormiu **5 minutos** em pleno expediente. É o plano
+gratuito da Render: 15 minutos sem ninguém chamar, e o serviço para. O
+`cronjob` de 10 minutos descrito no alto deste arquivo existe para impedir
+isso, e **não está batendo**: com uma chamada a cada 10 minutos, uma janela de
+15 sem nenhuma não existiria. Nenhuma mensagem da equipe ficou esperando
+naquela manhã: ninguém mandou nada naqueles 5 minutos. Mas, enquanto ela
+dorme, a fila de envio para, e uma agendada da madrugada sai só quando alguém
+acorda a ponte.
+
+Prova: seção 72, 51 conferências, **23 sabotagens e 23 pegas**, todas limpas,
+rodadas em cópias e lidas uma a uma:
+
+- **um download por mensagem**: sem `umaVezPorMensagem`; o resgate pelo
+  `FileURL` baixando por fora;
+- **a fila**: sem a fila; tudo exclusivo (as fotos uma por uma); o envio em
+  base64 fora da fila;
+- **o teto**: sem conferir o tamanho do aviso; sem o teto ao ler; a recusa
+  do grande demais deixando de ser definitiva;
+- **a leitura direta**: desligada (a ponte morre com o heap em 96 MB); o
+  corte fora do múltiplo de 4; sem voltar ao `JSON.parse` com barra
+  invertida; sem conferir o campo; conferindo só os nomes de antes; conferindo
+  só o primeiro nível;
+- **o resgate da subida**: sem ele; sem perguntar ao depósito; a janela antes
+  do depósito; sem a janela (na função e na chamada); perguntando pelo
+  recusado; sem a hora da subida; trinta dias no lugar de dois; um pedido por
+  cópia.
+
+**O tempo da seção, medido antes de mandar:** 41 s numa máquina parada, que é
+mais lenta que a do GitHub (a suíte inteira, 11min27s aqui; a rodada da `main`
+de 22/10, sem a seção 72, 6min50s lá). O teto da integração contínua é de 10
+minutos (`provas.yml`), e a conta dá uns 7min30s.
 
 ## Desativar um telefone — o que ele para de fazer, e o que continua
 
