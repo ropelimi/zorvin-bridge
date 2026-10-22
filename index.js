@@ -2979,10 +2979,12 @@ function extensaoDoArquivo(mime, nome) {
 //     chegou certo nas cinco cópias: 20.889.483 bytes, o que foi guardado).
 //     O que chega SEM tamanho conta como grande: não saber é o caso em que o
 //     arquivo pode ter qualquer tamanho.
-//  3. ACIMA DE 50 MB, NÃO BAIXA (`TETO_DO_ANEXO_BYTES`). É o teto do
-//     depósito no plano gratuito do Supabase ("For Free projects, the limit
-//     can't exceed 50 MB"): baixar um arquivo de 100 MB para o depósito
-//     recusar seria derrubar a ponte por nada. Pelo tamanho do aviso, antes
+//  3. ACIMA DE 50 MB, NÃO BAIXA (`TETO_DO_ANEXO_BYTES`). É o que a memória
+//     da ponte aguenta com folga: um arquivo de 48 MB já a leva a uns 370 MB
+//     dos 512 (a conta está logo abaixo). Este comentário dizia que 50 MB era
+//     o teto do depósito no plano gratuito do Supabase, e estava errado: o
+//     Zorvin está no plano Pro, e o balde `anexos` não tem teto próprio
+//     (`file_size_limit` nulo). Pelo tamanho do aviso, antes
 //     de pedir; e, sem tamanho no aviso, lendo com teto — a leitura para
 //     quando passa dele, em vez de descobrir depois de ter tudo na memória.
 //     Desde 08/09 chegaram 5.599 anexos, e o maior tinha 25,7 MB: o teto é
@@ -3016,7 +3018,7 @@ const emMB = (bytes) => (bytes / MB).toFixed(1).replace('.', ',');
  *  a reconhece. */
 function fraseDoGrandeDemais(bytes, soOComeco) {
   return `arquivo grande demais: ${soOComeco ? 'passa de' : 'tem'} ${emMB(bytes)} MB, `
-    + `acima dos ${Math.round(TETO_DO_ANEXO_BYTES / MB)} MB que o depósito do Zorvin aceita. `
+    + `acima dos ${Math.round(TETO_DO_ANEXO_BYTES / MB)} MB que o Zorvin baixa. `
     + 'Ele não foi baixado — abra a conversa no celular para vê-lo.';
 }
 
