@@ -154,6 +154,13 @@ porta, e a ponte responde com a função `zorvin_controle_atendimento` (script
 - A espera é `conversas.esperando_desde` (a mesma do painel, com a carência e o
   "Já tratei"); quem mandou por último vem da última linha de `mensagens`.
 - Provas: seções 69 (a porta) e 70 (a função, num Postgres de verdade).
+- **Desde o 031 (22/10)** o resumo traz também o **departamento** de cada
+  conversa (nome, `slug`, `ordem`) e as **finalizadas** dos últimos `p_dias`,
+  com quando e por quem foram finalizadas (o protocolo de agora) — a tela do
+  Vantoro passou a ter as abas Novos / Em atendimento / Finalizados e a
+  fileira de departamentos, como o painel. As finalizadas têm o seu próprio
+  limite (`p_finalizados`, padrão 500), para nunca empurrarem uma aberta para
+  fora. A porta não mudou: o argumento novo tem padrão. Prova: seção 71.
 
 ## A entrada de mensagens — a caixa de entrada do webhook
 
