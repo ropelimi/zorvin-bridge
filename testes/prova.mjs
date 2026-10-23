@@ -12651,5 +12651,152 @@ create table conversa_tags (id uuid primary key default gen_random_uuid(),
   }
 }
 
+// ==================================================================
+//  75. AS MENSAGENS RÁPIDAS COM ANEXO (034), NUM POSTGRES DE VERDADE
+//
+//  Pedido do Rodrigo em 23/10: "Para as mensagens rápidas, precisa ser
+//  possível incluir vídeos." O 034 acrescenta quatro colunas opcionais a
+//  `mensagens_rapidas`, e duas regras: o tipo é um dos que a fila conhece, e
+//  endereço e tipo andam juntos.
+//
+//  A tabela desta seção é a do escritório como ela é (medida em 23/10): as
+//  quatro colunas de sempre, RLS ligada, a política `rapidas_tudo` e a
+//  permissão da TABELA inteira para quem entrou. As colunas novas têm de
+//  valer para quem atende sem política nem permissão nova — e é no papel de
+//  quem atende que esta seção grava.
+// ==================================================================
+{
+  console.log("\n75. As mensagens rápidas com anexo (034), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o anexo das rápidas (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S034 = fs.readFileSync(new URL("../sql/automaticos/034-as-mensagens-rapidas-com-anexo.sql", import.meta.url), "utf8");
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+end $$;
+grant usage on schema public to anon, authenticated;
+create table public.mensagens_rapidas (id uuid primary key default gen_random_uuid(), titulo text not null,
+  texto text not null, criado_em timestamptz not null default now());
+alter table public.mensagens_rapidas enable row level security;
+create policy rapidas_ler on public.mensagens_rapidas for select to authenticated using (true);
+create policy rapidas_tudo on public.mensagens_rapidas for all to authenticated using (true) with check (true);
+grant select, insert, update, delete on public.mensagens_rapidas to authenticated;
+insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom dia, {nome}!');
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    // NO PAPEL DE QUEM ATENDE — e volta, aconteça o que acontecer.
+    const comoQuemAtende = async (c, fn) => {
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    const VIDEO = ["https://x.supabase.co/storage/v1/object/public/anexos/rapidas/1761-acordo.mp4", "video", "video/mp4", "Como funciona o acordo.mp4"];
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+
+      // ---- 75a. antes do 034, o anexo não tem onde ficar ----
+      const antes = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.mensagens_rapidas (titulo, texto, midia_url) values ('x', 'y', 'u')")));
+      ok("antes do 034, gravar o anexo dá coluna que não existe (42703) — é por ela que o painel sabe",
+         antes.codigo === "42703", JSON.stringify(antes));
+
+      // ---- 75b. o 034 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S034));
+      ok("o 034 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/quatro colunas/, /duas regras/, /GRAVAR o anexo/, /TROCAR o anexo/, /LER o anexo/]) {
+        ok(`a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+
+      // ---- 75c. quem atende grava, troca e tira o anexo ----
+      const gravar = await guardado(() => comoQuemAtende(c, () => c.query(
+        `insert into public.mensagens_rapidas (titulo, texto, midia_url, midia_tipo, midia_mime, midia_nome)
+         values ('Vídeo do acordo', 'Veja como funciona, {nome}.', $1, $2, $3, $4) returning id`, VIDEO)));
+      const id = gravar.rows?.[0]?.id;
+      ok("quem atende grava uma rápida com vídeo", !gravar.erro && Boolean(id), JSON.stringify(gravar.erro || gravar.rows));
+      const lida = id ? (await comoQuemAtende(c, () => c.query(
+        "select midia_url, midia_tipo, midia_mime, midia_nome from public.mensagens_rapidas where id = $1", [id]))).rows[0] : null;
+      ok("e lê o vídeo de volta, com o nome como a pessoa escolheu",
+         lida && lida.midia_url === VIDEO[0] && lida.midia_tipo === "video" && lida.midia_nome === "Como funciona o acordo.mp4",
+         JSON.stringify(lida));
+      const trocar = await guardado(() => comoQuemAtende(c, () => c.query(
+        "update public.mensagens_rapidas set midia_url = 'https://x/anexos/rapidas/2-guia.pdf', midia_tipo = 'documento', midia_mime = 'application/pdf', midia_nome = 'Guia.pdf' where id = $1 returning id", [id])));
+      ok("troca o vídeo por um documento", !trocar.erro && trocar.rows?.length === 1, JSON.stringify(trocar.erro || trocar.rows));
+      const tirar = await guardado(() => comoQuemAtende(c, () => c.query(
+        "update public.mensagens_rapidas set midia_url = null, midia_tipo = null, midia_mime = null, midia_nome = null where id = $1 returning id", [id])));
+      ok("e tira o anexo, voltando a ser só texto", !tirar.erro && tirar.rows?.length === 1, JSON.stringify(tirar.erro || tirar.rows));
+      const semTexto = await guardado(() => comoQuemAtende(c, () => c.query(
+        `insert into public.mensagens_rapidas (titulo, texto, midia_url, midia_tipo, midia_mime, midia_nome)
+         values ('Só o vídeo', '', $1, $2, $3, $4) returning id`, VIDEO)));
+      ok("a rápida só com o vídeo, sem texto, também cabe (o texto vazio vale)", !semTexto.erro && semTexto.rows?.length === 1,
+         JSON.stringify(semTexto.erro || semTexto.rows));
+
+      // ---- 75d. as duas regras ----
+      const tipoErrado = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.mensagens_rapidas (titulo, texto, midia_url, midia_tipo) values ('x', 'y', 'u', 'filme')")));
+      ok("um tipo que a fila não conhece é recusado (23514)", tipoErrado.codigo === "23514", JSON.stringify(tipoErrado));
+      const semTipo = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.mensagens_rapidas (titulo, texto, midia_url) values ('x', 'y', 'u')")));
+      ok("o endereço sem o tipo é recusado (23514)", semTipo.codigo === "23514", JSON.stringify(semTipo));
+      const semEndereco = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.mensagens_rapidas (titulo, texto, midia_tipo) values ('x', 'y', 'video')")));
+      ok("e o tipo sem o endereço também (23514)", semEndereco.codigo === "23514", JSON.stringify(semEndereco));
+      for (const tipo of ["video", "imagem", "documento", "audio"]) {
+        const r = await guardado(() => comoQuemAtende(c, () => c.query(
+          "insert into public.mensagens_rapidas (titulo, texto, midia_url, midia_tipo) values ($1, 'y', 'u', $1) returning id", [tipo])));
+        ok(`o tipo "${tipo}" é aceito`, !r.erro && r.rows?.length === 1, JSON.stringify(r.erro || r.rows));
+      }
+
+      // ---- 75e. a rápida de antes não mudou ----
+      const velha = (await c.query("select texto, midia_url, midia_tipo from public.mensagens_rapidas where titulo = 'Saudação'")).rows[0];
+      ok("a rápida de antes continua igual, sem anexo", velha && velha.texto === "Bom dia, {nome}!"
+         && velha.midia_url === null && velha.midia_tipo === null, JSON.stringify(velha));
+
+      // ---- 75f. o 034 de novo ----
+      const contarAnexos = async () => (await c.query("select count(*)::int n from public.mensagens_rapidas where midia_url is not null")).rows[0].n;
+      const anexosAntes = await contarAnexos();
+      const deNovo = await guardado(() => aplicar(c, S034));
+      ok("rodar o 034 de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo), JSON.stringify(deNovo));
+      ok("e não dobra as regras", (await c.query(
+        "select count(*)::int n from pg_constraint where conrelid = 'public.mensagens_rapidas'::regclass and contype = 'c'")).rows[0].n === 2);
+      ok("nem mexe nos anexos que já estão lá", (await contarAnexos()) === anexosAntes && anexosAntes === 5,
+         `${anexosAntes} antes, ${await contarAnexos()} depois`);
+      ok("e a conferência conta as rápidas com anexo", item(deNovo, /com anexo/) === String(anexosAntes),
+         JSON.stringify(item(deNovo, /com anexo/)));
+
+      // ---- 75g. num banco sem o Zorvin, desiste em silêncio ----
+      const limpo = await bancoNovo();
+      const vazio = await guardado(() => aplicar(limpo, S034));
+      ok("num banco sem o Zorvin, o 034 desiste sem estourar", Array.isArray(vazio)
+         && item(vazio, /sem as tabelas do Zorvin/) === "nada a fazer aqui", JSON.stringify(vazio));
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
