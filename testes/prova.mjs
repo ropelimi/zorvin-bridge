@@ -12439,5 +12439,217 @@ insert into permissoes (usuario_id, departamento_id) values ('${U.ana}', 1);
   }
 }
 
+// ==================================================================
+//  74. O CONTROLE DE ATENDIMENTO COM AS ETIQUETAS (033), NUM POSTGRES DE VERDADE
+//
+//  Pedido de 23/10: "Na tela de Controle de atendimento, precisam aparecer as
+//  etiquetas dos contatos, inclusive ter um filtro por etiqueta." O 033 manda,
+//  em cada conversa do resumo, as etiquetas dela — nome e cor, em ordem
+//  alfabética, como no painel —, e a lista VAZIA quando não há nenhuma: o
+//  Vantoro distingue "sem etiqueta" de "a ponte ainda não manda" pela chave.
+// ==================================================================
+{
+  console.log("\n74. O controle de atendimento com as etiquetas (033), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 033 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const ANTES = ["004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql",
+                   "006-a-espera-nao-comeca-no-rabicho.sql", "020-a-auditoria-do-banco.sql",
+                   "028-aguardando-em-aberto-e-finalizados.sql", "030-o-controle-de-atendimento.sql",
+                   "031-o-controle-com-departamento-e-finalizados.sql",
+                   // O 032 ANTES, como no banco do escritório: é ele que fecha
+                   // a herança de `anon` e deixa a de quem entrou.
+                   "032-quem-nao-entrou-nao-alcanca-nada.sql"].map(ler);
+    const S033 = ler("033-o-controle-com-as-etiquetas.sql");
+    const ESQUEMA = `
+-- O Zorvin mínimo da seção 71, e as etiquetas.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+-- E PARA AS FUNÇÕES, como a Supabase faz: a função nova nasce executável por
+-- quem entrou no painel. É isso que o 033 tem de fechar, e a prova só prova o
+-- fechamento se a porta nascer aberta.
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, slug text unique, ordem int default 0);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text,
+  nome_zorvin text, vantoro_nome text, vantoro_cliente_id bigint);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, responsavel_id uuid references usuarios(id), unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, tipo text default 'texto', texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+create view equipe as select id, nome from usuarios;
+revoke all on equipe from anon;
+grant select on equipe to authenticated;
+revoke all on advogados from authenticated;
+grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+-- AS ETIQUETAS, como o painel as lê: o nome e a cor em \`tags\`, e a ligação
+-- com a conversa em \`conversa_tags\`.
+create table tags (id uuid primary key default gen_random_uuid(), nome text not null, cor text);
+-- COMO NO BANCO DO ESCRITÓRIO: a chave é um \`id\` próprio, e nada garante
+-- que o par (conversa, etiqueta) não se repita (ver \`/etiqueta/contato\`).
+create table conversa_tags (id uuid primary key default gen_random_uuid(),
+  conversa_id uuid not null references conversas(id) on delete cascade,
+  tag_id uuid not null references tags(id) on delete cascade);
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b" };
+    const HA = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of ANTES) await c.query(s);
+      const conf = await guardado(() => aplicar(c, S033));
+      ok("o 033 aplica depois do 031, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("e sobra uma versão só da função", item(conf, /uma versão só/) === "true", JSON.stringify(conf));
+
+      await c.query("insert into departamentos (nome, slug, ordem) values ('Acordos', 'acordos', 1)");
+      await c.query(`insert into usuarios (id, nome) values ('${U.ana}', 'Ana'), ('${U.bia}', 'Bia')`);
+      const LINHA = (await c.query("insert into advogados (nome, numero, departamento_id) values ('Linha Acordos', '5511900000001', 1) returning id")).rows[0].id;
+      let n = 0;
+      const conversa = async () => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+                                  [`5511${String(++n).padStart(8, "0")}`, `Contato ${n}`])).rows[0].id;
+        const cv = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [LINHA, ct])).rows[0].id;
+        await c.query("update conversas set ultima_atividade = '-infinity' where id = $1", [cv]);
+        return cv;
+      };
+      const msg = async (cv, origem, horasAtras, porId = null) => {
+        await c.query(`insert into mensagens (conversa_id, origem, criado_em, texto, enviado_por, enviado_por_id, id_uazapi)
+                       values ($1, $2, $3, 'x', $4, $5, $6)`,
+          [cv, origem, HA(horasAtras), porId ? "Ana" : null, porId, `id-${crypto.randomBytes(4).toString("hex")}`]);
+        await c.query("update conversas set ultima_atividade = greatest(ultima_atividade, $2) where id = $1", [cv, HA(horasAtras)]);
+      };
+      const etiqueta = async (nome, cor) => (await c.query("insert into tags (nome, cor) values ($1, $2) returning id", [nome, cor])).rows[0].id;
+      const etiquetar = async (cv, ...tags) => { for (const t of tags) await c.query("insert into conversa_tags (conversa_id, tag_id) values ($1, $2)", [cv, t]); };
+
+      // A cena:
+      //   NOVO   o cliente escreveu há 2 h; etiquetas "urgente" e "Acordo fechado"
+      //   ATEND  a Ana respondeu; sem etiqueta nenhuma
+      //   FIN    finalizada há 3 h; etiqueta "Acordo fechado"
+      const URGENTE = await etiqueta("urgente", "#d32f2f"), ACORDO = await etiqueta("Acordo fechado", "#2e7d32");
+      await etiqueta("Sem uso", "#546e7a");
+      const NOVO = await conversa(); await msg(NOVO, "contato", 2); await etiquetar(NOVO, URGENTE, ACORDO);
+      const ATEND = await conversa(); await msg(ATEND, "contato", 6); await msg(ATEND, "advogado", 5, U.ana);
+      const FIN = await conversa(); await msg(FIN, "contato", 4); await msg(FIN, "advogado", 3.5, U.ana); await etiquetar(FIN, ACORDO);
+      await c.query("update conversas set situacao = 'finalizado' where id = $1", [FIN]);
+
+      const resumo = async () => ((await c.query("select public.zorvin_controle_atendimento(p_dias => 60, p_limite => 3000) r")).rows[0].r?.conversas || []);
+      let linhas = await resumo();
+      const de = (cv) => linhas.find((l) => l.conversa_id === cv);
+      // Campo por campo, e não o JSON inteiro: o jsonb guarda as chaves na
+      // ordem DELE (as mais curtas antes), e a ordem das chaves não é o que
+      // está sendo provado — a das etiquetas é.
+      const comoLista = (etqs) => JSON.stringify((etqs || []).map((e) => [e.id, e.nome, e.cor]));
+      ok("cada conversa traz as etiquetas dela, em ordem alfabética, com nome e cor",
+         comoLista(de(NOVO)?.etiquetas) === JSON.stringify([[ACORDO, "Acordo fechado", "#2e7d32"],
+                                                            [URGENTE, "urgente", "#d32f2f"]]),
+         JSON.stringify(de(NOVO)?.etiquetas));
+      ok("a conversa sem etiqueta traz a lista vazia, e não nula",
+         Array.isArray(de(ATEND)?.etiquetas) && de(ATEND).etiquetas.length === 0, JSON.stringify(de(ATEND)?.etiquetas));
+      ok("a finalizada também traz as dela", JSON.stringify((de(FIN)?.etiquetas || []).map((e) => e.nome)) === JSON.stringify(["Acordo fechado"]),
+         JSON.stringify(de(FIN)?.etiquetas));
+      ok("a etiqueta que ninguém usa não aparece em conversa nenhuma",
+         !linhas.some((l) => (l.etiquetas || []).some((e) => e.nome === "Sem uso")), "");
+      // A MESMA, DE NOVO: nada no banco impede o par repetido.
+      await etiquetar(FIN, ACORDO);
+      linhas = await resumo();
+      ok("a mesma etiqueta posta duas vezes na conversa sai uma vez só",
+         JSON.stringify((de(FIN)?.etiquetas || []).map((e) => e.nome)) === JSON.stringify(["Acordo fechado"]),
+         JSON.stringify(de(FIN)?.etiquetas));
+      ok("o resto do resumo é o do 031: situação, departamento e quem mandou",
+         de(NOVO)?.situacao === "aguardando" && de(NOVO)?.departamento === "Acordos" && de(ATEND)?.ultima_quem === "Ana"
+           && de(FIN)?.situacao === "finalizado" && !("grupo" in (de(NOVO) || {})),
+         JSON.stringify([de(NOVO), de(ATEND)]));
+
+      await c.query("delete from tags where id = $1", [URGENTE]);
+      linhas = await resumo();
+      ok("a etiqueta apagada sai das conversas", JSON.stringify((de(NOVO)?.etiquetas || []).map((e) => e.nome)) === JSON.stringify(["Acordo fechado"]),
+         JSON.stringify(de(NOVO)?.etiquetas));
+
+      const priv = (await c.query(`select has_function_privilege('anon', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') a,
+                                          has_function_privilege('authenticated', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') b,
+                                          has_function_privilege('service_role', 'zorvin_controle_atendimento(integer, integer, integer)', 'execute') s`)).rows[0];
+      ok("só a ponte chama a função", priv && priv.a === false && priv.b === false && priv.s === true, JSON.stringify(priv));
+
+      const deNovo = await guardado(() => aplicar(c, S033));
+      ok("rodar de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo), JSON.stringify(deNovo));
+      ok("e a conferência conta as conversas com etiqueta", /com etiqueta 2/.test(String(item(deNovo, /o resumo de agora/))),
+         JSON.stringify(deNovo));
+
+      // A PONTE CHAMA PELO GRANT DO SCRIPT, e não pela herança: num banco em
+      // que a função nova não nasce liberada para a \`service_role\`, a porta
+      // do Vantoro continuaria fechada sem ele.
+      const semHeranca = await bancoNovo();
+      await semHeranca.query(ESQUEMA);
+      for (const s of ANTES) await semHeranca.query(s);
+      await semHeranca.query("alter default privileges in schema public revoke all on functions from service_role");
+      await guardado(() => aplicar(semHeranca, S033));
+      const daPonte = (await semHeranca.query(`select has_function_privilege('service_role',
+        'zorvin_controle_atendimento(integer, integer, integer)', 'execute') s`)).rows[0];
+      ok("sem a herança da Supabase, a ponte continua chamando a função", daPonte && daPonte.s === true, JSON.stringify(daPonte));
+
+      const limpo = await bancoNovo();
+      await limpo.query(ESQUEMA.split("create table departamentos")[0]);
+      const r0 = await guardado(() => aplicar(limpo, S033));
+      ok("num banco sem o Zorvin, o 033 aplica e não acusa defeito", Array.isArray(r0) && !defeito(r0), JSON.stringify(r0));
+    } catch (e) {
+      ok("a seção 74 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

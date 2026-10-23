@@ -164,6 +164,13 @@ porta, e a ponte responde com a função `zorvin_controle_atendimento` (script
   fileira de departamentos, como o painel. As finalizadas têm o seu próprio
   limite (`p_finalizados`, padrão 500), para nunca empurrarem uma aberta para
   fora. A porta não mudou: o argumento novo tem padrão. Prova: seção 71.
+- **Desde o 033 (23/10)** cada conversa traz também as **etiquetas** dela
+  (`etiquetas`: `[{id, nome, cor}]`, de `conversa_tags` + `tags`, em ordem
+  alfabética) — a tela do Vantoro mostra as etiquetas em cada linha e filtra
+  por elas. Sem etiqueta, a lista vem **vazia (`[]`), e não nula**: o Vantoro
+  sabe que a ponte ainda não manda as etiquetas pela AUSÊNCIA da chave, e
+  avisa na tela. A porta não mudou: ela já repassa cada conversa como vem.
+  Prova: seção 74.
 
 ## A entrada de mensagens — a caixa de entrada do webhook
 
