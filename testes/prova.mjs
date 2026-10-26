@@ -42,12 +42,12 @@ async function portaLivre() {
 const TELEFONE = { id: "adv-1", nome: "Comercial", numero: "5567900000001",
                    token: "tok-uazapi", servidor: null, ativo: true, departamento_id: 1 };
 
-async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false, rpcs = {}, deposito = {} } = {}) {
+async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semColunas, semTabelas, uazapi = {}, contas = null, bilhetesQueFalham = 0, authNoChao = false, jwksAssimetrico = false, rpcs = {}, deposito = {}, aoGravar } = {}) {
   const uaz = await subirFalsaUazapi(uazapi);
   TELEFONE.servidor = uaz.url;
   const van = vantoro ? await subirFalsoVantoro(vantoro) : null;
   const sb = await subirFalsoSupabase({
-    quebrar, semColunas, semTabelas, bilhetesQueFalham, rpcs, deposito,
+    quebrar, semColunas, semTabelas, bilhetesQueFalham, rpcs, deposito, aoGravar,
     tabelas: {
       advogados: [{ ...TELEFONE }],
       departamentos: [{ id: 1, nome: "Comercial", slug: "comercial", ordem: 1, ativo: true }],
@@ -76,6 +76,11 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            // conta de pedidos dela mudaria de assunto. A seção 72, que é a
            // dele, encurta.
            RESGATE_AO_SUBIR_MS: "3600000",
+           // O RESGATE DO HISTÓRICO, pelo mesmo motivo: ele lê a caixa de
+           // entrada e `zorvin_sementes` uma vez, e no meio de outra prova
+           // essas leituras mudariam a conta de pedidos dela. A seção 77, que
+           // é a dele, encurta.
+           RESGATE_DO_HISTORICO_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -13016,6 +13021,508 @@ console.log("\n76. A resposta do cliente ao aviso de audiência");
      resposta && resposta.corpo.texto === "Estarei presente, obrigado" && resposta.corpo.mensagem_id === "MSG-E2E",
      JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
   await t.parar();
+}
+
+// ==================================================================
+//  77. O QUE NÃO ENTRAVA NO HISTÓRICO (26/10)
+//
+//  Pedido do Rodrigo: "veja se todos os históricos de conversas estão
+//  presentes". Três defeitos, todos medidos no banco do escritório:
+//
+//    - a mensagem com botões, a resposta a um modelo e o convite de grupo
+//      chegavam com o texto dentro de `content` e eram descartadas como
+//      "evento sem texto" (27 desde setembro);
+//    - a mensagem que a equipe mandou e que o WhatsApp entregou DEPOIS do
+//      nosso prazo virava erro, e o eco que provava a entrega era jogado fora
+//      (9 desde setembro — 6 reenviadas, o cliente recebendo duas vezes);
+//    - a limpeza da caixa de entrada nunca rodava, e quando rodou, de
+//      surpresa, levou a cópia do que o resgate ia devolver.
+//
+//  Esta seção prova os três consertos e o resgate, pela porta de verdade: o
+//  webhook, a fila e a subida da ponte.
+// ==================================================================
+{
+  console.log("\n77. O que não entrava no histórico");
+  const CLIENTE = "5511999998888";
+  const corpoDaUazapi = (mensagem, { chat = CLIENTE } = {}) => ({
+    EventType: "messages", owner: TELEFONE.numero,
+    chat: { phone: chat, id: `${chat}@s.whatsapp.net`, wa_name: "Cliente Teste" },
+    message: {
+      chatid: `${chat}@s.whatsapp.net`, sender: `${chat}@s.whatsapp.net`,
+      sender_pn: `${chat}@s.whatsapp.net`, fromMe: false, isGroup: false,
+      wasSentByApi: false, text: "", type: "text", mediaType: "",
+      messageTimestamp: Date.now(), senderName: "Cliente Teste", ...mensagem,
+    },
+  });
+  const postar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  });
+  const esperarAte = async (cond, ms = 5000) => {
+    for (let i = 0; i < ms / 100; i++) { if (cond()) return true; await espera(100); }
+    return Boolean(cond());
+  };
+  const enviosDaUazapi = (t) => t.uaz.recebidas.filter((c) => /^\/send\//.test(c.caminho)).length;
+  const daMensagem = (t, id) => (t.sb.dados.mensagens || []).find((m) => m.id_uazapi === id);
+  /** O eco de uma mensagem que o Zorvin mandou, como a Uazapi o manda. */
+  const eco = (id, texto, quando = Date.now(), extra = {}) => corpoDaUazapi({
+    messageid: id, id, messageType: "ExtendedTextMessage", fromMe: true, wasSentByApi: true,
+    text: texto, content: { text: texto }, messageTimestamp: quando, ...extra,
+  });
+  const umaConversa = (t, extra = {}) => {
+    t.sb.dados.contatos.push({ id: 1, numero: CLIENTE, nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    if (extra.item) t.sb.dados.fila_envio.push({ id: 1, conversa_id: 1, tipo: "texto", ...extra.item });
+  };
+
+  // ---- 77a. as três mensagens que sumiam entram na conversa ----
+  //
+  // Os campos são os MEDIDOS no evento cru do escritório (só os nomes): o
+  // `contentText` e os `buttons[].buttonText.displayText` da mensagem com
+  // botões; o `selectedDisplayText` da resposta a um modelo; o `groupName` e
+  // a `caption` do convite. E `m.text` vazio nas três, como veio nas 27.
+  {
+    const t = await subirTudo();
+    await postar(t, corpoDaUazapi({ messageid: "BOT-1", id: "BOT-1", messageType: "ButtonsMessage",
+      content: { contentText: "Seu boleto vence amanhã.", Header: null, headerType: 1,
+                 buttons: [{ buttonID: "1", buttonText: { displayText: "Pagar agora" }, type: 1 },
+                           { buttonID: "2", buttonText: { displayText: "Falar com atendente" }, type: 1 }] } }));
+    await postar(t, corpoDaUazapi({ messageid: "TPL-1", id: "TPL-1", messageType: "TemplateButtonReplyMessage",
+      quoted: "ORIG-1",
+      content: { selectedDisplayText: "Sim, confirmo", selectedID: "btn_1", selectedIndex: 0,
+                 contextInfo: { stanzaID: "ORIG-1", participant: `${TELEFONE.numero}@s.whatsapp.net`,
+                                quotedMessage: { conversation: "Confirma a audiência de quinta?" } } } }));
+    await postar(t, corpoDaUazapi({ messageid: "TPL-2", id: "TPL-2", messageType: "TemplateButtonReplyMessage",
+      fromMe: true, content: { selectedID: "btn_9", selectedIndex: 1 } }));
+    await postar(t, corpoDaUazapi({ messageid: "GRP-1", id: "GRP-1", messageType: "GroupInviteMessage",
+      fromMe: true, content: { groupName: "Mutirão de acordos", caption: "Entre no grupo do mutirão",
+                               groupJID: "120363000000000001@g.us", inviteCode: "AbC123",
+                               inviteExpiration: 1790000000, JPEGThumbnail: "/9j/4AAQ" } }));
+    await esperarAte(() => (t.sb.dados.mensagens || []).length >= 4);
+    const reg = t.registro.join("");
+    ok("a mensagem com botões entra na conversa", Boolean(daMensagem(t, "BOT-1")),
+       JSON.stringify(t.sb.dados.mensagens) + reg.slice(-600));
+    ok("com o texto e as opções embaixo, entre aspas",
+       daMensagem(t, "BOT-1")?.texto === "Seu boleto vence amanhã.\n\nOpções: “Pagar agora” · “Falar com atendente”",
+       JSON.stringify(daMensagem(t, "BOT-1")?.texto));
+    ok("como texto, e não como documento indisponível", daMensagem(t, "BOT-1")?.tipo === "texto",
+       daMensagem(t, "BOT-1")?.tipo);
+    ok("a resposta a um modelo entra com a palavra que a pessoa tocou",
+       daMensagem(t, "TPL-1")?.texto === "Sim, confirmo", JSON.stringify(daMensagem(t, "TPL-1")?.texto));
+    ok("e com a citação do que ela respondeu", daMensagem(t, "TPL-1")?.responder_id_uazapi === "ORIG-1",
+       JSON.stringify(daMensagem(t, "TPL-1")));
+    ok("o botão tocado pelo escritório, sem texto, não diz que foi o contato",
+       /^Respondemos tocando num botão/.test(daMensagem(t, "TPL-2")?.texto || ""),
+       JSON.stringify(daMensagem(t, "TPL-2")?.texto));
+    ok("o convite de grupo entra com o nome do grupo e o que quem convidou escreveu",
+       daMensagem(t, "GRP-1")?.texto === "👥 Convite para o grupo “Mutirão de acordos”\nEntre no grupo do mutirão",
+       JSON.stringify(daMensagem(t, "GRP-1")?.texto));
+    ok("e sem um link de convite inventado", !/chat\.whatsapp\.com/.test(daMensagem(t, "GRP-1")?.texto || ""));
+    ok("o que saiu do celular leva o rótulo de sempre", daMensagem(t, "GRP-1")?.enviado_por === "WhatsApp",
+       JSON.stringify(daMensagem(t, "GRP-1")?.enviado_por));
+    ok("nenhuma das quatro é descartada como evento vazio", !/Ignorado: evento sem texto/.test(reg),
+       reg.slice(-600));
+    ok("nem anunciada como tipo desconhecido", !/Tipo de mensagem DESCONHECIDO/.test(reg), reg.slice(-600));
+    await t.parar();
+  }
+
+  // ---- 77b. o eco que chega depois do prazo confirma o envio ----
+  //
+  // É o caso medido seis vezes: o nosso prazo estoura, o item vira erro, e o
+  // WhatsApp entrega a mensagem um minuto depois. O eco é a prova de que ela
+  // saiu, e passa a valer.
+  {
+    const t = await subirTudo({ UAZAPI_TIMEOUT_MS: "300" }, { uazapi: { demoraDoEnvio: 1500 } });
+    umaConversa(t, { item: { texto: "Seu acordo foi aprovado.", status: "pendente", tentativas: 0,
+                             criado_em: new Date().toISOString(), enviado_por: "Jenifer",
+                             enviado_por_id: "u-jen" } });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    await esperarAte(() => t.sb.dados.fila_envio[0].status === "erro", 4000);
+    const antes = { ...t.sb.dados.fila_envio[0] };
+    ok("o prazo estoura e o item vira erro, como antes", antes.status === "erro", JSON.stringify(antes));
+    ok("e a frase diz que a mensagem pode ter saído, e manda esperar antes de reenviar",
+       /pode ter saído/.test(antes.erro_motivo || "") && /Só reenvie se continuar vermelha/.test(antes.erro_motivo || ""),
+       JSON.stringify(antes.erro_motivo));
+    const quando = Date.now();
+    await postar(t, eco("ECO-1", "Seu acordo foi aprovado.", quando));
+    // O item vira 'enviada' ANTES de a linha entrar no histórico — são duas
+    // gravações —, e acordar só com a primeira leria o histórico cedo demais.
+    await esperarAte(() => t.sb.dados.fila_envio[0].status === "enviada" && Boolean(daMensagem(t, "ECO-1")));
+    const linha = t.sb.dados.fila_envio[0];
+    const msg = daMensagem(t, "ECO-1");
+    ok("o eco que chega depois confirma: o item vira enviada", linha.status === "enviada", JSON.stringify(linha));
+    ok("e a mensagem entra no histórico com o id do eco", Boolean(msg), JSON.stringify(t.sb.dados.mensagens));
+    ok("com a hora que o eco diz", msg?.criado_em === new Date(quando).toISOString(), JSON.stringify(msg));
+    ok("com quem mandou, como o envio de sempre grava",
+       msg?.enviado_por === "Jenifer" && msg?.enviado_por_id === "u-jen" && msg?.origem === "advogado",
+       JSON.stringify(msg));
+    ok("o motivo de antes fica guardado, junto da confirmação",
+       /abort/i.test(linha.erro_detalhe || "") && /confirmou depois que a mensagem saiu/.test(linha.erro_detalhe || ""),
+       JSON.stringify(linha.erro_detalhe));
+    ok("e o envio não é repetido", enviosDaUazapi(t) === 1, `${enviosDaUazapi(t)} envios`);
+    await t.parar();
+  }
+
+  // ---- 77c. o eco que chega com o pedido ainda no ar ----
+  //
+  // O eco pode vir antes de o nosso prazo estourar: a Uazapi entregou e não
+  // respondeu. Mexer no item agora seria brigar com o envio; o eco fica
+  // anotado, e a desistência confere a anotação antes de virar erro.
+  {
+    const t = await subirTudo({ UAZAPI_TIMEOUT_MS: "1500" }, { uazapi: { demoraDoEnvio: 3000 } });
+    umaConversa(t, { item: { texto: "Bom dia, tudo certo?", status: "pendente", tentativas: 0,
+                             criado_em: new Date().toISOString() } });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    const saindo = await esperarAte(() => t.sb.dados.fila_envio[0].status === "enviando", 2000);
+    ok("(o item está saindo quando o eco chega)", saindo, JSON.stringify(t.sb.dados.fila_envio[0]));
+    await postar(t, eco("ECO-2", "Bom dia, tudo certo?"));
+    await esperarAte(() => t.sb.dados.fila_envio[0].status !== "enviando", 4000);
+    await esperarAte(() => Boolean(daMensagem(t, "ECO-2")), 2000);
+    await espera(300);
+    const linha = t.sb.dados.fila_envio[0];
+    ok("quando o prazo estoura, a anotação vale: o item vira enviada, e não erro",
+       linha.status === "enviada", JSON.stringify(linha));
+    ok("a mensagem entra com o id do eco", Boolean(daMensagem(t, "ECO-2")), JSON.stringify(t.sb.dados.mensagens));
+    ok("a bolha nunca fica vermelha: não há motivo de erro", !linha.erro_motivo, JSON.stringify(linha.erro_motivo));
+    ok("e um envio só", enviosDaUazapi(t) === 1, `${enviosDaUazapi(t)} envios`);
+    await t.parar();
+  }
+
+  // ---- 77c-bis. o eco anotado vale mesmo com o histórico recusando a linha ----
+  //
+  // O item vira 'enviada', e o banco recusa a linha do histórico (uma coluna
+  // que falta, uma restrição). A mensagem saiu do mesmo jeito: a desistência
+  // não pode tratá-la como falha — o item viraria erro por cima do
+  // 'enviada', e com uma falha que insiste a mensagem sairia de novo.
+  {
+    const t = await subirTudo({ UAZAPI_TIMEOUT_MS: "1500" }, {
+      uazapi: { demoraDoEnvio: 3000 },
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "mensagens" ? "o histórico recusou" : null),
+    });
+    umaConversa(t, { item: { texto: "Documento recebido.", status: "pendente", tentativas: 0,
+                             criado_em: new Date().toISOString() } });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    const saindo = await esperarAte(() => t.sb.dados.fila_envio[0].status === "enviando", 2000);
+    ok("(o item está saindo quando o eco chega, e o histórico vai recusar a linha)", saindo,
+       JSON.stringify(t.sb.dados.fila_envio[0]));
+    await postar(t, eco("ECO-2B", "Documento recebido."));
+    await esperarAte(() => t.sb.dados.fila_envio[0].status !== "enviando", 4000);
+    // O motivo é gravado DEPOIS de o histórico recusar a linha; e, com o
+    // defeito, o erro chega por cima dele logo depois. Espera-se o motivo e
+    // mais um pouco, para o que viria por cima ter tempo de vir.
+    await esperarAte(() => /não gravada no histórico/.test(t.sb.dados.fila_envio[0].erro_detalhe || ""), 3000);
+    await espera(500);
+    const linha = t.sb.dados.fila_envio[0];
+    ok("o item vira enviada, e não erro: a mensagem saiu, mesmo sem entrar no histórico",
+       linha.status === "enviada" && !linha.erro_motivo, JSON.stringify(linha));
+    ok("e o motivo guardado diz que ela não entrou no histórico",
+       /não gravada no histórico/.test(linha.erro_detalhe || ""), JSON.stringify(linha.erro_detalhe));
+    ok("e um envio só", enviosDaUazapi(t) === 1, `${enviosDaUazapi(t)} envios`);
+    await t.parar();
+  }
+
+  // ---- 77d. o eco do item que esperava nova tentativa ----
+  //
+  // A falha que "prova que nada saiu" (o 429) às vezes saiu: o eco chega, e a
+  // nova tentativa seria a mensagem indo duas vezes.
+  {
+    const t = await subirTudo({}, { uazapi: { falharEnvio: { status: 429, corpo: { error: "too many" } } } });
+    umaConversa(t, { item: { texto: "Pode assinar a procuração?", status: "pendente", tentativas: 0,
+                             criado_em: new Date().toISOString() } });
+    await fetch(`http://127.0.0.1:${t.porta}/ping`);
+    const esperando = await esperarAte(() => t.sb.dados.fila_envio[0].status === "pendente"
+      && t.sb.dados.fila_envio[0].tentativas === 1 && t.sb.dados.fila_envio[0].tentar_em, 3000);
+    ok("(o item volta a esperar a próxima tentativa)", esperando, JSON.stringify(t.sb.dados.fila_envio[0]));
+    await postar(t, eco("ECO-3", "Pode assinar a procuração?"));
+    await esperarAte(() => t.sb.dados.fila_envio[0].status === "enviada" && Boolean(daMensagem(t, "ECO-3")));
+    ok("o eco confirma o item, e a nova tentativa não vai acontecer",
+       t.sb.dados.fila_envio[0].status === "enviada", JSON.stringify(t.sb.dados.fila_envio[0]));
+    ok("e a mensagem entra no histórico", Boolean(daMensagem(t, "ECO-3")), JSON.stringify(t.sb.dados.mensagens));
+    await t.parar();
+  }
+
+  // ---- 77e. o que o eco NÃO confirma ----
+  {
+    const t = await subirTudo();
+    const agora = Date.now();
+    t.sb.dados.contatos.push({ id: 1, numero: CLIENTE, nome: "Cliente" });
+    t.sb.dados.conversas.push({ id: 1, advogado_id: TELEFONE.id, contato_id: 1 });
+    const minAtras = (n) => new Date(agora - n * 60 * 1000).toISOString();
+    t.sb.dados.fila_envio.push(
+      // o dispensado de 2 minutos atrás, que o eco confirma
+      { id: 1, conversa_id: 1, tipo: "texto", texto: "Segue o boleto.", status: "descartada", tentativas: 1,
+        criado_em: minAtras(2), enviando_em: minAtras(2), erro_detalhe: "This operation was aborted" },
+      // o erro com outro texto
+      { id: 2, conversa_id: 1, tipo: "texto", texto: "Outra coisa", status: "erro", tentativas: 1,
+        criado_em: minAtras(2), enviando_em: minAtras(2) },
+      // o erro de duas horas atrás, com o mesmo texto do eco 4
+      { id: 3, conversa_id: 1, tipo: "texto", texto: "Mensagem velha", status: "erro", tentativas: 1,
+        criado_em: minAtras(120), enviando_em: minAtras(120) },
+      // a agendada para amanhã, nunca tentada
+      { id: 4, conversa_id: 1, tipo: "texto", texto: "Lembrete da audiência", status: "pendente", tentativas: 0,
+        criado_em: minAtras(1), agendada_para: new Date(agora + 86400e3).toISOString(),
+        tentar_em: new Date(agora + 86400e3).toISOString() },
+      // o "Reenviar": o antigo dispensado e o novo saindo, com o mesmo texto
+      { id: 5, conversa_id: 1, tipo: "texto", texto: "Reenvio", status: "descartada", tentativas: 1,
+        criado_em: minAtras(3), enviando_em: minAtras(3) },
+      { id: 6, conversa_id: 1, tipo: "texto", texto: "Reenvio", status: "enviando", tentativas: 1,
+        criado_em: minAtras(1), enviando_em: new Date(agora).toISOString() },
+      // o erro com o MESMO texto da edição: sem a guarda da edição, o eco dela o confirmaria
+      { id: 7, conversa_id: 1, tipo: "texto", texto: "Texto que foi editado", status: "erro", tentativas: 1,
+        criado_em: minAtras(2), enviando_em: minAtras(2) },
+    );
+    t.sb.dados.mensagens.push({ id: 900, conversa_id: 1, origem: "advogado", tipo: "texto",
+                                texto: "Já gravada", id_uazapi: "ECO-JA", criado_em: minAtras(1) });
+    await postar(t, eco("ECO-OK", "Segue o boleto."));
+    await postar(t, eco("ECO-TEXTO", "Um texto que ninguém mandou daqui"));
+    await postar(t, eco("ECO-VELHO", "Mensagem velha"));
+    await postar(t, eco("ECO-AGENDADA", "Lembrete da audiência"));
+    await postar(t, eco("ECO-REENVIO", "Reenvio"));
+    await postar(t, eco("ECO-EDICAO", "Texto que foi editado", Date.now(), { edited: "ECO-JA" }));
+    await postar(t, eco("ECO-JA", "Já gravada"));
+    await esperarAte(() => t.sb.dados.fila_envio[0].status === "enviada");
+    await espera(500);
+    const f = (id) => t.sb.dados.fila_envio.find((x) => x.id === id);
+    ok("o dispensado que o eco prova vira enviado, e a mensagem entra",
+       f(1).status === "enviada" && Boolean(daMensagem(t, "ECO-OK")), JSON.stringify(f(1)));
+    ok("o eco de outro texto não confirma o erro", f(2).status === "erro" && !daMensagem(t, "ECO-TEXTO"),
+       JSON.stringify(f(2)));
+    ok("nem o de um erro de duas horas atrás, fora da janela", f(3).status === "erro" && !daMensagem(t, "ECO-VELHO"),
+       JSON.stringify(f(3)));
+    ok("nem a agendada que nunca saiu", f(4).status === "pendente" && !daMensagem(t, "ECO-AGENDADA"),
+       JSON.stringify(f(4)));
+    ok("com o novo saindo, o eco é dele, e não do dispensado do Reenviar",
+       f(5).status === "descartada" && f(6).status === "enviando" && !daMensagem(t, "ECO-REENVIO"),
+       JSON.stringify([f(5), f(6)]));
+    ok("a edição não vira mensagem nova, nem confirma o erro de mesmo texto",
+       !daMensagem(t, "ECO-EDICAO") && f(7).status === "erro", JSON.stringify(f(7)));
+    ok("e o eco do que já está gravado não muda nada",
+       (t.sb.dados.mensagens || []).filter((m) => m.id_uazapi === "ECO-JA").length === 1,
+       JSON.stringify(t.sb.dados.mensagens));
+    await t.parar();
+  }
+
+  // ---- 77f. o resgate do histórico, uma vez só, na subida ----
+  //
+  // O gatilho do banco é IMITADO aqui (`aoGravar`): ele trata toda mensagem
+  // que entra como a última da conversa. Sem a imitação, a devolução da
+  // prévia e das não lidas não teria o que desfazer, e passaria sem medir.
+  const DIA = 86400e3;
+  const T0 = Date.now() - 60 * 1000;
+  const iso = (ms) => new Date(ms).toISOString();
+  const montarResgate = (comChave) => {
+    const contatos = [
+      { id: 1, numero: CLIENTE, nome: "Cliente" },
+      { id: 2, numero: "5511888887777", nome: "Banco" },
+      { id: 3, numero: "5511777776666", nome: "Sem mensagens" },
+      { id: 4, numero: "5511666665555", nome: "Convidado" },
+    ];
+    const conversas = [
+      { id: 1, advogado_id: TELEFONE.id, contato_id: 1, ultima_mensagem: "Obrigado!", ultima_atividade: iso(T0 - 1 * DIA), nao_lidas: 2 },
+      { id: 2, advogado_id: TELEFONE.id, contato_id: 2, ultima_mensagem: "Seu cartão chegou.", ultima_atividade: iso(T0 - 10 * DIA), nao_lidas: 0 },
+      { id: 3, advogado_id: TELEFONE.id, contato_id: 3, ultima_mensagem: null, ultima_atividade: iso(T0 - 4 * DIA + 5000), nao_lidas: 0 },
+      { id: 4, advogado_id: TELEFONE.id, contato_id: 4, ultima_mensagem: null, ultima_atividade: iso(T0 - 6 * DIA + 5000), nao_lidas: 0 },
+    ];
+    const mensagens = [
+      { id: 501, conversa_id: 1, origem: "contato", tipo: "texto", texto: "Oi", id_uazapi: "M1", criado_em: iso(T0 - 3 * DIA) },
+      { id: 502, conversa_id: 1, origem: "advogado", tipo: "texto", texto: "Obrigado!", id_uazapi: "M2", criado_em: iso(T0 - 1 * DIA) },
+      { id: 503, conversa_id: 2, origem: "contato", tipo: "texto", texto: "Seu cartão chegou.", id_uazapi: "B0", criado_em: iso(T0 - 10 * DIA) },
+      { id: 504, conversa_id: 1, origem: "contato", tipo: "texto", texto: "Opções antigas", id_uazapi: "JA-1", criado_em: iso(T0 - 3 * DIA) },
+      { id: 505, conversa_id: 1, origem: "advogado", tipo: "texto", texto: "Pode assinar.", id_uazapi: "SEGUNDA", criado_em: iso(T0 - 1.5 * DIA + 60e3) },
+    ];
+    const fila = [
+      { id: 11, conversa_id: 1, tipo: "texto", texto: "Segue o boleto.", status: "descartada", tentativas: 1,
+        criado_em: iso(T0 - 2 * DIA - 60e3), enviando_em: iso(T0 - 2 * DIA - 60e3),
+        erro_detalhe: "This operation was aborted", enviado_por: "Jenifer", enviado_por_id: "u-jen" },
+      { id: 12, conversa_id: 1, tipo: "texto", texto: "Pode assinar.", status: "enviada", tentativas: 2,
+        criado_em: iso(T0 - 1.5 * DIA), enviando_em: iso(T0 - 1.5 * DIA + 60e3), enviado_por: "Jenifer" },
+    ];
+    const ev = (id, corpo, quando) => ({ id, corpo, recebido_em: iso(quando), processado_em: iso(quando + 500),
+                                         processando_em: null, tentativas: 0, erro: null });
+    const botoes = (id, chat, quando, texto) => corpoDaUazapi({ messageid: id, id, messageType: "ButtonsMessage",
+      messageTimestamp: quando, content: { contentText: texto, Header: null, headerType: 1,
+      buttons: [{ buttonID: "1", buttonText: { displayText: "Ver" }, type: 1 }] } }, { chat });
+    const eventos = [
+      ev(1, botoes("E1", CLIENTE, T0 - 2 * DIA, "Lembrete do escritório"), T0 - 2 * DIA),
+      ev(2, botoes("E2", "5511888887777", T0 - 5 * DIA, "Sua fatura fechou"), T0 - 5 * DIA),
+      ev(3, corpoDaUazapi({ messageid: "E3", id: "E3", messageType: "TemplateButtonReplyMessage",
+        messageTimestamp: T0 - 4 * DIA, content: { selectedDisplayText: "Sim, confirmo", selectedID: "b1" } },
+        { chat: "5511777776666" }), T0 - 4 * DIA),
+      ev(4, corpoDaUazapi({ messageid: "E4", id: "E4", messageType: "GroupInviteMessage", fromMe: true,
+        messageTimestamp: T0 - 6 * DIA, content: { groupName: "Mutirão", caption: "Entre" } },
+        { chat: "5511666665555" }), T0 - 6 * DIA),
+      ev(5, botoes("JA-1", CLIENTE, T0 - 3 * DIA, "Opções antigas"), T0 - 3 * DIA),
+      ev(6, eco("PRIMEIRA-DO-BOLETO", "Segue o boleto.", T0 - 2 * DIA), T0 - 2 * DIA),
+      ev(7, eco("PRIMEIRA", "Pode assinar.", T0 - 1.5 * DIA + 2000), T0 - 1.5 * DIA + 2000),
+      ev(8, eco("AUTO-1", "Recebemos sua mensagem.", T0 - 1 * DIA), T0 - 1 * DIA),
+      ev(9, eco("EDIT-1", "Pode assinar (corrigido)", T0 - 1 * DIA, { edited: "SEGUNDA" }), T0 - 1 * DIA),
+      ev(10, eco("OUTRO-PROGRAMA", "Mensagem de outro sistema", T0 - 1 * DIA), T0 - 1 * DIA),
+      ev(11, botoes("E11", "5511555554444", T0 - 1 * DIA, "Conversa que sumiu"), T0 - 1 * DIA),
+    ];
+    return {
+      contatos, conversas, mensagens, fila_envio: fila, eventos_recebidos: eventos,
+      zorvin_sementes: comChave ? [{ chave: "ponte:resgate-do-historico-26-10", plantada_em: iso(T0) }] : [],
+      zorvin_respostas_automaticas: [{ id: 1, id_uazapi: "AUTO-1" }],
+    };
+  };
+  const recontagens = [];
+  const limpezas = [];
+  const rpcsDoResgate = {
+    zorvin_recontar_espera: (corpo) => { recontagens.push(["espera", String(corpo?.p_conversa)]); return { corpo: null }; },
+    zorvin_recontar_situacao: (corpo) => { recontagens.push(["situacao", String(corpo?.p_conversa)]); return { corpo: "aberto" }; },
+    limpar_eventos_recebidos: () => { limpezas.push(Date.now()); return { corpo: 0 }; },
+  };
+  let dadosDoGatilho = null;
+  const gatilho = (tabela, linhas, metodo) => {
+    if (tabela !== "mensagens" || metodo !== "POST" || !dadosDoGatilho) return;
+    for (const m of linhas) {
+      const c = (dadosDoGatilho.conversas || []).find((x) => String(x.id) === String(m.conversa_id));
+      if (!c) continue;
+      c.ultima_mensagem = m.texto ?? "[anexo]";
+      c.ultima_atividade = m.criado_em || new Date().toISOString();
+      if (m.origem === "contato") c.nao_lidas = (Number(c.nao_lidas) || 0) + 1;
+    }
+  };
+  {
+    const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "400" },
+      { tabelas: montarResgate(false), rpcs: rpcsDoResgate, aoGravar: gatilho });
+    dadosDoGatilho = t.sb.dados;
+    const terminou = await esperarAte(() => /Resgate do histórico: \d+ mensagem/.test(t.registro.join("")), 8000);
+    const reg = t.registro.join("");
+    ok("o resgate roda na subida, e diz o que fez", terminou, reg.slice(-800));
+    const m = (id) => daMensagem(t, id);
+    ok("a mensagem com botões que não tinha entrado volta para a conversa dela",
+       m("E1")?.conversa_id === 1 && m("E1")?.texto === "Lembrete do escritório\n\nOpções: “Ver”",
+       JSON.stringify(m("E1")));
+    ok("com a hora em que foi mandada, e não a de hoje", m("E1")?.criado_em === iso(T0 - 2 * DIA), JSON.stringify(m("E1")));
+    ok("a de outra conversa também", m("E2")?.conversa_id === 2, JSON.stringify(m("E2")));
+    ok("a resposta a um modelo, na conversa que estava vazia", m("E3")?.conversa_id === 3
+       && m("E3")?.texto === "Sim, confirmo" && m("E3")?.origem === "contato", JSON.stringify(m("E3")));
+    ok("o convite que o escritório mandou, como mensagem nossa", m("E4")?.origem === "advogado"
+       && m("E4")?.enviado_por === "WhatsApp" && /Convite para o grupo “Mutirão”/.test(m("E4")?.texto || ""),
+       JSON.stringify(m("E4")));
+    ok("o que já estava no histórico não entra de novo",
+       (t.sb.dados.mensagens || []).filter((x) => x.id_uazapi === "JA-1").length === 1);
+    const boleto = m("PRIMEIRA-DO-BOLETO");
+    ok("a enviada que o eco provou volta, com quem mandou e a hora do eco",
+       boleto?.texto === "Segue o boleto." && boleto?.enviado_por === "Jenifer" && boleto?.criado_em === iso(T0 - 2 * DIA),
+       JSON.stringify(boleto));
+    ok("e o item dispensado dela vira enviado",
+       t.sb.dados.fila_envio.find((f) => f.id === 11)?.status === "enviada",
+       JSON.stringify(t.sb.dados.fila_envio.find((f) => f.id === 11)));
+    ok("a que saiu duas vezes ganha a primeira: o cliente recebeu as duas",
+       m("PRIMEIRA")?.texto === "Pode assinar." && Boolean(m("SEGUNDA")), JSON.stringify(t.sb.dados.mensagens.filter((x) => x.texto === "Pode assinar.")));
+    ok("e o item dela continua enviado, sem mexer na fila",
+       t.sb.dados.fila_envio.find((f) => f.id === 12)?.status === "enviada");
+    ok("a resposta automática não vira mensagem (ela mora em outro lugar, de propósito)", !m("AUTO-1"));
+    ok("nem a edição", !m("EDIT-1"));
+    ok("nem o eco que nenhum item da fila mandou", !m("OUTRO-PROGRAMA"));
+    ok("nem a mensagem de uma conversa que não existe mais", !m("E11"));
+    ok("e nenhuma conversa ou contato é criado", t.sb.dados.conversas.length === 4 && t.sb.dados.contatos.length === 4,
+       JSON.stringify(t.sb.dados.conversas));
+    const c = (id) => t.sb.dados.conversas.find((x) => x.id === id);
+    ok("a conversa em que a resgatada é mais velha volta à prévia e à hora de antes",
+       c(1).ultima_mensagem === "Obrigado!" && c(1).ultima_atividade === iso(T0 - 1 * DIA), JSON.stringify(c(1)));
+    ok("e às não lidas de antes: história chegando não acende o selo", c(1).nao_lidas === 2, JSON.stringify(c(1)));
+    ok("a conversa em que a resgatada é a mais nova fica com a prévia dela",
+       c(2).ultima_mensagem === "Sua fatura fechou\n\nOpções: “Ver”" && c(2).ultima_atividade === iso(T0 - 5 * DIA),
+       JSON.stringify(c(2)));
+    ok("e sem não lida a mais", c(2).nao_lidas === 0, JSON.stringify(c(2)));
+    ok("a conversa que estava vazia não sobe na lista além de onde estava",
+       c(3).ultima_mensagem === "Sim, confirmo" && c(3).ultima_atividade === iso(T0 - 4 * DIA + 5000) && c(3).nao_lidas === 0,
+       JSON.stringify(c(3)));
+    const contou = (id) => recontagens.some(([f, cv]) => f === "espera" && cv === id)
+      && recontagens.some(([f, cv]) => f === "situacao" && cv === id);
+    ok("a espera e a aba são recontadas em cada conversa que ganhou mensagem",
+       ["1", "2", "3", "4"].every(contou), JSON.stringify(recontagens));
+    ok("e só nelas", recontagens.every(([, cv]) => ["1", "2", "3", "4"].includes(cv)), JSON.stringify(recontagens));
+    // A CHAVE É GRAVADA DEPOIS DA FRASE do registro, e a cena acorda com a
+    // frase: lida na hora, a chave às vezes ainda não chegou, e a conferência
+    // reprovava sabotagens que nem mexem nela (duas vezes, numa máquina
+    // ocupada). Espera-se por ela, com teto.
+    await esperarAte(() => (t.sb.dados.zorvin_sementes || []).some((x) => x.chave === "ponte:resgate-do-historico-26-10"), 3000);
+    ok("o resgate anota que rodou", (t.sb.dados.zorvin_sementes || []).some((x) => x.chave === "ponte:resgate-do-historico-26-10"),
+       JSON.stringify(t.sb.dados.zorvin_sementes));
+    ok("e a limpeza da caixa NÃO rodou antes dele (a primeira espera uma hora)", limpezas.length === 0,
+       `${limpezas.length} limpeza(s)`);
+    await t.parar();
+  }
+
+  // ---- 77f-bis. o histórico que recusa a linha resgatada não dá o resgate por feito ----
+  //
+  // O eco prova o item, o item vira 'enviada' — e o banco recusa a linha do
+  // histórico. É falha, como a recebida que o banco recusa: a chave não é
+  // anotada, e a próxima subida confere de novo.
+  {
+    const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "400" }, {
+      rpcs: rpcsDoResgate,
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "mensagens" ? "o histórico recusou" : null),
+      tabelas: {
+        contatos: [{ id: 1, numero: CLIENTE, nome: "Cliente" }],
+        conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1, ultima_mensagem: "Ok",
+                      ultima_atividade: iso(T0), nao_lidas: 0 }],
+        fila_envio: [{ id: 21, conversa_id: 1, tipo: "texto", texto: "Segue o contrato.", status: "erro",
+                       tentativas: 1, criado_em: iso(T0 - DIA - 60e3), enviando_em: iso(T0 - DIA - 60e3),
+                       erro_detalhe: "This operation was aborted" }],
+        eventos_recebidos: [{ id: 1, corpo: eco("CONTRATO-1", "Segue o contrato.", T0 - DIA),
+                              recebido_em: iso(T0 - DIA), processado_em: iso(T0 - DIA + 500),
+                              processando_em: null, tentativas: 0, erro: null }],
+        zorvin_sementes: [], zorvin_respostas_automaticas: [],
+      },
+    });
+    const terminou = await esperarAte(() => /Resgate do histórico: \d+ mensagem/.test(t.registro.join("")), 8000);
+    // A chave seria gravada DEPOIS da frase: conferir a falta dela na hora
+    // passaria antes de a gravação chegar. Dá-se o tempo de ela chegar.
+    await espera(1000);
+    const reg = t.registro.join("");
+    ok("(o resgate roda, e o histórico recusa a linha do eco)", terminou, reg.slice(-600));
+    ok("o item vira enviada do mesmo jeito: o eco provou que a mensagem saiu",
+       t.sb.dados.fila_envio[0].status === "enviada", JSON.stringify(t.sb.dados.fila_envio[0]));
+    ok("e o resgate não se dá por feito: a chave fica sem anotar, para a próxima subida conferir",
+       !(t.sb.dados.zorvin_sementes || []).some((x) => x.chave === "ponte:resgate-do-historico-26-10"),
+       JSON.stringify(t.sb.dados.zorvin_sementes));
+    ok("e o registro diz que houve falha", /1 falha\(s\)/.test(reg), reg.slice(-600));
+    await t.parar();
+  }
+
+  // ---- 77g. na subida seguinte, ele não roda de novo ----
+  {
+    const antes = montarResgate(true);
+    const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "300" }, { tabelas: antes, rpcs: rpcsDoResgate });
+    await espera(1500);
+    const leuACaixa = t.sb.chamadas.some((ch) => /eventos_recebidos/.test(ch.caminho) && /messageType/.test(decodeURIComponent(ch.busca || "")));
+    ok("com a chave anotada, ele nem lê a caixa de entrada", !leuACaixa,
+       JSON.stringify(t.sb.chamadas.filter((ch) => /eventos_recebidos/.test(ch.caminho)).map((ch) => ch.busca)));
+    ok("e não grava nada", t.sb.dados.mensagens.length === 5, JSON.stringify(t.sb.dados.mensagens.map((x) => x.id_uazapi)));
+    await t.parar();
+  }
+
+  // ---- 77h. sem a tabela que lembra, ele não roda ----
+  {
+    const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "300" },
+      { tabelas: montarResgate(false), rpcs: rpcsDoResgate, semTabelas: ["zorvin_sementes"] });
+    await esperarAte(() => /zorvin_sementes/.test(t.registro.join("")), 3000);
+    ok("sem zorvin_sementes, o resgate fica de fora e diz por quê",
+       /zorvin_sementes \(script 027\) não existe/.test(t.registro.join("")), t.registro.join("").slice(-500));
+    ok("e não grava nada", t.sb.dados.mensagens.length === 5, JSON.stringify(t.sb.dados.mensagens.map((x) => x.id_uazapi)));
+    await t.parar();
+  }
+
+  // ---- 77i. a limpeza da caixa roda sem ninguém pendente ----
+  //
+  // Ela morava depois de um "não há pendente? então volta", e só rodava na
+  // volta em que algum evento tinha ficado pela metade. Agora é de hora em
+  // hora (aqui, encurtada), haja ou não pendente.
+  {
+    limpezas.length = 0;
+    const antesDeSubir = Date.now();
+    const t = await subirTudo({ CAIXA_INTERVALO_MS: "300", CAIXA_LIMPEZA_MS: "2000" }, { rpcs: rpcsDoResgate });
+    await esperarAte(() => limpezas.length > 0, 6000);
+    ok("a limpeza da caixa roda mesmo sem evento pendente", limpezas.length > 0, `${limpezas.length} limpeza(s)`);
+    ok("e não na primeira volta: só passado o prazo depois de subir",
+       limpezas.length > 0 && limpezas[0] - antesDeSubir >= 2000,
+       limpezas.length ? `${limpezas[0] - antesDeSubir} ms depois de subir` : "não rodou");
+    await t.parar();
+  }
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
