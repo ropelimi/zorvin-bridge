@@ -2329,6 +2329,52 @@ service_role bypassrls`), e três cópias fazendo isso ao mesmo tempo se
 derrubaram com *"tuple concurrently updated"* — a lição da seção 51. Hoje a
 prova só mexe no papel quando falta.
 
+## As mensagens rápidas com anexo (script 034, 23/10)
+
+Pedido do Rodrigo: *"Para as mensagens rápidas, precisa ser possível incluir
+vídeos."* `sql/automaticos/034-as-mensagens-rapidas-com-anexo.sql` acrescenta
+quatro colunas opcionais a `mensagens_rapidas`: `midia_url`, `midia_tipo`,
+`midia_mime` e `midia_nome`. A rápida de sempre continua sendo só texto.
+
+**O arquivo sobe uma vez, ao salvar a rápida**, para `anexos/rapidas/…`.
+Usar a rápida põe na fila esse mesmo endereço. Não sobe de novo a cada uso,
+pela conta de banda de 21/08 (armadilha nº 6). **A ponte não muda nada**: o
+item da fila com `midia_url` sai por `/send/media` como qualquer anexo,
+inclusive o segundo caminho em base64.
+
+**Duas regras no banco:**
+
+- o tipo é um dos quatro que a fila conhece (`video`, `imagem`, `documento`,
+  `audio`). Um tipo desconhecido viraria uma mensagem que nunca sai;
+- endereço e tipo andam juntos. O painel decide pelo tipo como desenhar e como
+  mandar, e um endereço sem tipo é uma rápida que ninguém sabe se tem anexo.
+
+**Nenhuma política nova.** Medido no banco do escritório em 23/10:
+`rapidas_tudo` vale para quem entrou, em todas as linhas, e a permissão de
+`mensagens_rapidas` é da tabela inteira, sem coluna fechada. A conferência
+confere as duas coisas no papel de quem atende. **O texto continua `not null`**,
+e a rápida só com o vídeo grava `texto = ''`.
+
+**O número era 033 até a hora de enviar.** Outra sessão mesclou antes a
+PR #201 (as etiquetas no Controle de atendimento) com o script 033 e a seção
+74, e este virou o 034 e a seção 75, sem mudar nada por dentro. **O número
+de um script só fica reservado quando chega à `main`.** Antes de abrir a PR,
+confira o último número da pasta na `main` mais recente.
+
+Prova: seção 75, num Postgres de verdade, com a tabela como ela é no
+escritório: 25 conferências, **9 sabotagens e 9 pegas**, todas limpas, rodadas
+em cópias e lidas uma a uma:
+
+- sem a regra do tipo;
+- sem a regra que junta endereço e tipo;
+- a regra criada sem `if not exists` (a segunda rodada estoura);
+- a coluna criada sem `if not exists`;
+- sem a guarda do banco limpo;
+- o tipo `audio` fora da lista;
+- a regra que junta só de um lado;
+- o script tirando de quem atende a permissão de gravar;
+- uma coluna a menos.
+
 ## A auditoria de 07/10
 
 Varredura inteira da ponte e dos scripts, cada achado conferido antes de
