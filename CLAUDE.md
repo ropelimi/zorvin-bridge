@@ -701,6 +701,68 @@ encurtar a rodada dos avisos. Junto entrou uma rodada 4s depois de subir: só
 havia o intervalo, então toda publicação empurrava o primeiro aviso do dia
 cinco minutos adiante.
 
+## A resposta do cliente ao aviso de audiência (26/10)
+
+Pedido do escritório, pelo Vantoro: *"Se o cliente responder a mensagem
+concordando, marcar como 'cliente confirmou'."* Todo aviso termina pedindo
+para "confirmar ciência e comparecimento", e a resposta chega aqui. **Quem lê
+e decide é o Vantoro** (`audiencias/respostas.py`, rota
+`POST /audiencias/api/v1/avisos/<id>/resposta`); a ponte diz **o que o cliente
+respondeu, e a qual aviso** — `repassarRespostasDosAvisos`, no `index.js`.
+
+**Qual mensagem é resposta ao aviso.** A conversa com a linha das audiências
+continua depois do aviso, e um "ok" pode ser para outra coisa. Conta:
+
+- a mensagem de texto do cliente que **cita** a do aviso — e a que cita outra
+  mensagem não conta, por mais perto do aviso que esteja;
+- a que não cita nada e chegou quando **a última coisa dita pelo escritório**
+  naquela conversa era o aviso. Se alguém da equipe escreveu no meio, o "ok" é
+  para essa pessoa. O aviso que saiu e não entrou no histórico conta pela hora
+  do envio (`fila_envio.enviado_em`);
+- a **reação do cliente** na mensagem do aviso. A chave dela é a mensagem e o
+  emoji: trocar 👍 por ❤️ é outra resposta.
+
+Não conta o que não é texto (nem a legenda de foto), o que veio antes do
+aviso, o aviso que falhou e o aviso de mais de 15 dias. **A resposta
+automática fora do horário não atrapalha**: ela não vira linha em `mensagens`.
+
+**Fora do webhook, de propósito.** A mensagem do cliente entra como sempre; a
+rodada corre na toada dos avisos (`AVISOS_INTERVALO_MS`, 5 min), olha as
+conversas dos avisos dos últimos 15 dias e o que o cliente mandou nas últimas
+48 horas, e repassa o que ainda não repassou. Esperar o Vantoro dentro do
+webhook seria segurar a mensagem do cliente pelo meio minuto em que ele acorda.
+
+**O que acontece quando dá errado:**
+
+| o Vantoro responde | a ponte |
+|---|---|
+| 200 | anota que repassou e não manda de novo |
+| 400 ou 404 **em JSON** (aviso que não existe, resposta que não serve) | anota e não insiste |
+| 404 **sem JSON** — a rota que ainda não existe | tenta na próxima rodada |
+| 5xx, página de erro, sem resposta (dormindo) | para a rodada e tenta na próxima |
+
+O 404 sem JSON é o caso da **ponte publicada antes do Vantoro**: sem esta
+diferença, cada resposta daquele intervalo seria dada por perdida.
+
+**Repassar duas vezes não faz mal.** A memória do que já foi é da ponte
+(`respostasRepassadas`) e some quando ela reinicia; aí as respostas das
+últimas 48 horas vão de novo, e o Vantoro não registra a mesma mensagem duas
+vezes — a chave é o id dela no WhatsApp.
+
+**O log diz o número do aviso e o que o Vantoro entendeu, nunca o que o
+cliente escreveu.**
+
+**Nenhum SQL e nenhuma variável nova.** Usa `fila_envio.aviso_vantoro_id`,
+`status` e `enviado_em`, `mensagens.responder_id_uazapi` e `reacoes` (sem a
+coluna das reações, lê sem ela e a resposta escrita continua valendo), e o
+`VANTORO_API_URL`/`VANTORO_API_TOKEN` dos avisos — a chave já grava, porque os
+avisos já mandam `/enviado` e `/erro`.
+
+**As provas são a seção 76** de `testes/prova.mjs`: onze conversas, uma por
+caso; o Vantoro acordando; a rota que ainda não existe e o aviso que o
+Vantoro não conhece; e o caminho inteiro, do aviso saindo pela fila à resposta
+chegando pelo webhook.
+
 ## Os scripts que se aplicam sozinhos
 
 Até 14/09, **toda** mudança de banco foi rodada à mão: 55 arquivos em `sql/`,
