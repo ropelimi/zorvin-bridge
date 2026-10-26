@@ -763,6 +763,32 @@ caso; o Vantoro acordando; a rota que ainda não existe e o aviso que o
 Vantoro não conhece; e o caminho inteiro, do aviso saindo pela fila à resposta
 chegando pelo webhook.
 
+### A IA lê as douradas (26/10)
+
+*"Pode usar a IA para as douradas."* A resposta que a regra do Vantoro não
+entende volta de lá como `OUTRA` — na tela dele, dourada, "leia e marque".
+Quando o Vantoro diz também `lida_pela_ia: false`, a ponte manda essa resposta
+ao **Claude do copiloto** (`lerRespostaComIA`), com o texto do aviso ao lado, e
+repassa a mesma mensagem de novo com a leitura em `leitura_ia`: `CONFIRMOU`,
+`NAO_VAI` ou `OUTRA`. O que fazer com ela, quem decide é o Vantoro — a leitura
+só vale para a dourada, e com as mesmas condições de marcar.
+
+- **A mesma chave e o mesmo modelo do copiloto** (`ANTHROPIC_API_KEY`,
+  `COPILOTO_MODELO`, pelo `pedirAoClaude`). Sem a chave, nada muda.
+- **Esforço baixo e a resposta presa às três leituras** (`output_config` com o
+  esquema): é uma escolha entre três. Na dúvida, a regra manda dizer `OUTRA`.
+- **O aviso e a resposta vão entre etiquetas**, e a etiqueta que o cliente
+  escreve sai do texto dele antes — a régua de `semAEtiqueta`, do copiloto.
+- **Nem a que a regra entendeu, nem reação.** Um Vantoro que não diz
+  `lida_pela_ia` (mais velho que a leitura) também não faz a ponte perguntar.
+- **A IA que não responde ganha três tentativas**, uma por rodada; depois, a
+  resposta fica para a equipe. A que se recusa a ler devolve `OUTRA`.
+- **No log, a leitura e o número do aviso** — nunca o texto do cliente nem o
+  que a IA devolveu.
+
+As provas são a **seção 77**: o Claude de mentira lê a resposta no pedido e
+devolve a leitura de uma tabela; o Vantoro de mentira diz quais não entende.
+
 ## Os scripts que se aplicam sozinhos
 
 Até 14/09, **toda** mudança de banco foi rodada à mão: 55 arquivos em `sql/`,

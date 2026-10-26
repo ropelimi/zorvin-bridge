@@ -610,7 +610,11 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // não existe.
                                     respostasSemRota = 0,
                                     // Os avisos que o Vantoro diz não conhecer (404 em JSON).
-                                    avisosQueNaoExistem = [] } = {}) {
+                                    avisosQueNaoExistem = [],
+                                    // COMO ELE LÊ CADA RESPOSTA: `(corpo) => resposta`. Sem isto, o
+                                    // Vantoro de ANTES da leitura da IA — confirmou, e sem dizer
+                                    // `lida_pela_ia` —, que é o que faz a ponte não perguntar à IA.
+                                    lerResposta = null } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -693,6 +697,7 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     // A RESPOSTA DO CLIENTE AO AVISO, respondida como o Vantoro de verdade
     // (`audiencias/api.py`, rota `api_aviso_resposta`).
     if (/\/avisos\/[^/]+\/resposta$/.test(url.pathname)) {
+      if (lerResposta) return res.end(JSON.stringify({ ok: true, ...lerResposta(json || {}) }));
       return res.end(JSON.stringify({ ok: true, nova: true, entendida_como: "CONFIRMOU",
                                       marcou_confirmou: true, confirmou: "Sim" }));
     }
