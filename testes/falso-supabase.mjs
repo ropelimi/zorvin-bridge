@@ -170,8 +170,12 @@ const COLUNAS_DO_BANCO = {
   usuarios: ["id", "login", "email", "nome", "admin", "ativo", "foto_url"],
   permissoes: ["id", "usuario_id", "departamento_id", "telefone_id"],
   departamentos: ["id", "nome", "slug", "cor", "ordem", "ativo"],
+  // `status`, `aviso_vantoro_id` e `enviado_em` existem lá desde os avisos de
+  // audiência; a rodada das respostas aos avisos lê por elas antes de qualquer
+  // linha que as mencione.
   fila_envio: ["id", "conversa_id", "texto", "estado", "criado_em", "enviando_em",
-               "tentativas", "erro", "tentar_em", "agendada_para"],
+               "tentativas", "erro", "tentar_em", "agendada_para",
+               "status", "aviso_vantoro_id", "enviado_em"],
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],
@@ -647,7 +651,17 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // que dependa da FORMA da resposta da busca podia ser provado
                                     // — e é dela que o painel tira nome e telefone para oferecer
                                     // "começar conversa".
-                                    clientes = [] } = {}) {
+                                    clientes = [],
+                                    // AS PRIMEIRAS N RESPOSTAS AOS AVISOS levam a página de erro
+                                    // do Vantoro acordando — e a ponte tem de tentar de novo na
+                                    // rodada seguinte, e não perder a resposta do cliente.
+                                    respostasQueFalham = 0,
+                                    // O Vantoro de ANTES da rota: as primeiras N respostas levam o
+                                    // 404 de página do Django, e não o 404 em JSON do aviso que
+                                    // não existe.
+                                    respostasSemRota = 0,
+                                    // Os avisos que o Vantoro diz não conhecer (404 em JSON).
+                                    avisosQueNaoExistem = [] } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -677,6 +691,20 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
       res.writeHead(naoJson.status || 503, { "Content-Type": naoJson.tipo || "text/html" });
       return res.end(naoJson.corpo === undefined
         ? "<html><body>Service Suspended</body></html>" : naoJson.corpo);
+    }
+    if (respostasQueFalham > 0 && /\/avisos\/[^/]+\/resposta$/.test(url.pathname)) {
+      respostasQueFalham -= 1;
+      res.writeHead(502, { "Content-Type": "text/html" });
+      return res.end("<html><body>Service is starting</body></html>");
+    }
+    if (respostasSemRota > 0 && /\/avisos\/[^/]+\/resposta$/.test(url.pathname)) {
+      respostasSemRota -= 1;
+      res.writeHead(404, { "Content-Type": "text/html" });
+      return res.end("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>");
+    }
+    if (avisosQueNaoExistem.some((id) => url.pathname.endsWith(`/avisos/${id}/resposta`))) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, erro: "Aviso não encontrado." }));
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
@@ -712,6 +740,12 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     }
     if (/\/avisos\/[^/]+\/(enviado|erro)$/.test(url.pathname)) {
       return res.end(JSON.stringify({ ok: true }));
+    }
+    // A RESPOSTA DO CLIENTE AO AVISO, respondida como o Vantoro de verdade
+    // (`audiencias/api.py`, rota `api_aviso_resposta`).
+    if (/\/avisos\/[^/]+\/resposta$/.test(url.pathname)) {
+      return res.end(JSON.stringify({ ok: true, nova: true, entendida_como: "CONFIRMOU",
+                                      marcou_confirmou: true, confirmou: "Sim" }));
     }
 
     // A CONFERÊNCIA DA SENHA. É o Vantoro quem responde se a pessoa é quem diz

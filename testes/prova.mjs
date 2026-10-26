@@ -78,7 +78,7 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            RESGATE_AO_SUBIR_MS: "3600000",
            // O RESGATE DO HISTÓRICO, pelo mesmo motivo: ele lê a caixa de
            // entrada e `zorvin_sementes` uma vez, e no meio de outra prova
-           // essas leituras mudariam a conta de pedidos dela. A seção 76, que
+           // essas leituras mudariam a conta de pedidos dela. A seção 77, que
            // é a dele, encurta.
            RESGATE_DO_HISTORICO_MS: "3600000",
            ...env },
@@ -12804,7 +12804,227 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
 }
 
 // ==================================================================
-//  76. O QUE NÃO ENTRAVA NO HISTÓRICO (26/10)
+//  76. A RESPOSTA DO CLIENTE AO AVISO DE AUDIÊNCIA (pedido de 26/10)
+// ==================================================================
+//
+//  "Se o cliente responder a mensagem concordando, marcar como 'cliente
+//  confirmou'." Quem lê e decide é o Vantoro; o que a ponte tem de acertar é
+//  QUAL mensagem responde a QUAL aviso — e nunca repassar como resposta ao
+//  aviso o "ok" que o cliente deu a outra coisa.
+//
+//  Uma conversa por caso, todas na mesma ponte, com a rodada correndo de
+//  meio em meio segundo (AVISOS_INTERVALO_MS).
+// ==================================================================
+console.log("\n76. A resposta do cliente ao aviso de audiência");
+{
+  const AGORA = Date.now();
+  const em = (minutosAtras) => new Date(AGORA - minutosAtras * 60 * 1000).toISOString();
+  const AVISO = (n) => `Olá! Sua audiência é dia 12/11 às 14h30. Por gentileza, confirmar ciência e comparecimento. (${n})`;
+  const contatos = [], conversas = [], fila = [], mensagens = [];
+  let proximo = 1000;
+  const conversa = (n) => {
+    contatos.push({ id: n, numero: `55119990000${String(n).padStart(2, "0")}`, nome: `Cliente ${n}` });
+    conversas.push({ id: n, advogado_id: TELEFONE.id, contato_id: n });
+  };
+  const avisoSaiu = (n, minutos, { gravado = true, status = "enviada", reacoes = [] } = {}) => {
+    fila.push({ id: n, conversa_id: n, tipo: "texto", texto: AVISO(n), status, tentativas: 0,
+                aviso_vantoro_id: `AV-${n}`, enviado_em: em(minutos), criado_em: em(minutos + 1) });
+    if (gravado) {
+      mensagens.push({ id: proximo++, conversa_id: n, origem: "advogado", tipo: "texto", texto: AVISO(n),
+                       id_uazapi: `AVISO-${n}`, status: "enviada", criado_em: em(minutos), reacoes });
+    }
+  };
+  const nossa = (n, minutos, texto) => {
+    const id_uazapi = `NOSSA-${proximo}`;
+    mensagens.push({ id: proximo++, conversa_id: n, origem: "advogado", tipo: "texto", texto, id_uazapi,
+                     status: "enviada", criado_em: em(minutos), reacoes: [] });
+    return id_uazapi;
+  };
+  const doCliente = (n, minutos, texto, extra = {}) => {
+    const id_uazapi = `CLI-${proximo}`;
+    mensagens.push({ id: proximo++, conversa_id: n, origem: "contato", tipo: "texto", texto, id_uazapi,
+                     status: "recebida", criado_em: em(minutos), ...extra });
+    return id_uazapi;
+  };
+
+  // 1. Respondeu logo depois do aviso. O "Oi" de antes do aviso não é resposta.
+  conversa(1);
+  doCliente(1, 200, "Oi, quem fala?");
+  avisoSaiu(1, 120);
+  const ciente = doCliente(1, 110, "Ciente, obrigada");
+  // 2. Alguém do escritório escreveu entre o aviso e o "ok": o "ok" é para ele.
+  conversa(2);
+  avisoSaiu(2, 120);
+  nossa(2, 115, "Bom dia! Pode nos mandar o RG?");
+  doCliente(2, 110, "Ok");
+  // 3. Com conversa no meio, mas CITANDO o aviso: é resposta a ele.
+  conversa(3);
+  avisoSaiu(3, 120);
+  nossa(3, 115, "Bom dia! Pode nos mandar o RG?");
+  const citou = doCliente(3, 110, "Ciente", { responder_id_uazapi: "AVISO-3" });
+  // 4. Logo depois do aviso, mas citando OUTRA mensagem: é resposta à outra.
+  conversa(4);
+  const doRg = nossa(4, 125, "Precisamos do seu RG.");
+  avisoSaiu(4, 120);
+  doCliente(4, 110, "Ok", { responder_id_uazapi: doRg });
+  // 5. A reação do cliente no aviso; a do escritório não conta.
+  conversa(5);
+  avisoSaiu(5, 120, { reacoes: [{ emoji: "👍", de: "contato", em: em(100) },
+                                { emoji: "❤️", de: "advogado", em: em(99) }] });
+  // 6. Aviso de vinte dias atrás: já não espera resposta.
+  conversa(6);
+  avisoSaiu(6, 20 * 24 * 60);
+  doCliente(6, 10, "Ok");
+  // 7. O aviso saiu e não foi gravado no histórico: vale a hora do envio. E a
+  // resposta da equipe, que veio DEPOIS, não toma o lugar dele.
+  conversa(7);
+  avisoSaiu(7, 120, { gravado: false });
+  const semLinha = doCliente(7, 110, "Estarei presente");
+  nossa(7, 100, "Obrigado! Até lá.");
+  // 8. O que não é texto não é repassado — nem a legenda da foto.
+  conversa(8);
+  avisoSaiu(8, 120);
+  doCliente(8, 110, "Ok, segue o comprovante", { tipo: "imagem", midia_url: "data:image/jpeg;base64,AAAA" });
+  // 9. Conversa sem aviso nenhum.
+  conversa(9);
+  nossa(9, 120, "Olá, tudo bem?");
+  doCliente(9, 110, "Ok");
+  // 10. O aviso que falhou não tem resposta — nem com a hora de envio
+  // anotada (a fila marca "enviada" antes de conferir a edição e a exclusão,
+  // e a falha depois disso deixa as duas coisas na mesma linha).
+  conversa(10);
+  avisoSaiu(10, 120, { status: "erro", gravado: false });
+  doCliente(10, 110, "Ok");
+  // 11. Aviso de três dias atrás e a equipe escrevendo dois dias e meio
+  // atrás: o "ok" de agora é para a equipe, por mais velho que seja o aviso.
+  conversa(11);
+  avisoSaiu(11, 3 * 24 * 60);
+  nossa(11, 60 * 60, "Conseguiu separar os documentos?");
+  doCliente(11, 60, "Ok");
+
+  const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+    vantoro: {}, tabelas: { contatos, conversas, fila_envio: fila, mensagens },
+  });
+  await espera(3500);   // várias rodadas
+  const respostas = t.van.recebidas.filter((c) => /\/avisos\/[^/]+\/resposta$/.test(c.caminho));
+  const avisos = respostas.map((c) => c.caminho.split("/")[2]).sort();
+
+  ok("repassa a resposta logo depois do aviso, a que o cita, a reação e a do aviso sem linha — e só elas",
+     JSON.stringify(avisos) === JSON.stringify(["AV-1", "AV-3", "AV-5", "AV-7"]), JSON.stringify(avisos));
+  const um = respostas.find((c) => c.caminho === "/avisos/AV-1/resposta");
+  ok("com o texto, a hora e o id da mensagem do cliente",
+     um && um.metodo === "POST" && um.corpo.texto === "Ciente, obrigada" && um.corpo.recebida_em === em(110)
+     && um.corpo.mensagem_id === ciente && um.corpo.reacao === false, JSON.stringify(um && um.corpo));
+  ok("e com a chave do Vantoro", um && um.autorizacao === "Bearer tok-vantoro", um && um.autorizacao);
+  ok("a que cita o aviso vai com o id dela",
+     respostas.find((c) => c.caminho === "/avisos/AV-3/resposta")?.corpo.mensagem_id === citou);
+  const reacao = respostas.find((c) => c.caminho === "/avisos/AV-5/resposta");
+  ok("a reação vai como reação, com o emoji e uma chave da mensagem e do emoji",
+     reacao && reacao.corpo.texto === "👍" && reacao.corpo.reacao === true
+     && reacao.corpo.mensagem_id === "reacao:AVISO-5:👍" && reacao.corpo.recebida_em === em(100),
+     JSON.stringify(reacao && reacao.corpo));
+  ok("a do aviso sem linha no histórico vai pela hora do envio",
+     respostas.find((c) => c.caminho === "/avisos/AV-7/resposta")?.corpo.mensagem_id === semLinha);
+  ok("cada resposta vai uma vez só, por mais rodadas que passem", respostas.length === 4,
+     `${respostas.length} chamadas`);
+  const log = t.registro.join("");
+  ok("o log diz o aviso e o que o Vantoro entendeu",
+     /Resposta ao aviso AV-1 repassada ao Vantoro: CONFIRMOU, e o "Cliente confirmou\?" foi marcado\./.test(log),
+     log.slice(-1500));
+  ok("e nunca o que o cliente escreveu", !log.includes("Ciente, obrigada") && !log.includes("Estarei presente"));
+  await t.parar();
+}
+
+// ---- 76b. o Vantoro dormindo: a resposta passa na rodada seguinte ----
+{
+  const agora = Date.now();
+  const AVISO = "Sua audiência é amanhã às 14h. Por gentileza, confirmar ciência e comparecimento.";
+  const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+    vantoro: { respostasQueFalham: 1 },
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }],
+      fila_envio: [{ id: 1, conversa_id: 1, tipo: "texto", texto: AVISO, status: "enviada", tentativas: 0,
+                     aviso_vantoro_id: "AV-1", enviado_em: new Date(agora - 60000).toISOString(),
+                     criado_em: new Date(agora - 61000).toISOString() }],
+      mensagens: [
+        { id: 1, conversa_id: 1, origem: "advogado", tipo: "texto", texto: AVISO, id_uazapi: "AVISO-1",
+          status: "enviada", criado_em: new Date(agora - 60000).toISOString(), reacoes: [] },
+        { id: 2, conversa_id: 1, origem: "contato", tipo: "texto", texto: "Ok", id_uazapi: "CLI-1",
+          status: "recebida", criado_em: new Date(agora - 30000).toISOString() },
+      ],
+    },
+  });
+  await espera(3000);
+  const respostas = t.van.recebidas.filter((c) => /\/resposta$/.test(c.caminho));
+  ok("o Vantoro acordando não perde a resposta: ela vai de novo na rodada seguinte, e para aí",
+     respostas.length === 2 && respostas.every((c) => c.corpo.mensagem_id === "CLI-1"),
+     JSON.stringify(respostas.map((c) => c.corpo)));
+  await t.parar();
+}
+
+// ---- 76c. a ponte publicada antes do Vantoro; e o aviso que o Vantoro não conhece ----
+{
+  const agora = Date.now();
+  const AVISO = (n) => `Sua audiência é amanhã às 14h. Por gentileza, confirmar ciência. (${n})`;
+  const conversa = (n) => [
+    { id: n, conversa_id: n, tipo: "texto", texto: AVISO(n), status: "enviada", tentativas: 0,
+      aviso_vantoro_id: `AV-${n}`, enviado_em: new Date(agora - 60000).toISOString(),
+      criado_em: new Date(agora - 61000).toISOString() },
+    [{ id: 10 * n, conversa_id: n, origem: "advogado", tipo: "texto", texto: AVISO(n), id_uazapi: `AVISO-${n}`,
+       status: "enviada", criado_em: new Date(agora - 60000).toISOString(), reacoes: [] },
+     { id: 10 * n + 1, conversa_id: n, origem: "contato", tipo: "texto", texto: "Ok", id_uazapi: `CLI-${n}`,
+       status: "recebida", criado_em: new Date(agora - 30000).toISOString() }],
+  ];
+  const [f1, m1] = conversa(1);
+  const [f2, m2] = conversa(2);
+  const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+    vantoro: { respostasSemRota: 1, avisosQueNaoExistem: ["AV-2"] },
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511999998881" }, { id: 2, numero: "5511999998882" }],
+      conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }, { id: 2, advogado_id: TELEFONE.id, contato_id: 2 }],
+      fila_envio: [f1, f2], mensagens: [...m1, ...m2],
+    },
+  });
+  await espera(3000);
+  const para = (id) => t.van.recebidas.filter((c) => c.caminho === `/avisos/${id}/resposta`);
+  ok("a rota que ainda não existe (404 sem JSON) não perde a resposta: ela vai de novo",
+     para("AV-1").length === 2, `${para("AV-1").length} chamada(s)`);
+  ok("o aviso que o Vantoro diz não conhecer (404 em JSON) não é insistido",
+     para("AV-2").length === 1, `${para("AV-2").length} chamada(s)`);
+  await t.parar();
+}
+
+// ---- 76d. de ponta a ponta: o aviso sai, o cliente responde pelo WhatsApp ----
+{
+  const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" }, {
+    vantoro: { avisos: [{ id: "AV-E2E", telefone: "11999998888",
+                          texto: "Sua audiência é amanhã às 14h. Por gentileza, confirmar ciência e comparecimento.",
+                          remetente: TELEFONE.numero, finalidade: "AUDIENCIA" }] },
+  });
+  let saiu = false;
+  for (let i = 0; i < 40 && !saiu; i++) {
+    await espera(250);
+    saiu = (t.sb.dados.mensagens || []).some((m) => m.origem === "advogado" && /confirmar ciência/.test(m.texto || ""));
+  }
+  ok("o aviso sai e entra no histórico da conversa", saiu, JSON.stringify(t.sb.dados.fila_envio));
+  await fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(mensagemDaUazapi("Estarei presente, obrigado", "MSG-E2E")),
+  });
+  let resposta = null;
+  for (let i = 0; i < 20 && !resposta; i++) {
+    await espera(250);
+    resposta = t.van.recebidas.find((c) => c.caminho === "/avisos/AV-E2E/resposta");
+  }
+  ok("e a resposta do cliente chega ao Vantoro como resposta a ESTE aviso",
+     resposta && resposta.corpo.texto === "Estarei presente, obrigado" && resposta.corpo.mensagem_id === "MSG-E2E",
+     JSON.stringify(t.van.recebidas.map((c) => c.caminho)));
+  await t.parar();
+}
+
+// ==================================================================
+//  77. O QUE NÃO ENTRAVA NO HISTÓRICO (26/10)
 //
 //  Pedido do Rodrigo: "veja se todos os históricos de conversas estão
 //  presentes". Três defeitos, todos medidos no banco do escritório:
@@ -12822,7 +13042,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
 //  webhook, a fila e a subida da ponte.
 // ==================================================================
 {
-  console.log("\n76. O que não entrava no histórico");
+  console.log("\n77. O que não entrava no histórico");
   const CLIENTE = "5511999998888";
   const corpoDaUazapi = (mensagem, { chat = CLIENTE } = {}) => ({
     EventType: "messages", owner: TELEFONE.numero,
@@ -12854,7 +13074,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     if (extra.item) t.sb.dados.fila_envio.push({ id: 1, conversa_id: 1, tipo: "texto", ...extra.item });
   };
 
-  // ---- 76a. as três mensagens que sumiam entram na conversa ----
+  // ---- 77a. as três mensagens que sumiam entram na conversa ----
   //
   // Os campos são os MEDIDOS no evento cru do escritório (só os nomes): o
   // `contentText` e os `buttons[].buttonText.displayText` da mensagem com
@@ -12905,7 +13125,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76b. o eco que chega depois do prazo confirma o envio ----
+  // ---- 77b. o eco que chega depois do prazo confirma o envio ----
   //
   // É o caso medido seis vezes: o nosso prazo estoura, o item vira erro, e o
   // WhatsApp entrega a mensagem um minuto depois. O eco é a prova de que ela
@@ -12942,7 +13162,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76c. o eco que chega com o pedido ainda no ar ----
+  // ---- 77c. o eco que chega com o pedido ainda no ar ----
   //
   // O eco pode vir antes de o nosso prazo estourar: a Uazapi entregou e não
   // respondeu. Mexer no item agora seria brigar com o envio; o eco fica
@@ -12967,7 +13187,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76c-bis. o eco anotado vale mesmo com o histórico recusando a linha ----
+  // ---- 77c-bis. o eco anotado vale mesmo com o histórico recusando a linha ----
   //
   // O item vira 'enviada', e o banco recusa a linha do histórico (uma coluna
   // que falta, uma restrição). A mensagem saiu do mesmo jeito: a desistência
@@ -13000,7 +13220,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76d. o eco do item que esperava nova tentativa ----
+  // ---- 77d. o eco do item que esperava nova tentativa ----
   //
   // A falha que "prova que nada saiu" (o 429) às vezes saiu: o eco chega, e a
   // nova tentativa seria a mensagem indo duas vezes.
@@ -13020,7 +13240,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76e. o que o eco NÃO confirma ----
+  // ---- 77e. o que o eco NÃO confirma ----
   {
     const t = await subirTudo();
     const agora = Date.now();
@@ -13081,7 +13301,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76f. o resgate do histórico, uma vez só, na subida ----
+  // ---- 77f. o resgate do histórico, uma vez só, na subida ----
   //
   // O gatilho do banco é IMITADO aqui (`aoGravar`): ele trata toda mensagem
   // que entra como a última da conversa. Sem a imitação, a devolução da
@@ -13227,7 +13447,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76f-bis. o histórico que recusa a linha resgatada não dá o resgate por feito ----
+  // ---- 77f-bis. o histórico que recusa a linha resgatada não dá o resgate por feito ----
   //
   // O eco prova o item, o item vira 'enviada' — e o banco recusa a linha do
   // histórico. É falha, como a recebida que o banco recusa: a chave não é
@@ -13264,7 +13484,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76g. na subida seguinte, ele não roda de novo ----
+  // ---- 77g. na subida seguinte, ele não roda de novo ----
   {
     const antes = montarResgate(true);
     const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "300" }, { tabelas: antes, rpcs: rpcsDoResgate });
@@ -13276,7 +13496,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76h. sem a tabela que lembra, ele não roda ----
+  // ---- 77h. sem a tabela que lembra, ele não roda ----
   {
     const t = await subirTudo({ RESGATE_DO_HISTORICO_MS: "300" },
       { tabelas: montarResgate(false), rpcs: rpcsDoResgate, semTabelas: ["zorvin_sementes"] });
@@ -13287,7 +13507,7 @@ insert into public.mensagens_rapidas (titulo, texto) values ('Saudação', 'Bom 
     await t.parar();
   }
 
-  // ---- 76i. a limpeza da caixa roda sem ninguém pendente ----
+  // ---- 77i. a limpeza da caixa roda sem ninguém pendente ----
   //
   // Ela morava depois de um "não há pendente? então volta", e só rodava na
   // volta em que algum evento tinha ficado pela metade. Agora é de hora em

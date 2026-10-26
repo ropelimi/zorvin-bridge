@@ -10044,6 +10044,219 @@ async function buscarAvisosDeAudiencia() {
   }
 }
 
+// ============================================================
+//  A RESPOSTA DO CLIENTE AO AVISO DE AUDIÊNCIA (pedido de 26/10)
+//
+//  "Se o cliente responder a mensagem concordando, marcar como 'cliente
+//  confirmou'." Quem LÊ a resposta e decide é o Vantoro
+//  (POST /avisos/<id>/resposta); a ponte diz o que o cliente respondeu, e a
+//  QUAL aviso.
+//
+//  QUAL MENSAGEM É RESPOSTA AO AVISO. A conversa do cliente com a linha das
+//  audiências continua depois do aviso, e um "ok" pode ser para outra coisa.
+//  Conta como resposta ao aviso:
+//    * a mensagem de texto do cliente que CITA a do aviso (o "responder" do
+//      WhatsApp) — e a que cita outra coisa não conta;
+//    * a que não cita nada e chegou quando a última coisa dita pelo escritório
+//      naquela conversa era o aviso, sem ninguém ter escrito no meio;
+//    * e a reação que o cliente pôs na própria mensagem do aviso.
+//
+//  POR FORA DO WEBHOOK, NA TOADA DOS AVISOS. A mensagem do cliente entra como
+//  sempre, sem esperar o Vantoro — que fora do horário dorme, e leva meio
+//  minuto para acordar. A cada rodada, esta olha as conversas dos avisos dos
+//  últimos dias e repassa o que ainda não repassou; o que não passou agora
+//  passa na próxima.
+//
+//  REPASSAR DUAS VEZES NÃO FAZ MAL: a ponte reiniciada esquece o que já
+//  mandou, e o Vantoro não registra a mesma mensagem de novo — a chave é o id
+//  dela no WhatsApp.
+//
+//  O QUE O CLIENTE ESCREVEU NÃO VAI PARA O LOG: só o número do aviso e o que
+//  o Vantoro entendeu.
+// ============================================================
+const RESPOSTAS_AVISO_DIAS = 15;     // o aviso mais velho que isto já não espera resposta
+const RESPOSTAS_RELER_HORAS = 48;    // o que o cliente mandou neste tempo é conferido a cada rodada
+const TETO_DO_POSTGREST = 1000;
+const respostasRepassadas = new Map();   // aviso:mensagem -> quando o Vantoro recebeu
+let respostasRodando = false;
+
+/** As mensagens de um lado (`origem`) das conversas, desde `desde`.
+ *
+ *  EM LOTES DE CONVERSAS, e o lote que bate no teto de mil linhas é partido
+ *  ao meio e lido de novo: o PostgREST corta em mil sem avisar, e a mensagem
+ *  cortada seria justamente uma das mais novas — a que se veio procurar. */
+async function mensagensDasConversas(conversas, origem, desde, colunas) {
+  const ler = async (lote, cols) => supabase.from('mensagens').select(cols)
+    .in('conversa_id', lote).eq('origem', origem).gte('criado_em', desde)
+    .order('criado_em', { ascending: true }).limit(TETO_DO_POSTGREST);
+  const lerLote = async (lote) => {
+    let { data, error } = await ler(lote, colunas);
+    // SEM A COLUNA DAS REAÇÕES (sql/2026-08-reacoes.sql), lê sem ela: a
+    // resposta escrita continua valendo.
+    if (error && /reacoes/i.test(error.message || '') && /reacoes/.test(colunas)) {
+      ({ data, error } = await ler(lote, colunas.replace(/,\s*reacoes/, '')));
+    }
+    if (error) throw new Error(`não consegui ler as mensagens (${origem}): ${error.message}`);
+    if ((data || []).length >= TETO_DO_POSTGREST && lote.length > 1) {
+      const meio = Math.ceil(lote.length / 2);
+      return [...await lerLote(lote.slice(0, meio)), ...await lerLote(lote.slice(meio))];
+    }
+    if ((data || []).length >= TETO_DO_POSTGREST) {
+      console.log(`Respostas aos avisos: a conversa ${lote[0]} passou de mil mensagens (${origem}) `
+        + 'nestes dias; as que passaram do teto ficam de fora desta rodada.');
+    }
+    return data || [];
+  };
+  const todas = [];
+  for (let i = 0; i < conversas.length; i += 100) todas.push(...await lerLote(conversas.slice(i, i + 100)));
+  return todas;
+}
+
+/** As respostas aos avisos de UMA conversa. Ver o começo desta parte.
+ *
+ *  `avisos`: o que saiu da fila com o id do Vantoro; `nossas` e `recebidas`:
+ *  as mensagens do escritório e do cliente, em ordem. */
+function respostasAosAvisos(avisos, nossas, recebidas) {
+  // A MENSAGEM DE CADA AVISO NA CONVERSA: o mesmo texto, gravado quando ele
+  // saiu. É ela que o cliente cita, e é nela que ele reage.
+  const doAviso = new Map();
+  for (const a of [...avisos].sort((x, y) => Date.parse(x.enviado_em) - Date.parse(y.enviado_em))) {
+    const linha = nossas.find((n) => n.texto === a.texto && !doAviso.has(n.id)
+      && Date.parse(n.criado_em) >= Date.parse(a.enviado_em) - 60 * 1000);
+    if (linha) doAviso.set(linha.id, a);
+  }
+  // O QUE O ESCRITÓRIO DISSE, EM ORDEM. O aviso que saiu e não foi gravado no
+  // histórico entra pela hora do envio: ele foi dito, e o que o cliente
+  // respondeu depois responde a ele.
+  const comLinha = new Set(doAviso.values());
+  const falas = [
+    ...nossas.map((n) => ({ quando: Date.parse(n.criado_em), aviso: doAviso.get(n.id) || null })),
+    ...avisos.filter((a) => !comLinha.has(a)).map((a) => ({ quando: Date.parse(a.enviado_em), aviso: a })),
+  ].sort((x, y) => x.quando - y.quando);
+
+  const saida = [];
+  for (const m of recebidas) {
+    const texto = String(m.texto || '').trim();
+    if ((m.tipo && m.tipo !== 'texto') || !texto || !m.id_uazapi) continue;
+    let aviso = null;
+    if (m.responder_id_uazapi) {
+      const citada = nossas.find((n) => n.id_uazapi && n.id_uazapi === m.responder_id_uazapi);
+      aviso = citada ? (doAviso.get(citada.id) || null) : null;
+    } else {
+      const quando = Date.parse(m.criado_em);
+      const antes = falas.filter((f) => f.quando <= quando);
+      aviso = antes.length ? antes[antes.length - 1].aviso : null;
+    }
+    if (aviso) {
+      saida.push({ aviso: aviso.aviso_vantoro_id, texto, recebida_em: m.criado_em,
+                   mensagem_id: m.id_uazapi, reacao: false });
+    }
+  }
+  for (const n of nossas) {
+    const aviso = doAviso.get(n.id);
+    if (!aviso || !Array.isArray(n.reacoes)) continue;
+    for (const r of n.reacoes) {
+      if (!r || r.de !== 'contato' || !pareceEmoji(r.emoji)) continue;
+      // A REAÇÃO NÃO TEM ID PRÓPRIO GUARDADO: a chave é a mensagem e o emoji.
+      // Trocar o 👍 por um ❤️ é outra resposta; repetir o 👍, a mesma.
+      saida.push({ aviso: aviso.aviso_vantoro_id, texto: r.emoji, recebida_em: r.em || n.criado_em,
+                   mensagem_id: `reacao:${n.id_uazapi || n.id}:${r.emoji}`, reacao: true });
+    }
+  }
+  return saida;
+}
+
+async function repassarRespostasDosAvisos() {
+  if (desligando || respostasRodando || !VANTORO_AUDIENCIAS || !VANTORO_TOKEN) return;
+  respostasRodando = true;
+  try {
+    const agora = Date.now();
+    // A memória do que já foi não cresce para sempre: passado o prazo da
+    // releitura, a resposta não volta a ser conferida mesmo.
+    for (const [chave, quando] of respostasRepassadas) {
+      if (agora - quando > (RESPOSTAS_RELER_HORAS + 1) * 3600 * 1000) respostasRepassadas.delete(chave);
+    }
+
+    const { data: enviados, error } = await supabase.from('fila_envio')
+      .select('conversa_id, texto, aviso_vantoro_id, enviado_em')
+      .not('aviso_vantoro_id', 'is', null).eq('status', 'enviada')
+      .gte('enviado_em', new Date(agora - RESPOSTAS_AVISO_DIAS * 86400 * 1000).toISOString())
+      .order('enviado_em', { ascending: false }).limit(TETO_DO_POSTGREST);
+    if (error) {
+      console.log('Respostas aos avisos: não consegui ler a fila —', error.message);
+      return;
+    }
+    const avisos = (enviados || []).filter((a) => a.enviado_em && a.conversa_id);
+    if (!avisos.length) return;
+
+    const porConversa = new Map();
+    for (const a of avisos) {
+      if (!porConversa.has(a.conversa_id)) porConversa.set(a.conversa_id, []);
+      porConversa.get(a.conversa_id).push(a);
+    }
+    const conversas = [...porConversa.keys()];
+    const maisVelho = Math.min(...avisos.map((a) => Date.parse(a.enviado_em)));
+    const recebidas = await mensagensDasConversas(conversas, 'contato',
+      new Date(Math.max(maisVelho, agora - RESPOSTAS_RELER_HORAS * 3600 * 1000)).toISOString(),
+      'id, conversa_id, tipo, texto, id_uazapi, criado_em, responder_id_uazapi');
+    // As do escritório vão até o aviso mais velho: é preciso saber se alguém
+    // escreveu entre o aviso e a resposta, e a reação mora na linha dele.
+    const nossas = await mensagensDasConversas(conversas, 'advogado',
+      new Date(maisVelho - 60 * 1000).toISOString(),
+      'id, conversa_id, texto, id_uazapi, criado_em, reacoes');
+
+    for (const conversa of conversas) {
+      const respostas = respostasAosAvisos(porConversa.get(conversa),
+        nossas.filter((n) => n.conversa_id === conversa),
+        recebidas.filter((m) => m.conversa_id === conversa));
+      for (const r of respostas) {
+        const chave = `${r.aviso}:${r.mensagem_id}`;
+        if (respostasRepassadas.has(chave)) continue;
+        const { aviso, ...corpo } = r;
+        let resposta;
+        try {
+          resposta = await chamarAudiencias(`/avisos/${aviso}/resposta`,
+            { method: 'POST', body: JSON.stringify(corpo) });
+        } catch (e) {
+          // O VANTORO NÃO ATENDEU (dormindo, fora do ar): o resto fica para a
+          // próxima rodada, em vez de esperar o mesmo tempo por resposta.
+          console.log(`Respostas aos avisos: o Vantoro não atendeu (${(e && e.message) || e}); `
+            + 'fica para a próxima rodada.');
+          return;
+        }
+        // 200 entrou. 400 e 404 DITOS PELO VANTORO, em JSON, não vão entrar
+        // nunca — o aviso sumiu de lá, ou a resposta não serve —, e insistir
+        // seria bater na mesma porta a cada rodada.
+        //
+        // O 404 SEM JSON É OUTRA COISA: é a rota que ainda não existe — esta
+        // ponte publicada antes do Vantoro que a recebe. A resposta espera a
+        // próxima rodada, em vez de ser dada por perdida.
+        const c = resposta.corpo || {};
+        const definitiva = resposta.status === 200
+          || ([400, 404].includes(resposta.status) && c.ok === false);
+        if (definitiva) {
+          respostasRepassadas.set(chave, Date.now());
+          if (resposta.status === 200 && c.nova) {
+            console.log(`Resposta ao aviso ${aviso} repassada ao Vantoro: ${c.entendida_como || '?'}`
+              + (c.marcou_confirmou ? ', e o "Cliente confirmou?" foi marcado.' : '.'));
+          } else if (resposta.status !== 200) {
+            console.log(`Resposta ao aviso ${aviso}: o Vantoro recusou (${resposta.status}: `
+              + `${c.erro || 'sem detalhe'}). Não tento de novo.`);
+          }
+        } else {
+          console.log(`Respostas aos avisos: o Vantoro respondeu ${resposta.status}; `
+            + 'fica para a próxima rodada.');
+          return;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Respostas aos avisos:', (e && e.message) || e);
+  } finally {
+    respostasRodando = false;
+  }
+}
+
 // Roda a verificação da fila a cada 3 segundos.
 setInterval(processarFilaDeEnvio, 3000);
 
@@ -10073,6 +10286,10 @@ setTimeout(() => { terminarOsPendentes().catch(() => {}); }, 5000).unref();
 const AVISOS_INTERVALO_MS = Number(process.env.AVISOS_INTERVALO_MS) || 5 * 60 * 1000;
 setInterval(buscarAvisosDeAudiencia, AVISOS_INTERVALO_MS);
 setTimeout(() => { buscarAvisosDeAudiencia().catch(() => {}); }, 4000).unref?.();
+// A RESPOSTA DO CLIENTE AO AVISO vai na mesma toada: quem respondeu "ok"
+// aparece como confirmado no Vantoro em até cinco minutos.
+setInterval(() => { repassarRespostasDosAvisos().catch(() => {}); }, AVISOS_INTERVALO_MS);
+setTimeout(() => { repassarRespostasDosAvisos().catch(() => {}); }, 6000).unref?.();
 
 // ------------------------------------------------------------
 //  MANTER O VANTORO ACORDADO — no horário de trabalho, e só nele
