@@ -58,6 +58,42 @@ function testeDoFiltro(bruto) {
   }
 }
 
+/** O valor de uma coluna, ou de um CAMINHO DENTRO DE UM JSON, como o PostgREST
+ *  lê: `corpo->message->>messageType`. `->` desce e continua JSON; `->>` desce
+ *  e devolve TEXTO — um booleano vira "true", um objeto vira o JSON dele.
+ *
+ *  Sem isto, um filtro por caminho caía em `linha["corpo->message->>tipo"]`,
+ *  que não existe: a consulta devolvia lista vazia, e a prova de uma rotina
+ *  que lê a caixa de entrada por tipo de mensagem mediria a bancada (26/10). */
+export function valorDoCaminho(linha, chave) {
+  const k = String(chave);
+  if (!k.includes("->")) return linha[k];
+  const partes = k.split(/(->>|->)/);
+  let v = linha[partes[0]];
+  for (let i = 1; i < partes.length; i += 2) {
+    const op = partes[i], nome = partes[i + 1];
+    v = v && typeof v === "object" ? v[nome] : undefined;
+    if (op === "->>" && i === partes.length - 2) {
+      if (v === undefined || v === null) return null;
+      return typeof v === "object" ? JSON.stringify(v) : String(v);
+    }
+  }
+  return v;
+}
+
+/** As escolhas do `select` que são CAMINHO de JSON, com o nome que voltam:
+ *  `mid:corpo->message->>messageid` volta como `mid`; sem apelido, como a
+ *  última chave do caminho — que é o que o PostgREST faz. */
+function caminhosDoSelect(sel) {
+  return String(sel || "").split(",").map((x) => x.trim()).filter((x) => x.includes("->"))
+    .map((x) => {
+      const m = x.match(/^(\w+):(.*)$/);
+      const caminho = m ? m[2] : x;
+      const nome = m ? m[1] : caminho.split(/->>|->/).pop();
+      return { nome, caminho };
+    });
+}
+
 /** `select=id, contato:contato_id (numero)` → o que trazer e o que juntar. */
 function lerSelect(sel, esquema) {
   const embutidos = [];
@@ -163,7 +199,11 @@ export function colunasDoSelect(sel) {
   // Tira `apelido:coluna(campos)` inteiro: a coluna da junção é conferida pelo
   // nome dela, que sobra na lista de fora depois deste corte.
   const semJuncoes = String(sel || "").replace(/(\w+):(\w+)\s*\([^)]*\)/g, "$2");
-  return semJuncoes.split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
+  // O CAMINHO DE JSON confere a COLUNA de onde ele sai (`corpo`), e não o
+  // caminho inteiro, que nenhuma tabela tem como coluna.
+  return semJuncoes.split(",").map((s) => s.trim())
+    .map((s) => (s.includes("->") ? s.replace(/^\w+:/, "").split("->")[0].trim() : s))
+    .filter((s) => s && s !== "*");
 }
 
 /** O erro do PostgREST, ou `null` quando está tudo bem.
@@ -439,9 +479,9 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
           }));
           continue;
         }
-        pedidas.push(k);
+        pedidas.push(k.split("->")[0]);
         const teste = testeDoFiltro(v);
-        filtros.push((l) => teste(l[k]));
+        filtros.push((l) => teste(valorDoCaminho(l, k)));
       }
 
       // COLUNA QUE NÃO EXISTE RECUSA A CONSULTA INTEIRA — como o de verdade.
@@ -486,6 +526,17 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
           return ordem.asc ? cmp : -cmp;
         });
         saida = saida.slice(deslocamento, deslocamento + Math.min(limite, TETO_POSTGREST));
+        // O QUE O SELECT PEDE DE DENTRO DE UM JSON volta com o nome pedido. A
+        // linha inteira continua vindo junto, como sempre veio aqui — só o
+        // caminho é acrescentado.
+        const caminhos = caminhosDoSelect(sel);
+        if (caminhos.length) {
+          saida = saida.map((l) => {
+            const copia = { ...l };
+            for (const c of caminhos) copia[c.nome] = valorDoCaminho(l, c.caminho);
+            return copia;
+          });
+        }
         const { embutidos } = lerSelect(sel, esquema);
         if (embutidos.length) {
           saida = saida.map((l) => {
@@ -518,7 +569,7 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
           linhas.push(linha);
           gravadas.push(linha);
         }
-        if (aoGravar) aoGravar(tabela, gravadas);
+        if (aoGravar) aoGravar(tabela, gravadas, "POST");
         return responder(201, gravadas);
       }
 
@@ -547,7 +598,7 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
         }
         const alvos = casam();
         alvos.forEach((l) => Object.assign(l, json));
-        if (aoGravar) aoGravar(tabela, alvos);
+        if (aoGravar) aoGravar(tabela, alvos, "PATCH");
         return responder(200, alvos);
       }
 

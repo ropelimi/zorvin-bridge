@@ -471,6 +471,11 @@ function tipoDaMensagem(m) {
   // nada e acertar conserta em silêncio.
   if (mt.includes('buttons_response') || mt.includes('list_response')
       || qual.includes('buttonsresponse') || qual.includes('listresponse')) return 'texto';
+  // A MENSAGEM COM BOTÕES E O CONVITE DE GRUPO (26/10). Medidos no evento cru
+  // com `type: "text"`, então já caíam em 'texto' — ficam ditos aqui para uma
+  // versão do servidor que os anuncie como "media" não os mandar para a rede
+  // de segurança do documento. A resposta a um modelo já está no `template`.
+  if (qual.includes('buttonsmessage') || qual.includes('groupinvite')) return 'texto';
   if (qual === 'error' || ehIndecifravel(m)) return 'texto';
 
   if (mt.includes('sticker') || mt.includes('figurinha')) return 'figurinha';
@@ -566,6 +571,55 @@ function textoDoQueNaoEAnexo(m) {
     return texto || null;
   }
 
+  // ------------------------------------------------------------
+  //  TRÊS MENSAGENS QUE SUMIAM DA CONVERSA (26/10)
+  //
+  //  Pedido do Rodrigo: "veja se todos os históricos de conversas estão
+  //  presentes". Cruzando a caixa de entrada com `mensagens`, 27 mensagens de
+  //  setembro e outubro nunca entraram em conversa nenhuma — e a caixa as
+  //  tinha. Eram três formas que este código não sabia ler:
+  //
+  //      ButtonsMessage              21  — texto com botões, mandado ao escritório
+  //      TemplateButtonReplyMessage   5  — alguém tocou num botão de um modelo
+  //      GroupInviteMessage           1  — um convite para um grupo
+  //
+  //  As três chegam com `m.text` VAZIO (medido: 27 de 27) e o que interessa
+  //  dentro de `content`. Nenhum desvio acima as pegava, o texto ficava nulo,
+  //  e o webhook as descartava como "evento sem texto e sem mídia". Não era
+  //  bolha errada: era mensagem que não existia no Zorvin.
+  //
+  //  OS NOMES DOS CAMPOS FORAM MEDIDOS no evento cru, e só os nomes — o texto
+  //  das mensagens de cliente não foi lido:
+  //
+  //      ButtonsMessage    content.contentText, content.buttons[].buttonText.displayText
+  //      TemplateButton…   content.selectedDisplayText (e selectedID, que é de máquina)
+  //      GroupInvite…      content.groupName, content.caption (e inviteCode)
+  // ------------------------------------------------------------
+  if (qual.includes('buttonsmessage')) {
+    const corpo = textoDosBotoes(c);
+    return corpo || null;
+  }
+
+  // A RESPOSTA A UM MODELO vem ANTES do desvio do modelo logo abaixo, e é por
+  // isso que se perdia: `TemplateButtonReplyMessage` contém "template", caía
+  // ali, `textoDoModelo` não achava corpo de modelo nenhum (não há: é uma
+  // resposta) e devolvia vazio. É a mesma coisa que a resposta de botão — a
+  // palavra que a pessoa tocou é a resposta dela.
+  if (qual.includes('templatebuttonreply')) {
+    const dito = textoDaResposta(c) || String((m && m.text) || '').trim();
+    return dito || fraseDoBotaoSemTexto(m);
+  }
+
+  if (qual.includes('groupinvite')) {
+    // O LINK DO CONVITE NÃO VAI JUNTO. O `inviteCode` desta mensagem é o do
+    // convite que expira, e não o código de um link `chat.whatsapp.com` —
+    // escrever um link com ele seria inventar um endereço que talvez não
+    // abra. O nome do grupo e o que quem convidou escreveu bastam.
+    const nome = String(c.groupName || c.subject || '').trim();
+    const legenda = String(c.caption || '').trim();
+    return `👥 Convite para o grupo${nome ? ` “${nome}”` : ''}` + (legenda ? `\n${legenda}` : '');
+  }
+
   if (qual.includes('template') || qual.includes('interactive')) {
     const corpo = textoDoModelo(c);
     return corpo || null;
@@ -590,11 +644,47 @@ function textoDoQueNaoEAnexo(m) {
   if (mt.includes('buttons_response') || mt.includes('list_response')
       || qual.includes('buttonsresponse') || qual.includes('listresponse')) {
     const dito = textoDaResposta(c) || String((m && m.text) || '').trim();
-    return dito || 'O contato respondeu tocando num botão, e o WhatsApp não '
-                 + 'mandou o texto dele.';
+    return dito || fraseDoBotaoSemTexto(m);
   }
 
   return null;
+}
+
+/** Quando o WhatsApp não manda o texto do botão tocado. Quem tocou pode ser o
+ *  contato ou o próprio escritório, pelo celular (2 das 5 respostas a modelo
+ *  medidas em 26/10 eram nossas): "o contato respondeu" numa mensagem nossa
+ *  diria o contrário do que houve. */
+function fraseDoBotaoSemTexto(m) {
+  return m && m.fromMe
+    ? 'Respondemos tocando num botão, e o WhatsApp não mandou o texto.'
+    : 'O contato respondeu tocando num botão, e o WhatsApp não mandou o texto dele.';
+}
+
+/** O texto de uma mensagem com botões: o corpo e, embaixo, as opções.
+ *
+ *  As opções VÃO JUNTO, entre aspas, numa linha só. No WhatsApp elas são
+ *  botões embaixo do texto; aqui ninguém toca nelas, mas quem atende precisa
+ *  saber o que foi oferecido — "Responda 1 para confirmar" sem as opções é
+ *  metade da mensagem. Medido em 26/10: de 1 a 3 botões, com rótulos de 3 a
+ *  20 letras.
+ *
+ *  O cabeçalho e o rodapé não vieram em nenhuma das 21 (o `Header` veio nulo),
+ *  e entram se vierem: os nomes são os que o WhatsApp usa nesta mensagem. */
+function textoDosBotoes(c) {
+  const cab = c.Header;
+  const cabecalho = typeof cab === 'string' ? cab
+    : (cab && typeof cab === 'object' && typeof (cab.text || cab.title) === 'string')
+      ? (cab.text || cab.title) : '';
+  const corpo = String(c.contentText || c.ContentText || c.text || '').trim();
+  const rodape = String(c.footerText || c.FooterText || '').trim();
+  const opcoes = (Array.isArray(c.buttons) ? c.buttons : [])
+    .map((b) => b && ((b.buttonText && (b.buttonText.displayText || b.buttonText.text))
+                      || b.displayText || b.text))
+    .filter((t) => typeof t === 'string' && t.trim())
+    .map((t) => `“${t.trim()}”`);
+  const texto = [String(cabecalho).trim(), corpo, rodape].filter(Boolean).join('\n');
+  if (!opcoes.length) return texto;
+  return (texto ? `${texto}\n\n` : '') + `Opções: ${opcoes.join(' · ')}`;
 }
 
 /** O texto de uma resposta de botão ou de lista.
@@ -710,8 +800,13 @@ function tipoCruNaoReconhecido(m) {
   const mt = String(m.mediaType || m.messageType || m.type || '').trim();
   if (!mt) return null;                       // não anunciou tipo: não há o que registrar
   const b = mt.toLowerCase();
+  // `button`, `template` e `invite` (26/10): as mensagens com botões, as
+  // respostas a modelo e os convites de grupo passaram a ser lidos, e um tipo
+  // que se sabe ler não é desconhecido — o alerta de 800 caracteres a cada uma
+  // seria ruído que se aprende a pular.
   const conhecido = ['sticker', 'figurinha', 'image', 'audio', 'voice', 'video',
-                     'document', 'file', 'text', 'chat', 'conversation', 'reaction']
+                     'document', 'file', 'text', 'chat', 'conversation', 'reaction',
+                     'button', 'template', 'invite']
     .some((p) => b.includes(p)) || b === 'ptt';
   return conhecido ? null : mt;
 }
@@ -1574,7 +1669,12 @@ async function concluirEvento(id, corpo) {
 const CAIXA_ESPERA_MS = 60 * 1000;
 const CAIXA_MAX_TENTATIVAS = 5;
 let caixaRodando = false;
-let caixaLimpaEm = 0;
+// A PRIMEIRA LIMPEZA ESPERA UMA HORA DEPOIS DE SUBIR (26/10), e não roda na
+// primeira volta: o resgate do histórico (ver "O RESGATE DO HISTÓRICO") lê a
+// caixa dois minutos depois da subida, e o que ele procura é justamente o que
+// a limpeza apagaria. `CAIXA_LIMPEZA_MS` é OPCIONAL, para a bancada encurtar.
+const CAIXA_LIMPEZA_MS = Number(process.env.CAIXA_LIMPEZA_MS) || 60 * 60 * 1000;
+let caixaLimpaEm = Date.now();
 
 async function terminarOsPendentes() {
   if (desligando || caixaDesligada || caixaRodando) return;
@@ -1593,44 +1693,55 @@ async function terminarOsPendentes() {
       console.log(`Caixa de entrada: não consegui ler os pendentes (${error.message}).`);
       return;
     }
-    if (!pendentes || !pendentes.length) return;
+    if (pendentes && pendentes.length) {
+      console.log(`Caixa de entrada: ${pendentes.length} evento(s) ficaram pela metade; terminando agora.`);
+      for (const ev of pendentes) {
+        if (desligando) break;   // a saída manda: o resto fica para a próxima ponte
+        // A TENTATIVA É CONTADA ANTES, e não depois. Contar no fim faz o evento
+        // que derruba o processo nunca somar nada — e ele voltaria para sempre,
+        // derrubando a ponte a cada rodada.
+        const { error: erroClaim } = await supabase.from(CAIXA)
+          .update({ tentativas: (ev.tentativas || 0) + 1, processando_em: new Date().toISOString() })
+          .eq('id', ev.id);
+        if (erroClaim) { console.log(`Caixa: não consegui marcar a tentativa (${erroClaim.message}).`); continue; }
+        await concluirEvento(ev.id, ev.corpo);
+      }
 
-    console.log(`Caixa de entrada: ${pendentes.length} evento(s) ficaram pela metade; terminando agora.`);
-    for (const ev of pendentes) {
-      if (desligando) break;   // a saída manda: o resto fica para a próxima ponte
-      // A TENTATIVA É CONTADA ANTES, e não depois. Contar no fim faz o evento
-      // que derruba o processo nunca somar nada — e ele voltaria para sempre,
-      // derrubando a ponte a cada rodada.
-      const { error: erroClaim } = await supabase.from(CAIXA)
-        .update({ tentativas: (ev.tentativas || 0) + 1, processando_em: new Date().toISOString() })
-        .eq('id', ev.id);
-      if (erroClaim) { console.log(`Caixa: não consegui marcar a tentativa (${erroClaim.message}).`); continue; }
-      await concluirEvento(ev.id, ev.corpo);
+      // OS QUE DESISTIRAM PRECISAM SER DITOS. Um evento que falhou cinco vezes
+      // é uma mensagem de cliente que não entrou, e ela não pode ficar só numa
+      // linha de tabela que ninguém abre. Logo depois da volta que tentou: é
+      // nela que a quinta tentativa acabou de falhar.
+      const { data: desistidos } = await supabase
+        .from(CAIXA).select('id, erro')
+        .is('processado_em', null)
+        .gte('tentativas', CAIXA_MAX_TENTATIVAS)
+        .limit(5);
+      for (const d of desistidos || []) {
+        console.error(`CAIXA DE ENTRADA: o evento ${d.id} falhou ${CAIXA_MAX_TENTATIVAS} vezes e `
+          + `não será mais tentado. Ele NÃO virou mensagem em conversa nenhuma. `
+          + `Último erro: ${d.erro || 'sem detalhe'}`);
+      }
     }
 
     // A LIMPEZA, UMA VEZ POR HORA. A caixa só cresce, e uma tabela que só
     // cresce é um problema adiado — o valor de uma linha acaba no minuto em que
     // ela é processada. Os PENDENTES nunca são apagados: um evento que não
     // entrou é a única pista de uma mensagem que talvez tenha faltado.
-    if (Date.now() - caixaLimpaEm > 60 * 60 * 1000) {
+    //
+    // E ELA NUNCA RODAVA (26/10). Morava depois de um "não há pendentes?
+    // então volta", e só passava dali na volta em que algum evento tinha
+    // ficado pela metade — quase nunca. Medido: 64.713 eventos, 108 MB, o
+    // mais antigo ainda de 08/09, para uma limpeza de sete dias. Em 26/10, às
+    // 16h25, uma foto demorou mais de um minuto a entrar, a volta passou dali,
+    // e a limpeza levou de uma vez 56 mil eventos — entre eles a cópia de 34
+    // mensagens que não tinham entrado no histórico, e que o resgate daquele
+    // dia ia devolver. Limpeza que roda de surpresa é pior do que a que roda
+    // sempre: agora é de hora em hora, haja ou não pendente.
+    if (Date.now() - caixaLimpaEm > CAIXA_LIMPEZA_MS) {
       caixaLimpaEm = Date.now();
       const { data: apagados, error: erroLimpeza } = await supabase.rpc('limpar_eventos_recebidos');
       if (erroLimpeza) console.log(`Caixa de entrada: não consegui limpar (${erroLimpeza.message}).`);
       else if (apagados) console.log(`Caixa de entrada: ${apagados} evento(s) antigo(s) apagado(s).`);
-    }
-
-    // OS QUE DESISTIRAM PRECISAM SER DITOS. Um evento que falhou cinco vezes é
-    // uma mensagem de cliente que não entrou, e ela não pode ficar só numa
-    // linha de tabela que ninguém abre.
-    const { data: desistidos } = await supabase
-      .from(CAIXA).select('id, erro')
-      .is('processado_em', null)
-      .gte('tentativas', CAIXA_MAX_TENTATIVAS)
-      .limit(5);
-    for (const d of desistidos || []) {
-      console.error(`CAIXA DE ENTRADA: o evento ${d.id} falhou ${CAIXA_MAX_TENTATIVAS} vezes e `
-        + `não será mais tentado. Ele NÃO virou mensagem em conversa nenhuma. `
-        + `Último erro: ${d.erro || 'sem detalhe'}`);
     }
   } catch (e) {
     console.error('Caixa de entrada:', (e && e.message) || e);
@@ -1836,8 +1947,13 @@ async function processarEventoDoWebhook(corpo) {
     // Se a mensagem foi enviada pelo próprio Zorvin (pela API), a ponte já
     // registrou ela no banco na hora do envio. Este aviso é só um "eco" —
     // ignoramos para não duplicar.
+    //
+    // QUASE SEMPRE. Quando a resposta da Uazapi se perde no caminho, o envio
+    // não soube o id e a linha não existe — e o eco é a única notícia de que a
+    // mensagem saiu (26/10). `conferirEcoDoEnvio` pergunta antes de ignorar.
     if (m.wasSentByApi === true) {
       console.log('Eco de mensagem enviada pelo Zorvin; ignorado.');
+      await conferirEcoDoEnvio(body, m);
       return;
     }
 
@@ -2628,6 +2744,290 @@ setTimeout(() => {
     })
     .catch((e) => console.log('Resgate depois de subir:', (e && e.message) || e));
 }, RESGATE_AO_SUBIR_MS).unref();
+
+// ============================================================
+//  O RESGATE DO HISTÓRICO (26/10) — o que não entrou, uma vez só
+//
+//  Os consertos de 26/10 valem daqui para a frente: a mensagem com botões, a
+//  resposta a um modelo e o convite de grupo passaram a ser lidos, e o eco do
+//  envio que "falhou" passou a confirmar a mensagem. O que ficou para trás —
+//  27 recebidas e 9 enviadas, de setembro e outubro — está guardado na caixa
+//  de entrada, e é de lá que volta.
+//
+//  UMA VEZ SÓ, por causa do custo. A caixa tem 64 mil eventos (108 MB), e
+//  procurar um tipo dentro do JSON é ler a tabela inteira: 1,2 segundo no
+//  banco do escritório, MEDIDO. A ponte sobe dezenas de vezes por dia (ela
+//  dorme e acorda), e repetir a varredura a cada subida seria pagar isso sem
+//  achar nada. Terminado sem falha, uma chave em `zorvin_sementes` (o script
+//  027) diz que ele já rodou. Sem a tabela, ele não roda: sem como lembrar,
+//  a varredura seria de toda subida.
+//
+//  A MESMA LEITURA DO WEBHOOK. O texto sai de `textoDoQueNaoEAnexo`, a
+//  citação de `extrairResposta`, a hora de `horarioDeQuemEnviou`, e a
+//  mensagem enviada de `gravarEnviadaNoHistorico`: a bolha resgatada é igual
+//  à que teria nascido na hora.
+//
+//  A LISTA DE CONVERSAS NÃO MUDA DE LUGAR. O gatilho do banco (feito à mão no
+//  começo do projeto) trata toda mensagem que entra como a ÚLTIMA da conversa
+//  — a prévia, a hora e +1 nas não lidas. Uma mensagem de setembro entrando
+//  hoje trocaria a prévia e acenderia o selo de uma conversa já atendida.
+//  Então, depois de gravar:
+//    - a resgatada mais velha que a última mensagem da conversa devolve a
+//      prévia e a hora de antes;
+//    - as não lidas voltam ao que eram: é história chegando atrasada, e o
+//      selo conta o que chegou agora (a régua do painel, que não toca o aviso
+//      de mensagem com mais de um dia);
+//    - a espera e a aba são recontadas pelo banco, como na importação e na
+//      junção (`zorvin_recontar_espera` e `zorvin_recontar_situacao`).
+//
+//  NADA DE CONTATO NEM CONVERSA NOVA: o webhook criou os dois antes de
+//  descartar a mensagem (medido: as 27 têm conversa). Não achando, a conversa
+//  foi juntada a outra ou apagada, e o resgate conta e segue.
+//
+//  `RESGATE_DO_HISTORICO_MS` é OPCIONAL, para a bancada encurtar.
+// ============================================================
+const CHAVE_DO_RESGATE_DO_HISTORICO = 'ponte:resgate-do-historico-26-10';
+const TIPOS_QUE_A_PONTE_NAO_LIA = ['ButtonsMessage', 'TemplateButtonReplyMessage', 'GroupInviteMessage'];
+const RESGATE_DO_HISTORICO_MS = Number(process.env.RESGATE_DO_HISTORICO_MS) || 2 * 60 * 1000;
+setTimeout(() => {
+  resgatarOHistorico().catch((e) => console.log('Resgate do histórico:', (e && e.message) || e));
+}, RESGATE_DO_HISTORICO_MS).unref();
+
+async function resgatarOHistorico() {
+  if (desligando || caixaDesligada) return;
+  const { data: feito, error: erroFeito } = await supabase.from('zorvin_sementes')
+    .select('chave').eq('chave', CHAVE_DO_RESGATE_DO_HISTORICO).limit(1);
+  if (erroFeito) {
+    console.log(semATabela(erroFeito)
+      ? 'Resgate do histórico: a tabela zorvin_sementes (script 027) não existe, e sem ela não '
+        + 'há como lembrar que o resgate já rodou. Ele fica de fora, para não varrer a caixa de '
+        + 'entrada a cada subida.'
+      : `Resgate do histórico: não consegui saber se ele já rodou (${erroFeito.message}); `
+        + 'fica para a próxima subida.');
+    return;
+  }
+  if (feito && feito.length) return;
+
+  const conta = { recebidas: 0, enviadas: 0, jaEstavam: 0, semConversa: 0, semItem: 0, falhas: 0 };
+  // O QUE GRAVAR, POR CONVERSA. Planeja-se tudo antes de gravar qualquer
+  // coisa: a prévia, a hora e as não lidas de antes têm de ser lidas antes da
+  // primeira linha resgatada daquela conversa.
+  const planos = new Map();
+  const planejar = (conversaId, acao) => {
+    if (!planos.has(conversaId)) planos.set(conversaId, []);
+    planos.get(conversaId).push(acao);
+  };
+  const jaEsta = async (conversaId, idUazapi) => {
+    const { data, error } = await supabase.from('mensagens').select('id')
+      .eq('conversa_id', conversaId).eq('id_uazapi', idUazapi).limit(1);
+    if (error) throw new Error(`não consegui conferir o histórico da conversa ${conversaId}: ${error.message}`);
+    return Boolean(data && data.length);
+  };
+
+  // ---- 1. as recebidas que a ponte não sabia ler ----
+  // EM PÁGINAS (`lerEmPaginas`, a mesma do retroativo das notas): o
+  // PostgREST devolve no máximo mil linhas e não avisa.
+  let recebidas;
+  try {
+    recebidas = await lerEmPaginas(() => supabase.from(CAIXA)
+      .select('id, corpo, recebido_em')
+      .in('corpo->message->>messageType', TIPOS_QUE_A_PONTE_NAO_LIA)
+      .order('id', { ascending: true }));
+  } catch (e) {
+    console.log(`Resgate do histórico: não consegui ler a caixa de entrada (${(e && e.message) || e}); `
+      + 'fica para a próxima subida.');
+    return;
+  }
+  for (const ev of recebidas) {
+    const body = ev.corpo || {};
+    const m = body.message || {};
+    // O ECO não é recebida: ele vai pelo caminho dos ecos, logo abaixo.
+    if (m.wasSentByApi === true || !m.messageid) continue;
+    const texto = textoDoQueNaoEAnexo(m);
+    if (!texto) continue;
+    const conversaId = await acharConversaDaMensagem(body, m);
+    if (!conversaId) { conta.semConversa++; continue; }
+    if (await jaEsta(conversaId, m.messageid)) { conta.jaEstavam++; continue; }
+    const origem = m.fromMe ? 'advogado' : 'contato';
+    const quando = horarioDeQuemEnviou(m) || ev.recebido_em || new Date().toISOString();
+    const base = {
+      conversa_id: conversaId, origem, tipo: tipoDaMensagem(m), texto,
+      midia_url: null, midia_mime: null, id_uazapi: m.messageid,
+      status: origem === 'contato' ? 'recebida' : 'enviada', criado_em: quando,
+    };
+    // O MESMO RÓTULO DO WEBHOOK: o que saiu do celular é "WhatsApp", e no
+    // grupo vale quem escreveu.
+    if (origem === 'advogado') base.enviado_por = 'WhatsApp';
+    if (chatDaMensagem(body, m).ehGrupo) base.enviado_por = autorNoGrupo(body, m);
+    const extras = { ...(extrairResposta(m) || {}) };
+    planejar(conversaId, { quando, origem, fazer: async () => {
+      const erro = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
+      if (erro) {
+        conta.falhas++;
+        console.log(`Resgate do histórico: o banco recusou a mensagem ${m.messageid} (${erro.message}).`);
+        return false;
+      }
+      conta.recebidas++;
+      return true;
+    } });
+  }
+
+  // ---- 2. os ecos que não viraram mensagem ----
+  // Primeiro só o pequeno de cada eco (o id, a marca de edição e o tipo), e o
+  // corpo inteiro só dos que faltarem: são 12 mil ecos para uma dezena de
+  // candidatos.
+  let ecos = null;
+  try {
+    ecos = await lerEmPaginas(() => supabase.from(CAIXA)
+      .select('id, mid:corpo->message->>messageid, ed:corpo->message->>edited, tipo:corpo->message->>messageType')
+      .eq('corpo->message->>wasSentByApi', 'true')
+      .order('id', { ascending: true }));
+  } catch (e) {
+    conta.falhas++;
+    console.log(`Resgate do histórico: não consegui ler os ecos (${(e && e.message) || e}).`);
+  }
+  if (ecos) {
+    const candidatos = ecos.filter((e) => e.mid && !String(e.ed || '').trim()
+      && !/reaction|album/i.test(String(e.tipo || '')));
+    const noHistorico = new Set();
+    const automaticas = new Set();
+    for (let i = 0; i < candidatos.length; i += 200) {
+      const lote = [...new Set(candidatos.slice(i, i + 200).map((e) => e.mid))];
+      const { data, error } = await supabase.from('mensagens').select('id_uazapi').in('id_uazapi', lote);
+      if (error) throw new Error(`não consegui conferir os ecos no histórico: ${error.message}`);
+      for (const r of data || []) noHistorico.add(r.id_uazapi);
+    }
+    const faltam = candidatos.filter((e) => !noHistorico.has(e.mid));
+    // A RESPOSTA AUTOMÁTICA FORA DO HORÁRIO não mora em `mensagens`, de
+    // propósito (script 021): o eco dela não é mensagem que faltou.
+    for (let i = 0; i < faltam.length; i += 200) {
+      const lote = faltam.slice(i, i + 200).map((e) => e.mid);
+      const { data, error } = await supabase.from('zorvin_respostas_automaticas')
+        .select('id_uazapi').in('id_uazapi', lote);
+      if (error && semATabela(error)) break;
+      if (error) throw new Error(`não consegui conferir as respostas automáticas: ${error.message}`);
+      for (const r of data || []) automaticas.add(r.id_uazapi);
+    }
+    const restam = faltam.filter((e) => !automaticas.has(e.mid));
+    for (let i = 0; i < restam.length; i += 100) {
+      const ids = restam.slice(i, i + 100).map((e) => e.id);
+      const { data: eventos, error } = await supabase.from(CAIXA)
+        .select('id, corpo, recebido_em').in('id', ids);
+      if (error) throw new Error(`não consegui ler os ecos inteiros: ${error.message}`);
+      for (const ev of eventos || []) {
+        const body = ev.corpo || {};
+        const m = body.message || {};
+        const conversaId = await acharConversaDaMensagem(body, m);
+        if (!conversaId) { conta.semConversa++; continue; }
+        if (await jaEsta(conversaId, m.messageid)) { conta.jaEstavam++; continue; }
+        const quando = horarioDeQuemEnviou(m) || ev.recebido_em || new Date().toISOString();
+        const eco = { idUazapi: m.messageid, quando, tipo: tipoDaMensagem(m), texto: textoDoEco(m) };
+        const desde = new Date(new Date(quando).getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: itens, error: erroItens } = await supabase.from('fila_envio').select('*')
+          .eq('conversa_id', conversaId)
+          .in('status', ['pendente', 'erro', 'descartada', 'enviada'])
+          .gte('criado_em', desde)
+          .order('criado_em', { ascending: true })
+          .limit(200);
+        if (erroItens) throw new Error(`não consegui ler a fila da conversa ${conversaId}: ${erroItens.message}`);
+        // SEM O ITEM, NÃO É NOSSO: a mensagem que outro programa mandou pela
+        // mesma linha também ecoa, e não há de onde tirar quem a escreveu.
+        const item = (itens || []).find((it) => itemCasaComOEco(it, eco) && podeSerDoEco(it));
+        if (!item) { conta.semItem++; continue; }
+        planejar(conversaId, { quando, origem: 'advogado', fazer: async () => {
+          const { entrou, falhou } = await aplicarOEco(item, eco);
+          if (entrou) conta.enviadas++;
+          // A RECUSA DO BANCO CONTA COMO FALHA, como na recebida: a chave não é
+          // anotada, e a próxima subida confere de novo. Zero linhas não é
+          // falha — alguém mexeu no item no meio (reenviou, ou o eco ao vivo
+          // chegou antes), e não há o que resgatar.
+          if (falhou) conta.falhas++;
+          return entrou;
+        } });
+      }
+    }
+  }
+
+  // ---- 3. grava, conversa por conversa, e devolve a conversa ao lugar ----
+  for (const [conversaId, acoes] of planos) {
+    if (desligando) { conta.falhas++; break; }
+    acoes.sort((a, b) => new Date(a.quando) - new Date(b.quando));
+    const { data: antes, error: erroAntes } = await supabase.from('conversas')
+      .select('id, ultima_mensagem, ultima_atividade, nao_lidas').eq('id', conversaId).maybeSingle();
+    const { data: ultima, error: erroUltima } = await supabase.from('mensagens').select('criado_em')
+      .eq('conversa_id', conversaId).order('criado_em', { ascending: false }).limit(1);
+    if (erroAntes || erroUltima || !antes) { conta.falhas++; continue; }
+    const quandos = [];
+    let clientes = 0;
+    for (const acao of acoes) {
+      if (!(await acao.fazer())) continue;
+      quandos.push(acao.quando);
+      if (acao.origem === 'contato') clientes++;
+    }
+    if (!quandos.length) continue;
+    await devolverAConversaAoLugar(conversaId, antes, (ultima || [])[0], quandos, clientes);
+  }
+
+  console.log(`Resgate do histórico: ${conta.recebidas} mensagem(ns) recebida(s) e `
+    + `${conta.enviadas} enviada(s) voltaram para ${planos.size} conversa(s). `
+    + `${conta.jaEstavam} já estavam lá, ${conta.semConversa} sem conversa (juntada ou apagada), `
+    + `${conta.semItem} eco(s) sem item da fila (não eram do Zorvin)`
+    + (conta.falhas ? `, e ${conta.falhas} falha(s) — ele roda de novo na próxima subida.` : '.'));
+  if (conta.falhas) return;
+  const { error: erroChave } = await supabase.from('zorvin_sementes')
+    .upsert({ chave: CHAVE_DO_RESGATE_DO_HISTORICO }, { onConflict: 'chave', ignoreDuplicates: true });
+  if (erroChave) {
+    console.log(`Resgate do histórico: não consegui anotar que ele rodou (${erroChave.message}). `
+      + 'Na próxima subida ele confere de novo, sem gravar nada duas vezes.');
+  }
+}
+
+/**
+ * Depois de o resgate gravar numa conversa: a prévia, a hora e as não lidas
+ * voltam a ser as de antes, e a espera e a aba são recontadas.
+ *
+ * `quandos` são as horas do que entrou: é com uma delas que o gatilho deixou
+ * `ultima_atividade`. A gravação só desfaz quando ainda é ela que está lá —
+ * se uma mensagem nova chegou no meio, o gatilho já pôs a dela, e ela vale.
+ */
+async function devolverAConversaAoLugar(conversaId, antes, ultimaDeAntes, quandos, clientes) {
+  const maisNova = Math.max(...quandos.map((q) => new Date(q).getTime()));
+  const ultimaAntes = ultimaDeAntes ? new Date(ultimaDeAntes.criado_em).getTime() : null;
+  const horaDeAntes = antes.ultima_atividade ? new Date(antes.ultima_atividade).getTime() : null;
+  let campos = null;
+  if (ultimaAntes !== null && maisNova <= ultimaAntes) {
+    campos = { ultima_mensagem: antes.ultima_mensagem, ultima_atividade: antes.ultima_atividade };
+  } else if (horaDeAntes !== null && horaDeAntes > maisNova) {
+    // A RESGATADA É A MENSAGEM MAIS NOVA, e a prévia certa é a dela. A hora,
+    // não: a conversa já estava mais acima na lista (uma conversa começada
+    // pela equipe, por exemplo), e descer por causa de um resgate seria ela
+    // sumir do alto sem ninguém ter feito nada.
+    campos = { ultima_atividade: antes.ultima_atividade };
+  }
+  if (campos) {
+    const { error } = await supabase.from('conversas').update(campos)
+      .eq('id', conversaId).in('ultima_atividade', quandos);
+    if (error) console.log(`Resgate do histórico: não devolvi a prévia da conversa ${conversaId} (${error.message}).`);
+  }
+  // AS NÃO LIDAS: o gatilho somou uma por recebida. Tira-se o que ele somou —
+  // a partir do valor de AGORA, com a gravação conferindo que ele não mudou
+  // no meio (uma mensagem nova, ou alguém abrindo a conversa).
+  for (let tentativa = 0; clientes > 0 && tentativa < 3; tentativa++) {
+    const { data: agora } = await supabase.from('conversas').select('nao_lidas').eq('id', conversaId).maybeSingle();
+    const n = Number(agora && agora.nao_lidas) || 0;
+    const alvo = Math.max(0, n - clientes);
+    if (alvo === n) break;
+    const { data: foi } = await supabase.from('conversas').update({ nao_lidas: alvo })
+      .eq('id', conversaId).eq('nao_lidas', n).select('id');
+    if (foi && foi.length) break;
+  }
+  for (const funcao of ['zorvin_recontar_espera', 'zorvin_recontar_situacao']) {
+    const { error } = await supabase.rpc(funcao, { p_conversa: conversaId });
+    if (error && !semAFuncao(error)) {
+      console.log(`Resgate do histórico: ${funcao} falhou na conversa ${conversaId} (${error.message}).`);
+    }
+  }
+}
 
 app.post('/webhook', async (req, res) => {
   // JÁ ESTAMOS SAINDO: é melhor recusar do que aceitar e não terminar.
@@ -4296,8 +4696,18 @@ function motivoDoErro(bruto) {
   // erro que apareciam sem tradução, cinco já eram entendidas — eram registros
   // antigos, de antes de a lista aprendê-las. Esta era a única viva, e era a
   // mais recente de todas.
+  //
+  // E A MENSAGEM PODE TER SAÍDO (26/10). Medido na caixa de entrada: das seis
+  // mensagens que acabaram em "This operation was aborted" desde setembro, AS
+  // SEIS chegaram ao cliente — o eco do WhatsApp veio de 56 a 104 segundos
+  // depois de o item entrar na fila, quando o nosso prazo de 45 já tinha
+  // passado. Esta frase mandava reenviar, e três delas foram reenviadas: o
+  // cliente recebeu duas vezes. Hoje o eco que chega depois confirma o envio
+  // sozinho (ver "O ECO DO ENVIO QUE FALHOU"), e a frase manda esperar.
   if (/demorou demais|abort|timeout|etimedout/.test(t)) {
-    return 'O servidor do WhatsApp não respondeu a tempo. Toque em reenviar daqui a pouco.';
+    return 'O servidor do WhatsApp não respondeu a tempo, e a mensagem pode ter saído '
+         + 'assim mesmo. Espere um ou dois minutos: se ela saiu, esta bolha some e a '
+         + 'mensagem aparece como enviada. Só reenvie se continuar vermelha.';
   }
   if (/fetch failed|enotfound|econnrefused|econnreset|network|socket hang up/.test(t)) {
     return 'Não conseguimos falar com o servidor do WhatsApp (Uazapi). '
@@ -4517,6 +4927,317 @@ async function tentarDeNovoMaisTarde(item, bruto) {
     + `tentativa ${(item.tentativas || 0) + 1} de ${MAX_TENTATIVAS}, nova tentativa em `
     + `${Math.round(espera / 1000)}s.`);
   return true;
+}
+
+/**
+ * A mensagem que SAIU entra no histórico — pelo envio, ou pelo eco que provou
+ * que ela saiu. Uma escrita só para os dois caminhos: a bolha que nasce do eco
+ * tem de ser igual à que nasceria da resposta da Uazapi, com quem mandou, o
+ * nome do arquivo e a citação.
+ *
+ * `quando` é a hora que o eco diz. O envio de sempre não passa nada, e a linha
+ * fica com a hora em que o banco gravou — que é a hora do envio.
+ */
+async function gravarEnviadaNoHistorico(item, idUazapi, quando = null) {
+  const ehMidia = item.tipo && item.tipo !== 'texto' && item.midia_url;
+  const base = {
+    conversa_id: item.conversa_id,
+    origem: 'advogado',
+    tipo: item.tipo || 'texto',
+    texto: item.texto || null,
+    midia_url: ehMidia ? item.midia_url : null,
+    midia_mime: ehMidia ? (item.midia_mime || null) : null,
+    id_uazapi: idUazapi,
+    status: 'enviada'
+  };
+  if (quando) base.criado_em = quando;
+  // Campos "extras" (colunas que podem não existir ainda no banco): quem
+  // enviou (atendente) e os dados de citação. Se alguma coluna faltar, o
+  // salvarMensagem regrava só com o básico, sem quebrar.
+  const extras = {};
+  if (item.enviado_por) extras.enviado_por = item.enviado_por;
+  if (item.enviado_por_foto) extras.enviado_por_foto = item.enviado_por_foto;
+  // O NOME DO ARQUIVO TAMBÉM NO QUE SAI.
+  //
+  // O painel já grava `midia_nome` na FILA — é dele que sai o `docName`
+  // mandado ao WhatsApp. Mas a linha de `mensagens`, que é a que a conversa
+  // desenha, nunca o recebia: o nome fazia a viagem inteira até o cliente e
+  // não sobrava para o escritório. Toda bolha de documento ENVIADO também
+  // aparecia escrita só "Documento".
+  if (ehMidia && item.midia_nome) extras.midia_nome = item.midia_nome;
+  // O ID de quem enviou viaja junto com o nome. O nome é o que a bolha mostra
+  // (o nome de então); o id é o que o painel conta, porque ele não muda quando
+  // alguém edita o próprio perfil. Entra como "extra" pelo mesmo motivo dos
+  // outros: numa base sem o SQL rodado a coluna não existe, e a mensagem não
+  // pode deixar de ser gravada por causa disso.
+  if (item.enviado_por_id) extras.enviado_por_id = item.enviado_por_id;
+  if (item.responder_id_uazapi) {
+    extras.responder_id_uazapi = item.responder_id_uazapi;
+    extras.resposta_previa = item.resposta_previa || null;
+    extras.resposta_autor = item.resposta_autor || null;
+  }
+  // O RESULTADO DESTA GRAVAÇÃO NÃO PODE SER JOGADO FORA.
+  //
+  // Ele era. A mensagem saía para o WhatsApp, o contato recebia, e se o banco
+  // recusasse a linha — coluna faltando, restrição no `tipo`, política de RLS
+  // — ninguém ficava sabendo: nem a tela, que não mostrava a bolha, nem o log,
+  // que não dizia nada. Era assim que uma figurinha podia chegar ao cliente e
+  // não existir no Zorvin.
+  //
+  // O item continua 'enviada', porque enviada ele foi. O motivo fica gravado
+  // em `erro_detalhe`, que é onde se procura quando algo não aparece.
+  const erroHist = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
+  if (erroHist) {
+    console.error(`ENVIADA MAS NÃO GRAVADA (item ${item.id}, tipo ${item.tipo || 'texto'}):`, erroHist.message);
+    await supabase.from('fila_envio')
+      .update({ erro_detalhe: `enviada ao WhatsApp, mas não gravada no histórico: ${erroHist.message}` })
+      .eq('id', item.id);
+  }
+  return erroHist;
+}
+
+// ============================================================
+//  O ECO DO ENVIO QUE "FALHOU" — a mensagem saiu, e a conversa não sabia (26/10)
+//
+//  Pedido do Rodrigo: "veja se todos os históricos de conversas estão
+//  presentes". Cruzando a caixa de entrada com o histórico, NOVE mensagens
+//  que a equipe mandou pelo Zorvin chegaram ao cliente e não estão na
+//  conversa. O eco delas — o aviso que o WhatsApp manda de toda mensagem que
+//  sai — está guardado na caixa; a linha em `mensagens`, não.
+//
+//  O que houve, nas nove:
+//
+//    - seis acabaram em "This operation was aborted": o nosso prazo de 45
+//      segundos passou, o item virou erro, e o WhatsApp mandou a mensagem
+//      assim mesmo — o eco veio de 56 a 104 segundos depois de o item entrar
+//      na fila. Três foram reenviadas pela equipe (o cliente recebeu duas
+//      vezes); três foram dispensadas, e o cliente recebeu uma mensagem que a
+//      conversa não mostra;
+//    - três saíram na primeira tentativa E na segunda (`tentativas` = 2): o
+//      eco da primeira chegou, e a conversa só mostra a segunda.
+//
+//  O ECO É A PROVA DE QUE SAIU, e era jogado fora sem pergunta: "eco de
+//  mensagem enviada pelo Zorvin; ignorado". Valia supor que a linha já estava
+//  no histórico — o envio grava antes, com o id que a Uazapi devolve. Mas
+//  quando a resposta da Uazapi se perde, o envio nunca soube o id, e o eco é
+//  a única notícia de que a mensagem foi.
+//
+//  Agora o eco cujo id não está na conversa procura o item da fila que o
+//  mandou: a mesma conversa, o mesmo tipo, o mesmo texto, tentado até 30
+//  minutos antes. Achando:
+//
+//    - o item em erro, dispensado, ou esperando nova tentativa → vira
+//      'enviada', e a mensagem entra no histórico com o id e a hora do eco. A
+//      bolha vermelha some, e a nova tentativa não acontece;
+//    - o item ainda saindo (o pedido à Uazapi não voltou) → o eco fica
+//      ANOTADO, e o envio, quando desistir, confere a anotação antes de virar
+//      erro ou tentar de novo. Mexer no item agora seria brigar com quem está
+//      no meio de mandá-lo.
+//
+//  O QUE NÃO SE COBRE, dito para ninguém descobrir depois: a anotação mora na
+//  memória da ponte. Se ela cair entre o eco e a desistência — ou se o eco for
+//  tratado pela outra ponte, nos segundos de uma publicação —, o item fica
+//  como ficaria antes.
+// ============================================================
+const ECO_JANELA_MS = 30 * 60 * 1000;
+const ECO_ANOTACAO_MS = 15 * 60 * 1000;
+const ecosDoQueEstaSaindo = new Map();   // id do item da fila → { idUazapi, quando, anotadoEm }
+
+function anotarEcoDoQueEstaSaindo(itemId, eco) {
+  const agora = Date.now();
+  for (const [id, e] of ecosDoQueEstaSaindo) {
+    if (agora - e.anotadoEm > ECO_ANOTACAO_MS) ecosDoQueEstaSaindo.delete(id);
+  }
+  ecosDoQueEstaSaindo.set(String(itemId), { ...eco, anotadoEm: agora });
+}
+
+function tirarEcoDoQueEstaSaindo(itemId) {
+  const chave = String(itemId);
+  const eco = ecosDoQueEstaSaindo.get(chave);
+  if (!eco) return null;
+  ecosDoQueEstaSaindo.delete(chave);
+  return Date.now() - eco.anotadoEm > ECO_ANOTACAO_MS ? null : eco;
+}
+
+/** O texto que o eco carrega — a mesma leitura do webhook, e com a legenda do
+ *  anexo, que é o `texto` do item da fila de um anexo. */
+function textoDoEco(m) {
+  const c = (m && m.content) || {};
+  return String(textoDoQueNaoEAnexo(m) || m.text || (typeof m.content === 'string' ? m.content : '')
+    || m.caption || (typeof c === 'object' && c.caption) || '').trim();
+}
+
+/** Este item da fila é o que mandou este eco? O tipo e o texto iguais, e o
+ *  eco DEPOIS de o item sair — até 30 minutos depois; um minuto antes passa,
+ *  pela diferença entre o relógio do aparelho e o do banco.
+ *
+ *  "Sair" tem três relógios, e qualquer um serve: a última tentativa
+ *  (`enviando_em`), a criação e a hora marcada da agendada. A última tentativa
+ *  sozinha não basta — quando a primeira saiu e a segunda também, o eco da
+ *  primeira vem ANTES da segunda tentativa, e é perto da criação que ele está. */
+function itemCasaComOEco(item, eco) {
+  if (!item || ['reacao', 'edicao', 'exclusao'].includes(item.tipo)) return false;
+  if ((item.tipo || 'texto') !== eco.tipo) return false;
+  if (String(item.texto || '').trim() !== eco.texto) return false;
+  const veio = new Date(eco.quando).getTime();
+  if (!Number.isFinite(veio)) return false;
+  return [item.enviando_em, item.criado_em, item.agendada_para].some((t) => {
+    const saiu = t ? new Date(t).getTime() : NaN;
+    return Number.isFinite(saiu) && veio >= saiu - 60 * 1000 && veio <= saiu + ECO_JANELA_MS;
+  });
+}
+
+/** A conversa de uma mensagem que já passou pelo webhook, só LENDO. O webhook
+ *  de sempre cria contato e conversa; aqui não se cria nada: o eco de um item
+ *  da fila saiu de uma conversa que já existe, e a mensagem que o webhook
+ *  descartou criou a dela antes de ser descartada. Não achá-la quer dizer que
+ *  a conversa foi juntada a outra ou apagada — e aí não há onde pôr. */
+async function acharConversaDaMensagem(body, m) {
+  const numeroDono = String(body.owner || m.owner || '').replace(/\D/g, '');
+  if (!numeroDono) return null;
+  const { data: advs } = await supabase.from('advogados').select('id').eq('numero', numeroDono).limit(1);
+  const adv = (advs || [])[0];
+  if (!adv) return null;
+  const chat = chatDaMensagem(body, m);
+  // O ECO DE UMA MENSAGEM NOSSA não traz quem é o contato no remetente (ali
+  // estamos nós), e sem `body.chat` o número fica no `chatid` da mensagem.
+  const chave = chat.chave || (() => {
+    const jid = String(m.chatid || '');
+    if (!jid || jid.includes('@lid')) return null;
+    const d = jid.split('@')[0].replace(/\D/g, '');
+    return d.length >= 8 ? d : null;
+  })();
+  if (!chave) return null;
+  const numeros = chat.ehGrupo ? [chave] : variantesDoNumero(chave);
+  const { data: contatos } = await supabase.from('contatos').select('id').in('numero', numeros);
+  const ids = (contatos || []).map((c) => c.id);
+  if (!ids.length) return null;
+  const { data: convs } = await supabase.from('conversas').select('id')
+    .eq('advogado_id', adv.id).in('contato_id', ids).limit(1);
+  return ((convs || [])[0] || {}).id || null;
+}
+
+/** O estado em que um item pode ser o dono de um eco que não está no
+ *  histórico:
+ *    - erro e dispensado: a falha que não era falha;
+ *    - pendente JÁ TENTADO, esperando a próxima tentativa (sem tentativa, ele
+ *      nunca foi mandado, e o eco não pode ser dele);
+ *    - enviado depois de MAIS DE UMA tentativa: a anterior também saiu, e a
+ *      conversa só mostra a última. Com uma tentativa só, a linha dele já está
+ *      no histórico com o id do eco;
+ *    - saindo agora (só no eco que chega ao vivo — ver `conferirEcoDoEnvio`). */
+function podeSerDoEco(item) {
+  const tentativas = Number(item.tentativas) || 0;
+  if (item.status === 'erro' || item.status === 'descartada' || item.status === 'enviando') return true;
+  if (item.status === 'pendente') return tentativas > 0;
+  if (item.status === 'enviada') return tentativas > 1;
+  return false;
+}
+
+/** O que o eco faz com o item que ele provou: o enviado de mais de uma
+ *  tentativa só ganha a mensagem que faltava (ele já é 'enviada'); os outros
+ *  viram 'enviada'. Devolve o mesmo que `confirmarPeloEco`. */
+async function aplicarOEco(item, eco) {
+  if (item.status === 'enviada') {
+    const erro = await gravarEnviadaNoHistorico(item, eco.idUazapi, eco.quando);
+    if (!erro) {
+      console.log(`Eco do envio: o item ${item.id} saiu MAIS DE UMA VEZ (${item.tentativas} tentativas) — `
+        + `a anterior, ${eco.idUazapi}, entrou no histórico: o cliente recebeu as duas.`);
+    }
+    return { saiu: true, entrou: !erro, falhou: Boolean(erro) };
+  }
+  return confirmarPeloEco(item, eco, item.status);
+}
+
+/**
+ * O eco PROVOU que o item saiu: ele vira 'enviada' e a mensagem entra no
+ * histórico. `deQueEstado` vai na gravação, e é o que impede duas mãos no
+ * mesmo item — se outra coisa já mudou o item (a nova tentativa começou, a
+ * equipe reenviou), zero linhas, e nada é gravado.
+ *
+ * Devolve TRÊS respostas, e não uma: `saiu` (o item virou 'enviada'),
+ * `entrou` (a linha entrou no histórico) e `falhou` (o banco recusou uma das
+ * duas gravações). Com uma resposta só, o item que virou 'enviada' e cuja
+ * linha o histórico recusou parecia não confirmado — e o envio, ao desistir,
+ * seguia para o caminho da falha: virava erro por cima do 'enviada', ou
+ * voltava à fila para sair de novo. A mensagem tinha saído; o histórico que
+ * recusou já fica dito no log e em `erro_detalhe`, por
+ * `gravarEnviadaNoHistorico`.
+ */
+async function confirmarPeloEco(item, eco, deQueEstado) {
+  const antes = item.erro_detalhe ? `${String(item.erro_detalhe).slice(0, 600)} — ` : '';
+  const { data: virou, error } = await supabase.from('fila_envio')
+    .update({ status: 'enviada', enviado_em: eco.quando,
+              erro_detalhe: `${antes}o WhatsApp confirmou depois que a mensagem saiu (${eco.idUazapi})` })
+    .eq('id', item.id).eq('status', deQueEstado).select('id');
+  if (error) {
+    console.log(`Eco do envio: não consegui marcar o item ${item.id} como enviado (${error.message}).`);
+    return { saiu: false, entrou: false, falhou: true };
+  }
+  if (!virou || !virou.length) return { saiu: false, entrou: false, falhou: false };
+  const erroHist = await gravarEnviadaNoHistorico(item, eco.idUazapi, eco.quando);
+  // O AVISO DE AUDIÊNCIA também saiu, e o Vantoro tinha ouvido que falhou.
+  if (item.aviso_vantoro_id) {
+    try {
+      await chamarAudiencias(`/avisos/${item.aviso_vantoro_id}/enviado`, { method: 'POST' });
+    } catch (e) {
+      console.error('Eco do envio: não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
+    }
+  }
+  console.log(`Eco do envio: o item ${item.id} (${deQueEstado}) SAIU — o WhatsApp confirmou com `
+    + `${eco.idUazapi}. ${erroHist ? 'O histórico recusou a linha (ver acima)' : 'A mensagem entrou no histórico'}, `
+    + 'e não será mandada de novo.');
+  return { saiu: true, entrou: !erroHist, falhou: Boolean(erroHist) };
+}
+
+/**
+ * O eco de uma mensagem que o Zorvin mandou. Quase sempre a linha já está no
+ * histórico, e aqui se para. Nunca derruba o webhook: o eco não é mensagem de
+ * cliente, e a caixa de entrada não tem o que tentar de novo por causa dele.
+ */
+async function conferirEcoDoEnvio(body, m) {
+  try {
+    if (!m || !m.messageid) return;
+    // A EDIÇÃO não é mensagem nova: o eco dela aponta a original (`edited`), e
+    // a original já está na conversa.
+    if (String(m.edited || '').trim()) return;
+    if (ehAvisoDeAlbum(m)) return;
+    if (/reaction/i.test(String(m.messageType || m.type || ''))
+        || (typeof m.reaction === 'string' && m.reaction !== '')) return;
+
+    const conversaId = await acharConversaDaMensagem(body, m);
+    if (!conversaId) return;
+    const { data: ja, error: erroJa } = await supabase.from('mensagens').select('id')
+      .eq('conversa_id', conversaId).eq('id_uazapi', m.messageid).limit(1);
+    if (erroJa || (ja && ja.length)) return;
+
+    const quando = horarioDeQuemEnviou(m) || new Date().toISOString();
+    const eco = { idUazapi: m.messageid, quando, tipo: tipoDaMensagem(m), texto: textoDoEco(m) };
+    // A JANELA É PELA TENTATIVA, mas a leitura é pela criação: a agendada pode
+    // ter sido criada dias antes e tentada agora. Dois dias cobrem isso numa
+    // conversa só, e a conta fina é de `itemCasaComOEco`.
+    const desde = new Date(new Date(quando).getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: itens, error: erroItens } = await supabase.from('fila_envio').select('*')
+      .eq('conversa_id', conversaId)
+      .in('status', ['pendente', 'enviando', 'erro', 'descartada', 'enviada'])
+      .gte('criado_em', desde)
+      .order('criado_em', { ascending: true })
+      .limit(50);
+    if (erroItens) {
+      console.log(`Eco do envio: não consegui ler a fila da conversa ${conversaId} (${erroItens.message}).`);
+      return;
+    }
+    const casam = (itens || []).filter((i) => itemCasaComOEco(i, eco) && podeSerDoEco(i));
+    // O QUE ESTÁ SAINDO AGORA VEM PRIMEIRO. "Reenviar" cria um item novo com o
+    // mesmo texto e dispensa o antigo; o eco que chega com o novo no ar é do
+    // novo, e não do dispensado que talvez nunca tenha saído.
+    const saindo = casam.find((i) => i.status === 'enviando');
+    if (saindo) { anotarEcoDoQueEstaSaindo(saindo.id, eco); return; }
+    if (!casam.length) return;
+    await aplicarOEco(casam[0], eco);
+  } catch (e) {
+    console.log('Eco do envio: não consegui conferir —', (e && e.message) || e);
+  }
 }
 
 async function processarFilaDeEnvio() {
@@ -4928,59 +5649,7 @@ async function processarFilaDeEnvio() {
           continue;
         }
 
-        const base = {
-          conversa_id: item.conversa_id,
-          origem: 'advogado',
-          tipo: item.tipo || 'texto',
-          texto: item.texto || null,
-          midia_url: ehMidia ? item.midia_url : null,
-          midia_mime: ehMidia ? (item.midia_mime || null) : null,
-          id_uazapi: idUazapi,
-          status: 'enviada'
-        };
-        // Campos "extras" (colunas que podem não existir ainda no banco): quem
-        // enviou (atendente) e os dados de citação. Se alguma coluna faltar, o
-        // salvarMensagem regrava só com o básico, sem quebrar.
-        const extras = {};
-        if (item.enviado_por) extras.enviado_por = item.enviado_por;
-        if (item.enviado_por_foto) extras.enviado_por_foto = item.enviado_por_foto;
-        // O NOME DO ARQUIVO TAMBÉM NO QUE SAI.
-        //
-        // O painel já grava `midia_nome` na FILA — é dele que sai o `docName`
-        // mandado ao WhatsApp, logo acima. Mas a linha de `mensagens`, que é a
-        // que a conversa desenha, nunca o recebia: o nome fazia a viagem
-        // inteira até o cliente e não sobrava para o escritório. Toda bolha de
-        // documento ENVIADO também aparecia escrita só "Documento".
-        if (ehMidia && item.midia_nome) extras.midia_nome = item.midia_nome;
-        // O ID de quem enviou viaja junto com o nome. O nome é o que a bolha
-        // mostra (o nome de então); o id é o que o painel conta, porque ele não
-        // muda quando alguém edita o próprio perfil. Entra como "extra" pelo
-        // mesmo motivo dos outros: numa base sem o SQL rodado a coluna não
-        // existe, e a mensagem não pode deixar de ser gravada por causa disso.
-        if (item.enviado_por_id) extras.enviado_por_id = item.enviado_por_id;
-        if (item.responder_id_uazapi) {
-          extras.responder_id_uazapi = item.responder_id_uazapi;
-          extras.resposta_previa = item.resposta_previa || null;
-          extras.resposta_autor = item.resposta_autor || null;
-        }
-        // O RESULTADO DESTA GRAVAÇÃO NÃO PODE SER JOGADO FORA.
-        //
-        // Ele era. A mensagem saía para o WhatsApp, o contato recebia, e se o
-        // banco recusasse a linha — coluna faltando, restrição no `tipo`,
-        // política de RLS — ninguém ficava sabendo: nem a tela, que não
-        // mostrava a bolha, nem o log, que não dizia nada. Era assim que uma
-        // figurinha podia chegar ao cliente e não existir no Zorvin.
-        //
-        // O item continua 'enviada', porque enviada ele foi. O motivo fica
-        // gravado em `erro_detalhe`, que é onde se procura quando algo não
-        // aparece.
-        const erroHist = await salvarMensagem(base, Object.keys(extras).length ? extras : null);
-        if (erroHist) {
-          console.error(`ENVIADA MAS NÃO GRAVADA (item ${item.id}, tipo ${item.tipo || 'texto'}):`, erroHist.message);
-          await supabase.from('fila_envio')
-            .update({ erro_detalhe: `enviada ao WhatsApp, mas não gravada no histórico: ${erroHist.message}` })
-            .eq('id', item.id);
-        }
+        await gravarEnviadaNoHistorico(item, idUazapi);
 
         console.log(`Enviada (${item.tipo || 'texto'}) para ${numeroDestino}.`);
       } catch (envioErro) {
@@ -5002,6 +5671,16 @@ async function processarFilaDeEnvio() {
         console.error(`Falha ao enviar pela linha ${linha}${deQuem} para ${numeroDestino} `
                     + `[item ${item.id}]:`, motivoCru);
         avisarQueALinhaCaiu(motivoCru, linha, conv.advogado.nome);
+
+        // O ECO JÁ CHEGOU? Então a mensagem SAIU, e a falha é só da resposta
+        // que se perdeu no caminho — nem erro, nem nova tentativa (que seria
+        // o cliente recebendo duas vezes). Ver "O ECO DO ENVIO QUE FALHOU".
+        //
+        // E VALE O ITEM TER VIRADO 'enviada', e não a linha ter entrado no
+        // histórico: mesmo com o histórico recusando a linha, a mensagem saiu,
+        // e seguir daqui a marcaria como erro — ou a mandaria de novo.
+        const ecoQueChegou = tirarEcoDoQueEstaSaindo(item.id);
+        if (ecoQueChegou && (await confirmarPeloEco(item, ecoQueChegou, 'enviando')).saiu) continue;
 
         // A FALHA PROVA QUE NADA CHEGOU AO CLIENTE, e ainda há tentativa? Então
         // ela volta para a fila com uma espera, em vez de virar bolha vermelha

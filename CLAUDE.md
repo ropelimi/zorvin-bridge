@@ -194,6 +194,12 @@ Três regras que sustentam isso, e que não podem ser desfeitas sem quebrar a ga
 SQL: `sql/2026-09-a-caixa-de-entrada-do-webhook.sql`. Variável **opcional**
 `CAIXA_INTERVALO_MS` (padrão 30s), que existe para a bancada encurtar a rodada.
 
+**A limpeza da caixa nunca rodava, e quando rodou, levou o que faltava resgatar
+(26/10).** `limpar_eventos_recebidos` (sete dias) morava depois de um "não há
+pendente? então volta", e só rodava na volta em que algum evento tinha ficado
+pela metade. Ver "O que não entrava no histórico (26/10)", logo abaixo da
+seção das rápidas com anexo.
+
 **Fechar vem DEPOIS de tratar, e a prova espera por isso (13/10).** A ponte
 grava a mensagem, ainda pergunta ao banco pela distribuição e pela resposta
 fora do horário, e só então marca `processado_em`. A conferência "a linha é
@@ -228,6 +234,13 @@ motivo técnico — sem ele, quem investiga perde a única pista do porquê.
 O código da falha de rede (`cause.code`) vinha do Node e era descartado; sem ele
 não há como separar "não falei com o servidor" de "falei e a resposta se perdeu",
 que é exatamente a diferença entre poder insistir e não poder.
+
+**O tempo limite foi medido em 26/10, e ele quase sempre SAIU.** Das seis
+mensagens que acabaram em "This operation was aborted" desde setembro, as seis
+chegaram ao cliente: o eco do WhatsApp veio de 56 a 104 segundos depois de o
+item entrar na fila. Três foram reenviadas pela equipe, e o cliente recebeu duas
+vezes. A régua de não insistir no tempo limite estava certa; a frase que
+mandava reenviar, não. Ver "O que não entrava no histórico (26/10)".
 
 SQL: `sql/2026-09-a-mensagem-que-nao-saiu-tenta-de-novo.sql` (coluna
 `fila_envio.tentar_em`). **Sem ela tudo funciona como antes** — a ponte descobre
@@ -786,7 +799,7 @@ só vale para a dourada, e com as mesmas condições de marcar.
 - **No log, a leitura e o número do aviso** — nunca o texto do cliente nem o
   que a IA devolveu.
 
-As provas são a **seção 77**: o Claude de mentira lê a resposta no pedido e
+As provas são a **seção 78**: o Claude de mentira lê a resposta no pedido e
 devolve a leitura de uma tabela; o Vantoro de mentira diz quais não entende.
 
 ## Os scripts que se aplicam sozinhos
@@ -2462,6 +2475,229 @@ em cópias e lidas uma a uma:
 - a regra que junta só de um lado;
 - o script tirando de quem atende a permissão de gravar;
 - uma coluna a menos.
+
+## O que não entrava no histórico (26/10)
+
+Pedido do Rodrigo: *"Veja também se todos os históricos de conversas estão
+presentes, se não existem erros referente a isso."* Cruzando a caixa de entrada
+com `mensagens` (só números, nomes de campos e horas; o texto das mensagens de
+cliente não foi lido), três defeitos, os três daqui:
+
+| o que | quantas, desde setembro | por quê |
+|---|---|---|
+| mensagem com botões, resposta a um modelo, convite de grupo | 27 recebidas | o texto mora em `content`, e o webhook as descartava como "evento sem texto" |
+| a mensagem que a equipe mandou e que saiu DEPOIS do nosso prazo | 9 enviadas | o item virava erro, e o eco que provava a entrega era jogado fora |
+| a limpeza da caixa de entrada | — | nunca rodava; quando rodou, de surpresa, levou a cópia das 34 acima que não existiam em `mensagens` |
+
+O resto bate: os 402 eventos de reação, os 103 avisos de álbum, as 140 respostas
+automáticas (que moram no registro do 021, de propósito) e as 299 edições não
+são mensagens novas, e não faltam.
+
+### As três mensagens que sumiam
+
+`textoDoQueNaoEAnexo` ganhou três desvios, com os nomes de campo MEDIDOS no
+evento cru (e `m.text` vazio nas 27):
+
+| messageType | quantas | a bolha |
+|---|---|---|
+| `ButtonsMessage` | 21, de 7 conversas | o `contentText` e, embaixo, `Opções: “Pagar agora” · “Falar com atendente”` (os `buttons[].buttonText.displayText`) |
+| `TemplateButtonReplyMessage` | 5 (2 nossas) | o `selectedDisplayText`, a palavra que a pessoa tocou — como a resposta de botão que já existia |
+| `GroupInviteMessage` | 1 (nossa) | `👥 Convite para o grupo “…”` e a `caption` |
+
+- **A resposta a um modelo vem ANTES do desvio do modelo**, e era por isso que
+  se perdia: o nome contém "template", caía ali, e `textoDoModelo` não achava
+  corpo de modelo nenhum — não há: é uma resposta.
+- **O convite não leva link.** O `inviteCode` desta mensagem é o do convite que
+  expira, e não o código de um `chat.whatsapp.com`; escrever o link seria
+  inventar um endereço.
+- **O botão sem texto diz quem tocou** (`fraseDoBotaoSemTexto`): 2 das 5
+  respostas a modelo eram do celular do escritório, e "o contato respondeu"
+  diria o contrário.
+- **Os três deixam de ser "tipo desconhecido"** (`button`, `template`,
+  `invite`) — o alerta de 800 caracteres a cada um seria ruído.
+
+### O eco do envio que "falhou"
+
+O eco (`wasSentByApi`) era ignorado sem pergunta: o envio grava a linha com o id
+que a Uazapi devolve, e o eco seria repetição. Mas quando a resposta da Uazapi
+se perde, o envio nunca soube o id — e o eco é a única notícia de que a
+mensagem saiu. Medido nas 9:
+
+- **seis acabaram em tempo limite** e saíram 56 a 104 segundos depois de o item
+  entrar na fila. Três foram reenviadas (o cliente recebeu duas vezes) e três
+  dispensadas (o cliente recebeu, a conversa não mostra);
+- **três saíram na primeira tentativa E na segunda** (`tentativas` = 2): a
+  conversa só mostra a segunda.
+
+Agora `conferirEcoDoEnvio` pergunta antes de ignorar. **O eco cujo id não está
+na conversa procura o item da fila que o mandou**: a mesma conversa, o mesmo
+tipo, o mesmo texto, e o eco até 30 minutos depois de o item sair (a última
+tentativa, a criação ou a hora marcada da agendada, qualquer uma). Achando:
+
+| o item | o que acontece |
+|---|---|
+| erro, dispensado, ou pendente já tentado (esperando a próxima tentativa) | vira `enviada`, a mensagem entra com o id e a hora do eco, e a nova tentativa não acontece |
+| saindo agora (o pedido à Uazapi não voltou) | o eco fica **anotado** na memória; quando o envio desistir, confere a anotação antes de virar erro ou tentar de novo |
+| enviado depois de mais de uma tentativa | ganha a linha da anterior: o cliente recebeu as duas, e a conversa passa a dizer isso |
+
+**Quatro cuidados, e cada um tem cena na prova:**
+
+- **o que está saindo vem primeiro**: "Reenviar" cria um item novo com o mesmo
+  texto e dispensa o antigo; o eco que chega com o novo no ar é do novo;
+- **o pendente nunca tentado não é dono de eco nenhum** (a agendada de amanhã
+  com o mesmo texto);
+- **a edição não é mensagem nova**: o eco dela aponta a original (`edited`);
+- **a gravação confere o estado de onde sai** (`.eq('status', …)`): se a nova
+  tentativa já começou, zero linhas, e nada é gravado.
+
+**E o item confirmado é confirmado mesmo com o histórico recusando a linha.**
+`confirmarPeloEco` responde três coisas, e não uma: `saiu` (o item virou
+`enviada`), `entrou` (a linha entrou no histórico) e `falhou` (o banco recusou
+uma das duas gravações). Na primeira escrita ela respondia só "entrou?", e eu
+achei relendo o código antes do commit: com o histórico recusando a linha (uma
+coluna que falta, uma restrição), o envio que desistia via "não confirmado" e
+seguia para o caminho da falha — o item virava erro por cima do `enviada`, e
+uma falha que insiste mandaria a mensagem de novo. Quem decide a desistência
+é `saiu`. A recusa do histórico fica dita no log e em `erro_detalhe`, por
+`gravarEnviadaNoHistorico`, como no envio de sempre.
+
+**A mensagem que nasce do eco é igual à do envio**: a escrita é uma só,
+`gravarEnviadaNoHistorico` — quem mandou, o id de quem mandou, o nome do
+arquivo, a citação. O aviso de audiência que o Vantoro ouviu como falha é
+confirmado.
+
+**A frase do tempo limite manda esperar**: *"…a mensagem pode ter saído assim
+mesmo. Espere um ou dois minutos: se ela saiu, esta bolha some e a mensagem
+aparece como enviada. Só reenvie se continuar vermelha."* Era *"toque em
+reenviar daqui a pouco"*, e foi essa frase que fez três clientes receberem duas
+vezes.
+
+**O que não se cobre:** a anotação mora na memória. Se a ponte cair entre o eco
+e a desistência, ou se o eco for tratado pela outra ponte nos segundos de uma
+publicação, o item fica como ficaria antes. E o item preso em `enviando` por
+cinco minutos continua voltando para a fila sem perguntar pelo eco.
+
+### A limpeza da caixa de entrada nunca rodava
+
+`terminarOsPendentes` lia os pendentes e, sem nenhum, **voltava** — e a limpeza
+de hora em hora morava depois dessa volta. Medido em 26/10: **64.713 eventos,
+108 MB, o mais antigo de 08/09**, para uma limpeza de sete dias.
+
+**Ela rodou uma vez, em 26/10 às 16h25** (`/rpc/limpar_eventos_recebidos` nos
+registros do Supabase): uma foto que chegou às 16h24 ficou mais de um minuto
+pendente, a volta seguinte passou dali, e a limpeza apagou 56 mil eventos de uma
+vez — entre eles a cópia de 25 das 27 recebidas e das 9 enviadas, que o resgate
+desta entrega ia devolver às conversas.
+
+**E é provável que a demora da foto tenha sido culpa da medição.** Naquele
+minuto rodavam aqui consultas pesadas na caixa de entrada (varrer os 64 mil
+eventos com subconsultas, duas delas passaram de 60 segundos). Uma consulta de
+leitura não trava ninguém, mas ocupa o banco — e o webhook que demora vira
+pendente. **A régua que fica: medir em produção com consultas pequenas, uma
+pergunta de cada vez. Uma consulta que passa de 60 segundos não é só lenta:
+ela atrasa o webhook do escritório.**
+
+Hoje a limpeza roda **de hora em hora, haja ou não pendente**, e **a primeira
+espera uma hora depois de subir** — o resgate lê a caixa dois minutos depois da
+subida, e o que ele procura é o que a limpeza apagaria. `CAIXA_LIMPEZA_MS` é
+opcional, para a bancada. O aviso dos eventos que desistiram continua logo
+depois da volta que os tentou.
+
+**Ainda em aberto, e é decisão do Rodrigo:** sete dias é o prazo para resgatar
+o que a ponte não souber ler. Trinta dariam mais folga (uns 40 mil eventos,
+70 MB), e guardariam por mais tempo uma segunda cópia do que o cliente escreveu.
+
+### O resgate do histórico, uma vez só
+
+Na subida, dois minutos depois (`RESGATE_DO_HISTORICO_MS`, opcional),
+`resgatarOHistorico` devolve às conversas o que está na caixa e não entrou:
+
+1. **as recebidas** dos três tipos, lidas com as MESMAS funções do webhook
+   (`textoDoQueNaoEAnexo`, `extrairResposta`, `horarioDeQuemEnviou`), na conversa
+   que o webhook criou antes de descartá-las. Nada de contato nem conversa novos:
+   não achando, a conversa foi juntada ou apagada, e ele conta e segue;
+2. **os ecos sem mensagem** que casam com um item da fila pela régua acima.
+   Primeiro só o id, a marca de edição e o tipo de cada eco (caminho de JSON no
+   `select`); o corpo inteiro só dos que faltam. As respostas automáticas saem
+   antes, pelo registro do 021;
+3. **a conversa volta ao lugar.** O gatilho do banco põe toda mensagem que entra
+   como a última — prévia, hora e +1 nas não lidas. A resgatada mais velha que a
+   última mensagem devolve a prévia e a hora de antes (só se ainda for o valor
+   que o gatilho pôs: uma mensagem nova no meio vale); as não lidas voltam ao que
+   eram, com a gravação conferindo o valor de agora; e a espera e a aba são
+   recontadas (`zorvin_recontar_espera`, `zorvin_recontar_situacao`).
+
+**Uma vez só, por causa do custo:** procurar um tipo dentro do JSON é ler a
+caixa inteira — **1,2 segundo** no banco do escritório, com 64 mil eventos — e a
+ponte sobe dezenas de vezes por dia. Terminado sem falha, a chave
+`ponte:resgate-do-historico-26-10` em `zorvin_sementes` (o 027) diz que ele
+rodou. **Sem a tabela, ele não roda**, e diz por quê: sem como lembrar, a
+varredura seria de toda subida.
+
+**A recusa do banco é falha, nas duas metades:** a recebida que o banco recusa,
+e o eco cujo item virou `enviada` com a linha recusada pelo histórico. A chave
+não é anotada, e a próxima subida confere de novo. Zero linhas na gravação do
+item não é falha: alguém mexeu nele no meio (reenviou, ou o eco ao vivo chegou
+antes), e não há o que resgatar.
+
+**O que ele ainda tem para devolver:** depois da limpeza de 26/10, só 2 das 27
+recebidas continuam na caixa (21/10 e 24/10), e nenhuma das 9 enviadas. A de
+21/10 sai do prazo de sete dias em **28/10 às 08h17 (Brasília)**: publicada
+depois disso, a ponte já não a encontra. As outras continuam no WhatsApp dos
+aparelhos.
+
+**O painel tem de estar no ar ANTES**: a guarda que não toca o aviso para
+mensagem de mais de um dia mora nele (`ehHistoricoChegando`, PR do painel de
+26/10). Com o painel de antes, cada recebida resgatada tocaria o som.
+
+**E isto se encaixa com a resposta do cliente ao aviso (a #203, do mesmo
+dia).** O aviso de audiência confirmado pelo eco vira `enviada`, com o
+`enviado_em` do eco e a linha no histórico, e é por esse status e essa hora que
+a rodada das respostas o encontra: o "ok" do cliente a um aviso que tinha dado
+tempo limite passa a chegar ao Vantoro. E o que o resgate devolve tem a data de
+quando foi escrito, fora das 48 horas que aquela rodada relê.
+
+Prova: seção 77, **73 conferências**, com o gatilho do banco imitado na bancada
+(`aoGravar`): sem a imitação, a devolução da prévia e das não lidas não teria o
+que desfazer. A bancada aprendeu o caminho de JSON nos filtros e no `select`
+(`valorDoCaminho`): sem isso, a leitura da caixa por tipo devolvia lista vazia, e
+a prova mediria a bancada.
+
+**26 sabotagens, 25 pegas e uma que vaza com razão**, todas rodadas em cópias e
+lidas uma a uma:
+
+- **os três tipos:** sem a mensagem com botões; a resposta a um modelo de volta
+  ao desvio do modelo; sem o convite; o botão sem texto sempre "do contato"; as
+  opções fora do texto;
+- **o eco:** ignorado como antes (13 reprovações); a desistência sem a anotação;
+  a desistência conferindo a linha, e não o item; sem a janela de tempo; sem dar
+  a vez ao que está saindo; o pendente nunca tentado como dono do eco; a edição
+  confirmando; a frase antiga do tempo limite;
+- **o resgate:** sem devolver a conversa ao lugar; as não lidas que não voltam;
+  sem recontar; sem anotar a chave; sem conferir a chave; sem os ecos; sem a
+  guarda do que já está (a não lida sai a mais); a conversa que desce na lista;
+  o convite sem o rótulo do celular; a recusa do eco sem contar como falha;
+- **a limpeza:** de volta depois do "não há pendente"; a primeira na primeira
+  volta;
+- **e a que vaza:** o resgate sem filtrar as respostas automáticas. O eco de uma
+  automática não acha item na fila (elas não passam por lá) e é pulado do mesmo
+  jeito: o filtro é a segunda guarda, e poupa ler o corpo delas — a régua de
+  25/09.
+
+**Duas conferências minhas mediam antes da hora, e a rodada de sabotagens
+mostrou.** "O resgate anota que rodou" reprovou em duas sabotagens que nem mexem
+na chave: a cena acordava com a frase do registro, e a chave é gravada DEPOIS
+dela — numa máquina ocupada (três cópias ao mesmo tempo), às vezes ainda não
+tinha chegado. E as cenas do eco acordavam com o item virando `enviada`, que é a
+primeira de duas gravações: liam o histórico antes da segunda. Hoje cada uma
+espera o que confere, com teto. **Na integração contínua isso seria um X
+vermelho de vez em quando, sem defeito nenhum.**
+
+**E um nome repetido, achado pela prova:** escrevi um `lerEmPaginas` para o
+resgate, e já existia outro com o mesmo nome, mais abaixo no arquivo. Função
+declarada duas vezes vale a ÚLTIMA, sem aviso nenhum: o resgate chamava a outra,
+com outra forma de resposta, e quebrava com "is not iterable". Hoje ele usa a
+que existia. **Antes de criar um ajudante, procure o nome no arquivo.**
 
 ## A auditoria de 07/10
 
