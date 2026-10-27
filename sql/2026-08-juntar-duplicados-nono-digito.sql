@@ -1,3 +1,8 @@
+-- NÃO RODE MAIS ESTE SCRIPT (27/10). Os duplicados do nono dígito são juntados
+-- pelo sql/automaticos/036-os-contatos-do-nono-digito-juntos.sql, que a ponte
+-- aplica sozinha. Este aqui apagava o cartão do funil, perdia o nome e o cliente
+-- do Vantoro do contato que saía, e trocava o número de quem ficava. Ver CLAUDE.md.
+
 -- ------------------------------------------------------------
 --  2. JUNTAR OS CONTATOS DUPLICADOS PELO NONO DÍGITO
 --
