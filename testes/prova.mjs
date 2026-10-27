@@ -13873,5 +13873,185 @@ console.log("\n78. A IA lê as respostas douradas");
   }
 }
 
+// ==================================================================
+//  80. A CAIXA DE ENTRADA GUARDA A CÓPIA POR 30 DIAS (035), NUM POSTGRES DE VERDADE
+//
+//  Decidido pelo Rodrigo em 27/10: a cópia de cada mensagem que chega passa
+//  de 7 para 30 dias. É dela que se devolve às conversas uma mensagem que a
+//  ponte não soube ler, e em 26/10 esse defeito foi achado semanas depois.
+//
+//  A caixa desta seção é a de verdade: o script de setembro que a criou
+//  (`sql/2026-09-a-caixa-de-entrada-do-webhook.sql`), rodado aqui, com o 035
+//  por cima. A limpeza é chamada no papel da ponte (`service_role`), que é
+//  quem a chama em produção, e no papel de quem não pode chamá-la.
+// ==================================================================
+{
+  console.log("\n80. A caixa de entrada guarda a cópia por 30 dias (035), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a cópia de 30 dias (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S035 = fs.readFileSync(new URL("../sql/automaticos/035-a-caixa-de-entrada-guarda-30-dias.sql", import.meta.url), "utf8");
+    const CAIXA = fs.readFileSync(new URL("../sql/2026-09-a-caixa-de-entrada-do-webhook.sql", import.meta.url), "utf8");
+    const PAPEIS = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin; end if;
+end $$;
+grant usage on schema public to anon, authenticated, service_role;
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    // NO PAPEL DE QUEM CHAMA — e volta, aconteça o que acontecer.
+    const comoPapel = async (c, papel, fn) => {
+      await c.query(`set role ${papel}`);
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    const limpar = (c, papel = "service_role") =>
+      guardado(() => comoPapel(c, papel, () => c.query("select public.limpar_eventos_recebidos() as n")));
+    // O nome de cada evento diz quando ele chegou e quando foi processado.
+    const EVENTOS = [
+      ["processado há 6 dias", "6 days", "6 days"],
+      ["processado há 8 dias", "8 days", "8 days"],
+      ["processado há 29 dias", "29 days", "29 days"],
+      ["processado há 31 dias", "31 days", "31 days"],
+      ["processado há 45 dias", "45 days", "45 days"],
+      ["chegou há 35 dias e foi processado há 29", "35 days", "29 days"],
+      ["pendente há 40 dias", "40 days", null],
+    ];
+    const plantar = async (c) => {
+      await c.query("delete from public.eventos_recebidos");
+      for (const [nome, chegou, processado] of EVENTOS) {
+        await c.query(
+          `insert into public.eventos_recebidos (corpo, recebido_em, processado_em)
+           values (jsonb_build_object('cena', $1::text), now() - $2::interval,
+                   case when $3::text is null then null else now() - $3::interval end)`,
+          [nome, chegou, processado]);
+      }
+    };
+    const ficaram = async (c) => (await c.query(
+      "select corpo->>'cena' as cena from public.eventos_recebidos order by id")).rows.map((r) => r.cena);
+    const podeChamar = async (c, papel) => (await c.query(
+      "select has_function_privilege($1, 'public.limpar_eventos_recebidos()', 'EXECUTE') as pode", [papel])).rows[0].pode;
+    try {
+      const c = await bancoNovo();
+      await c.query(PAPEIS);
+      await aplicar(c, CAIXA);
+
+      // ---- 80a. antes do 035, a cópia dura 7 dias ----
+      await plantar(c);
+      const antes = await limpar(c);
+      const ficouAntes = await ficaram(c);
+      ok("antes do 035, a limpeza apaga o processado há 8 dias (a regra dos 7 dias, reproduzida)",
+         !antes.erro && !ficouAntes.includes("processado há 8 dias") && ficouAntes.includes("processado há 6 dias"),
+         JSON.stringify(antes.erro || ficouAntes));
+
+      // ---- 80b. o 035 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S035));
+      ok("o 035 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/30 dias/, /pendentes continuam/, /poder de dono/, /não entrou não chama/, /painel não chama/, /ponte chama/]) {
+        ok(`a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+
+      // ---- 80c. depois do 035, a cópia dura 30 dias ----
+      await plantar(c);
+      const depois = await limpar(c);
+      const ficou = await ficaram(c);
+      ok("a ponte chama a limpeza, e ela conta o que apagou (os de 31 e de 45 dias)",
+         !depois.erro && depois.rows?.[0]?.n === 2, JSON.stringify(depois.erro || depois.rows));
+      for (const cena of ["processado há 6 dias", "processado há 8 dias", "processado há 29 dias"]) {
+        ok(`fica o ${cena}`, ficou.includes(cena), JSON.stringify(ficou));
+      }
+      for (const cena of ["processado há 31 dias", "processado há 45 dias"]) {
+        ok(`sai o ${cena}`, !ficou.includes(cena), JSON.stringify(ficou));
+      }
+      ok("o pendente fica, por mais velho que seja: é a única pista de uma mensagem que talvez não entrou",
+         ficou.includes("pendente há 40 dias"), JSON.stringify(ficou));
+      ok("a conta é por quando foi PROCESSADO: o que chegou há 35 dias e foi processado há 29 fica",
+         ficou.includes("chegou há 35 dias e foi processado há 29"), JSON.stringify(ficou));
+
+      // ---- 80d. só a ponte chama ----
+      for (const papel of ["anon", "authenticated"]) {
+        await plantar(c);
+        const r = await limpar(c, papel);
+        const sobrou = await ficaram(c);
+        ok(`no papel ${papel}, a limpeza é recusada (42501) e nada sai`,
+           r.codigo === "42501" && sobrou.length === EVENTOS.length, JSON.stringify(r.erro ? r : sobrou));
+      }
+      const funcao = (await c.query(`select prosecdef, proconfig, pg_get_function_result(oid) as volta,
+          pg_get_function_identity_arguments(oid) as argumentos
+        from pg_proc where oid = 'public.limpar_eventos_recebidos()'::regprocedure`)).rows[0];
+      ok("a ponte continua chamando do mesmo jeito: sem argumento, e a resposta é um número",
+         funcao && funcao.argumentos === "" && funcao.volta === "integer", JSON.stringify(funcao));
+      ok("a limpeza continua rodando com poder de dono, no esquema public",
+         funcao && funcao.prosecdef === true && lista(funcao.proconfig).includes("search_path=public"), JSON.stringify(funcao));
+
+      // ---- 80e. o 035 de novo ----
+      await plantar(c);
+      const deNovo = await guardado(() => aplicar(c, S035));
+      ok("rodar o 035 de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo), JSON.stringify(deNovo));
+      ok("e a conferência conta os eventos da caixa", item(deNovo, /guardados na caixa/) === String(EVENTOS.length),
+         JSON.stringify(item(deNovo, /guardados na caixa/)));
+      const deNovoLimpa = await limpar(c);
+      ok("e a limpeza continua guardando 30 dias", !deNovoLimpa.erro && deNovoLimpa.rows?.[0]?.n === 2
+         && (await ficaram(c)).includes("processado há 29 dias"), JSON.stringify(deNovoLimpa.erro || deNovoLimpa.rows));
+
+      // ---- 80f. com a herança da Supabase, que dá as funções novas a todos pelo nome ----
+      // É o que o Postgres deste banco de prova não faz sozinho: aqui as
+      // funções nascem para `public`, e tirar `public` já bastaria. Na Supabase
+      // `anon` e `authenticated` recebem pelo NOME (a armadilha nº 5).
+      const supa = await bancoNovo();
+      await supa.query(PAPEIS);
+      await supa.query("alter default privileges in schema public grant execute on functions to anon, authenticated, service_role");
+      await aplicar(supa, CAIXA);
+      const herdou = await podeChamar(supa, "anon") && await podeChamar(supa, "authenticated");
+      ok("(a cena começa com a herança valendo: quem não entrou chamava a limpeza)", herdou === true, String(herdou));
+      const confSupa = await guardado(() => aplicar(supa, S035));
+      ok("com a herança da Supabase, o 035 aplica e a conferência não acusa nada", Array.isArray(confSupa) && !defeito(confSupa),
+         JSON.stringify(confSupa));
+      ok("e quem não entrou deixa de chamar a limpeza", (await podeChamar(supa, "anon")) === false);
+      ok("e quem entrou no painel também", (await podeChamar(supa, "authenticated")) === false);
+      ok("e a ponte continua chamando", (await podeChamar(supa, "service_role")) === true);
+
+      // E A FUNÇÃO QUE TIVESSE SUMIDO nasce de novo — só para a ponte.
+      await supa.query("drop function public.limpar_eventos_recebidos()");
+      const recriada = await guardado(() => aplicar(supa, S035));
+      ok("se a limpeza tivesse sumido, o 035 a cria de novo, e a conferência não acusa nada",
+         Array.isArray(recriada) && !defeito(recriada), JSON.stringify(recriada));
+      ok("recriada, ela é só da ponte", (await podeChamar(supa, "anon")) === false
+         && (await podeChamar(supa, "authenticated")) === false && (await podeChamar(supa, "service_role")) === true);
+
+      // ---- 80g. num banco sem o Zorvin, desiste em silêncio ----
+      const limpo = await bancoNovo();
+      const vazio = await guardado(() => aplicar(limpo, S035));
+      ok("num banco sem a caixa de entrada, o 035 desiste sem estourar", Array.isArray(vazio)
+         && item(vazio, /sem a caixa de entrada/) === "nada a fazer aqui", JSON.stringify(vazio));
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
