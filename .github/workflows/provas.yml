@@ -70,13 +70,17 @@ jobs:
     # sem ninguém ter pedido — e uma diferença de versão aparece como X
     # vermelho com cara de defeito de código.
     runs-on: ubuntu-24.04
-    # Quando este teto foi escrito a suíte levava uns dois minutos. MEDIDO em
-    # 19/10, na rodada semanal: 7min14s no passo das provas — e a seção 67, do
-    # script 028, acrescenta uns 3 segundos. Dez minutos ainda deixam quase
-    # três de folga para uma máquina lenta, e é curto o bastante para uma
-    # prova pendurada não ficar horas de pé. Ao acrescentar prova, olhe quanto
-    # a suíte já leva: o corte por relógio é um X vermelho igual ao de defeito.
-    timeout-minutes: 10
+    # O TETO FOI DE 10 PARA 20 MINUTOS EM 27/10, decidido pelo Rodrigo.
+    #
+    # Quando ele foi escrito a suíte levava uns dois minutos. MEDIDO no passo
+    # "Rodar as provas": 6min50s em 22/10 e 8min28s em 27/10 — mais de um
+    # minuto e meio em cinco dias, com sete seções novas, e sobrava 1min18s
+    # para os 10. Passando do teto, o GitHub corta a rodada no meio, e o X
+    # vermelho do corte é igual ao de um defeito. Subir não custa nada: o
+    # repositório é público, e o GitHub não cobra os minutos. Vinte minutos
+    # ainda derrubam uma prova pendurada sem deixá-la horas de pé. Ao
+    # acrescentar prova, continue olhando quanto a suíte já leva.
+    timeout-minutes: 20
 
     steps:
       - name: Baixar o código

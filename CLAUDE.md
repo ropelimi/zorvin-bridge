@@ -614,8 +614,9 @@ rodadas em cópias e lidas uma a uma:
 
 **O tempo da seção, medido antes de mandar:** 41 s numa máquina parada, que é
 mais lenta que a do GitHub (a suíte inteira, 11min27s aqui; a rodada da `main`
-de 22/10, sem a seção 72, 6min50s lá). O teto da integração contínua é de 10
-minutos (`provas.yml`), e a conta dá uns 7min30s.
+de 22/10, sem a seção 72, 6min50s lá). O teto da integração contínua era de 10
+minutos (`provas.yml`), e a conta dava uns 7min30s. Em 27/10 ele foi para 20:
+ver "O teto da rodada foi de 10 para 20 minutos (27/10)".
 
 ## A ponte dorme à noite — e por que o cronjob não volta como era (22/10)
 
@@ -2921,6 +2922,32 @@ Ubuntu (senha pela rede, `peer` pela porta local). A imagem de antes era outra
 coisa (Debian, `ssl = off`). As provas falam com o banco com `sslmode=disable`,
 então a diferença do `ssl` não muda nada nelas; a do resto, a suíte inteira
 rodada aqui (1095 de 1095) já mostrava.
+
+### O teto da rodada foi de 10 para 20 minutos (27/10)
+
+O teto (`timeout-minutes`, em `provas.yml`) era de 10 minutos, e a suíte
+chegava perto dele depressa. Medido nas rodadas do GitHub:
+
+| a rodada | o passo "Rodar as provas" | a rodada inteira |
+|---|---|---|
+| 22/10, PR do script 031 | 6min50s | 7min05s |
+| 26/10, a semanal da `main` | 7min29s | 7min45s |
+| 26/10, PR #205 | 8min25s | 8min40s |
+| 27/10, PR #206 | 8min28s | 8min42s |
+
+Mais de um minuto e meio em cinco dias, com sete seções novas (da 72 à 78; as
+três de 26/10 somaram quase um minuto sozinhas), e sobrava 1min18s. Passando do teto, o GitHub corta a rodada no meio, e o X
+vermelho do corte é igual ao de um defeito: foi o que aconteceu no painel em
+28/09, com a suíte cortada a segundos do fim.
+
+**Decidido pelo Rodrigo em 27/10: o teto foi para 20.** Não custa nada: os dois
+repositórios são públicos, e o GitHub não cobra os minutos de rodada em
+repositório público. O teto não muda o que a rodada consome. Ele só decide
+quando uma prova travada é derrubada, e vinte minutos ainda a derrubam sem
+deixá-la horas de pé.
+
+**Ao acrescentar prova, continue olhando quanto a suíte leva**: o passo "Rodar
+as provas" de cada rodada diz.
 
 ## A saída (publicação) — a ponte termina o que está no meio
 
