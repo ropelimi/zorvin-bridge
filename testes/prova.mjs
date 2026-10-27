@@ -7098,11 +7098,12 @@ console.log("\n50. A busca pede só o que o painel usa");
       // depois da primeira linha da rodada, e falando direto com o banco essa
       // linha é "falei com o banco", dita antes do primeiro script. Para os
       // scripts de mentira das outras cenas, de milissegundos, isso basta. Para
-      // os da pasta de verdade, não: em 26/10, numa máquina ocupada, esta
-      // conferência aprovou os poucos que já estavam anotados, e o `drop table`
-      // lá embaixo trombou com o 032 ("tuple concurrently updated"), derrubando
-      // a prova inteira. E com a ponte lenta, um script quebrado no fim da
-      // pasta passava daqui sem ser visto.
+      // os da pasta de verdade, não. Medido em 27/10, com a máquina parada: na
+      // hora desta conferência havia 2 dos 34 anotados, e a ponte era
+      // derrubada no fim da cena depois do 11º — os outros 23 nunca rodaram
+      // aqui. Em 26/10, o `drop table` lá embaixo trombou com o 032 ("tuple
+      // concurrently updated") e derrubou a prova inteira. E um script
+      // quebrado no fim da pasta passava daqui sem ser visto.
       //
       // Então a cena espera o banco anotar TODOS os da pasta, ou um falhar:
       // falhando, a ponte para nos seguintes, e não há mais o que esperar. E
