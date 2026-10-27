@@ -13873,5 +13873,309 @@ console.log("\n78. A IA lê as respostas douradas");
   }
 }
 
+// ==================================================================
+//  80. OS DUPLICADOS DO NONO DÍGITO, JUNTOS (035), NUM POSTGRES DE VERDADE
+// ==================================================================
+//
+//  "Junta as conversas duplicadas que já existem" (27/10). O 035 faz no
+//  banco, para todo celular com dois contatos, o que o "Juntar duas
+//  conversas" do painel faz uma a uma — e leva junto o que o painel deixava
+//  cair: o cartão do funil, o nome, a foto e o cliente do Vantoro do contato
+//  que sai, a resposta automática e o histórico de alterações.
+//
+//  O banco é o Zorvin mínimo da seção 67, com o que a junção mexe, e os
+//  scripts de produção cujos gatilhos ela dispara: a espera (004–006), o
+//  responsável (008), o funil (017), as tarefas (018), a auditoria (020), a
+//  resposta fora do horário (021), a distribuição (023) e a situação (028).
+//  Os casos são os do relato e as bordas da régua:
+//    - GIRLEIS: o cliente escreve pela forma sem o nove; a do aviso sai;
+//    - EDNALVA: a forma que sai é a que tem a foto e o cliente do Vantoro;
+//    - sem mensagem do cliente em nenhuma das duas: fica a mais antiga;
+//    - o cliente escreve pela forma COM o nove: fica ela, mesmo mais nova;
+//    - o fixo (11) 3333-4444 e o celular (11) 93333-4444 não se juntam;
+//    - um índice único de expressão que bate: a junção inteira é recusada,
+//      em vez de apagar o que ela não sabe comparar.
+{
+  console.log("\n80. Os duplicados do nono dígito, juntos (035)");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a junção dos duplicados (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const ANTES = ["004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql",
+                   "006-a-espera-nao-comeca-no-rabicho.sql", "008-o-responsavel-pela-conversa.sql",
+                   "017-o-funil-de-etapas.sql", "018-tarefas-e-lembretes.sql", "020-a-auditoria-do-banco.sql",
+                   "021-a-resposta-fora-do-horario.sql", "023-a-distribuicao-das-conversas-novas.sql",
+                   "028-aguardando-em-aberto-e-finalizados.sql"];
+    const S035 = ler("035-os-contatos-do-nono-digito-juntos.sql");
+    const ESQUEMA = `
+-- O Zorvin mínimo da seção 67, com o que a junção do 035 mexe: a foto, o
+-- cliente do Vantoro e a data do contato; o resumo da conversa; a marca do
+-- aviso na fila; as notas, as etiquetas e o histórico de alterações.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text,
+  foto_url text, vantoro_cliente_id bigint unique, criado_em timestamptz not null default now());
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, ultima_mensagem text, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(), unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', aviso_vantoro_id text unique, criado_em timestamptz not null default now());
+create table notas (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  texto text, criado_em timestamptz not null default now());
+create table tags (id uuid primary key default gen_random_uuid(), nome text);
+create table conversa_tags (conversa_id uuid references conversas(id) on delete cascade,
+  tag_id uuid references tags(id) on delete cascade, primary key (conversa_id, tag_id));
+create table alteracoes (id uuid primary key default gen_random_uuid(), contato_id uuid, conversa_id uuid,
+  tipo text not null, alvo text, antes text, depois text, autor text, autor_id uuid, criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+    let c = null;
+    try {
+      await raiz.query(`create database ${nome}`);
+      const url = new URL(BANCO_BASE); url.pathname = `/${nome}`; url.searchParams.set("sslmode", "disable");
+      c = new pg.Client({ connectionString: url.toString(), ssl: false }); await c.connect();
+      const q = async (sql, p) => (await c.query(sql, p)).rows;
+      const aplicar = async (sql) => { const r = await c.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+      const defeito = (l) => (l || []).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+      const item = (l, re) => ((l || []).find((x) => re.test(x.item)) || {}).resposta;
+      const um = async (sql, p) => (await q(sql, p))[0] || {};
+
+      await c.query(ESQUEMA);
+      await c.query("insert into departamentos (nome) values ('SAC'), ('AUD'), ('SDC')");
+      await c.query("insert into usuarios (id, nome, admin) values ('00000000-0000-0000-0000-000000000011', 'Rodrigo', true)");
+      const tropecos = [];
+      for (const s of ANTES) {
+        const r = await aplicar(ler(s));
+        if (defeito(r)) tropecos.push(`${s}: ${JSON.stringify(r)}`);
+      }
+      ok("os scripts de produção que a junção dispara se aplicam na bancada", tropecos.length === 0, tropecos.join(" | "));
+
+      const linhas = {};
+      for (const [n, dep] of [["SAC", 1], ["AUD", 2], ["SDC", 3]]) {
+        linhas[n] = (await um("insert into advogados (nome, numero, departamento_id) values ($1, $1, $2) returning id", [n, dep])).id;
+      }
+      const contato = async (numero, extra = {}) => (await um(
+        `insert into contatos (numero, nome, foto_url, vantoro_cliente_id, criado_em)
+         values ($1, $2, $3, $4, coalesce($5::timestamptz, now())) returning id`,
+        [numero, extra.nome || null, extra.foto || null, extra.vantoro || null, extra.criado || null])).id;
+      const conversa = async (linha, ct, extra = {}) => (await um(
+        `insert into conversas (advogado_id, contato_id, ultima_atividade, nao_lidas, ultima_mensagem)
+         values ($1, $2, $3, $4, $5) returning id`,
+        [linhas[linha], ct, extra.ultima || "2026-10-01T12:00:00Z", extra.lidas || 0, extra.resumo || null])).id;
+      const msg = (conv, origem, quando, texto, idu) => q(
+        "insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, $2, $3, $4, $5)",
+        [conv, origem, texto, idu || crypto.randomBytes(6).toString("hex"), quando]);
+
+      // GIRLEIS: A é o contato do WhatsApp (sem o nove), B o que o aviso criou.
+      const A = await contato("557781545221", { nome: "GIRLEIS RIBEIRO MATOS", foto: "a.jpg", vantoro: 501, criado: "2026-08-01T12:00:00Z" });
+      const B = await contato("5577981545221", { criado: "2026-10-21T12:00:00Z" });
+      const aAud = await conversa("AUD", A, { ultima: "2026-10-27T19:57:00Z", lidas: 2, resumo: "Pode confirmar" });
+      await conversa("SAC", A, { ultima: "2026-09-10T12:00:00Z" });
+      const bAud = await conversa("AUD", B, { ultima: "2026-10-27T11:01:00Z", lidas: 1, resumo: "Olá, GIRLEIS" });
+      const bSdc = await conversa("SDC", B, { ultima: "2026-10-22T12:00:00Z" });
+      await msg(aAud, "contato", "2026-10-26T13:00:00Z", "bom dia");
+      await msg(aAud, "advogado", "2026-10-27T13:15:00Z", "bom dia, me chamo Isabelle");
+      await msg(aAud, "advogado", "2026-10-27T11:01:00Z", "Olá, GIRLEIS (o mesmo aviso, gravado nas duas)", "AV1");
+      await msg(aAud, "contato", "2026-10-27T19:57:00Z", "Pode confirmar");
+      await msg(bAud, "advogado", "2026-10-27T11:01:00Z", "Olá, GIRLEIS", "AV1");
+      await msg(bAud, "advogado", "2026-10-22T11:01:00Z", "Olá, GIRLEIS (agendamento)", "AV0");
+      // A pergunta que ficou na conversa do aviso, sem resposta: depois da
+      // última da equipe na conversa dela, antes da última pergunta dela.
+      await msg(bAud, "contato", "2026-10-27T15:00:00Z", "vou sim, é online?");
+      await msg(bSdc, "advogado", "2026-10-22T12:00:00Z", "outra linha");
+      await q("insert into notas (conversa_id, texto) values ($1, 'aviso enviado')", [bAud]);
+      await q("insert into alteracoes (contato_id, conversa_id, tipo, alvo) values ($1, $2, 'nota_criada', 'n1'), ($1, null, 'cadastro', 'nome')", [B, bAud]);
+      await q(`insert into zorvin_respostas_automaticas (conversa_id, ate, texto) values
+               ($1, '2026-10-26T11:00:00Z', 'fechado A'), ($2, '2026-10-26T11:00:00Z', 'fechado B'),
+               ($2, '2026-10-20T11:00:00Z', 'fechado B2')`, [aAud, bAud]);
+      await q("insert into zorvin_distribuicoes (conversa_id, departamento_id) values ($1, 2), ($2, 2)", [aAud, bAud]);
+      await q("insert into fila_envio (conversa_id, texto, status, aviso_vantoro_id) values ($1, 'Olá', 'enviada', 'AV-1')", [bAud]);
+      const [t1, t2] = (await q("insert into tags (nome) values ('CLIENTE'), ('AUDIÊNCIA') returning id")).map((r) => r.id);
+      await q("insert into conversa_tags values ($1, $2), ($3, $2), ($3, $4)", [aAud, t1, bAud, t2]);
+      await q("insert into zorvin_tarefas (conversa_id, texto, vence_em) values ($1, 'ligar', now())", [bAud]);
+      // O "Já tratei" clicado na conversa do aviso — e não na do cliente.
+      const assunto = (await um("select id from zorvin_assuntos order by ordem limit 1")).id;
+      await q("insert into zorvin_tratamentos (conversa_id, assunto_id, quando) values ($1, $2, now())", [bAud, assunto]);
+      // O funil: no AUD, a equipe pôs A numa etapa escolhida.
+      const etapasAud = await q("select id from zorvin_etapas where departamento_id = 2 order by ordem");
+      await q("update zorvin_cartoes set etapa_id = $1 where contato_id = $2 and departamento_id = 2", [etapasAud[1].id, A]);
+      const antesDeA = await um("select tratada_em, esperando_desde from conversas where id = $1", [aAud]);
+      const tratadaDeB = (await um("select tratada_em from conversas where id = $1", [bAud])).tratada_em;
+
+      // EDNALVA: C é por onde ela escreve; D, a do aviso, tem a foto e o cliente do Vantoro.
+      const C = await contato("557599052309", { nome: "EDNALVA NUNES SILVA", criado: "2026-07-01T12:00:00Z" });
+      const D = await contato("5575999052309", { foto: "d.jpg", vantoro: 777, criado: "2026-10-22T12:00:00Z" });
+      // A conversa do aviso é a de atividade mais recente: é por quem ESCREVE,
+      // e não por quem se mexeu por último, que se escolhe quem fica.
+      const cAud = await conversa("AUD", C, { ultima: "2026-10-20T12:00:00Z", resumo: "oi" });
+      const dAud = await conversa("AUD", D, { ultima: "2026-10-27T18:00:00Z", resumo: "Olá, EDNALVA" });
+      await msg(cAud, "contato", "2026-10-20T12:00:00Z", "oi");
+      await msg(dAud, "advogado", "2026-10-27T11:01:00Z", "Olá, EDNALVA");
+      // Sem mensagem do cliente em nenhuma: fica a mais antiga.
+      const G = await contato("556181112222", { criado: "2026-09-01T12:00:00Z" });
+      const H = await contato("5561981112222", { criado: "2026-10-22T12:00:00Z" });
+      await conversa("AUD", G, { ultima: "2026-09-01T12:00:00Z" });
+      await conversa("AUD", H, { ultima: "2026-10-27T11:00:00Z" });
+      // O cliente escreve pela forma COM o nove: fica ela, mesmo sendo a mais nova.
+      const I = await contato("5521999990000", { criado: "2026-10-22T12:00:00Z" });
+      const J = await contato("552199990000", { criado: "2026-06-01T12:00:00Z" });
+      const iAud = await conversa("AUD", I, { ultima: "2026-10-25T12:00:00Z" });
+      const jAud = await conversa("AUD", J, { ultima: "2026-10-27T12:00:00Z" });
+      await msg(iAud, "contato", "2026-10-25T12:00:00Z", "escrevi pelo nove");
+      await msg(jAud, "contato", "2026-06-10T12:00:00Z", "escrevi antes");
+      // O fixo e o celular parecido.
+      const E = await contato("551133334444"); const F = await contato("5511933334444");
+      await conversa("AUD", E); await conversa("AUD", F);
+
+      const r1 = await aplicar(S035);
+
+      // ---- 80a. a conferência ----
+      ok("a conferência diz quantos saíram, e que não sobrou celular com dois contatos",
+         item(r1, /juntados agora/) === "4" && item(r1, /dois contatos/) === "true" && !defeito(r1), JSON.stringify(r1));
+      const sobram = await q("select id, numero from contatos order by numero");
+      ok("sobra um contato por celular — e o fixo e o celular parecido continuam dois",
+         JSON.stringify(sobram.map((x) => x.numero)) === JSON.stringify(
+           ["551133334444", "5511933334444", "5521999990000", "556181112222", "557599052309", "557781545221"]),
+         JSON.stringify(sobram.map((x) => x.numero)));
+
+      // ---- 80b. quem fica ----
+      const ids = new Set(sobram.map((x) => x.id));
+      ok("GIRLEIS: fica o contato por onde ela escreve, com o número que o WhatsApp usa",
+         ids.has(A) && !ids.has(B), JSON.stringify(sobram));
+      ok("sem mensagem do cliente em nenhuma, fica a mais antiga", ids.has(G) && !ids.has(H));
+      ok("o cliente que escreve pela forma com o nove fica nela, mesmo mais nova", ids.has(I) && !ids.has(J));
+
+      // ---- 80c. as conversas da mesma linha viram uma ----
+      const mensA = await um("select count(*)::int n, count(distinct id_uazapi)::int d from mensagens where conversa_id = $1", [aAud]);
+      ok("as mensagens vão juntas, e o aviso gravado nas duas não se repete",
+         mensA.n === 6 && mensA.d === 6, JSON.stringify(mensA));
+      const convA = await um("select nao_lidas, ultima_mensagem, ultima_atividade from conversas where id = $1", [aAud]);
+      ok("as não lidas se somam, e a última mensagem é a mais recente das duas",
+         convA.nao_lidas === 3 && convA.ultima_mensagem === "Pode confirmar"
+         && new Date(convA.ultima_atividade).toISOString() === "2026-10-27T19:57:00.000Z", JSON.stringify(convA));
+      ok("a conversa que sobrou da do aviso não existe mais",
+         (await um("select count(*)::int n from conversas where id = $1", [bAud])).n === 0);
+      const conta = async (t) => (await um(`select count(*)::int n from ${t} where conversa_id = $1`, [aAud])).n;
+      const levado = { notas: await conta("notas"), fila: await conta("fila_envio"), etiquetas: await conta("conversa_tags"),
+                       tarefas: await conta("zorvin_tarefas"), tratei: await conta("zorvin_tratamentos") };
+      ok("a nota, o envio da fila, a tarefa e o \"Já tratei\" vão junto, e a etiqueta repetida não duplica",
+         JSON.stringify(levado) === JSON.stringify({ notas: 1, fila: 1, etiquetas: 2, tarefas: 1, tratei: 1 }), JSON.stringify(levado));
+      const respostas = await q("select texto from zorvin_respostas_automaticas where conversa_id = $1 order by ate", [aAud]);
+      const soltas = (await um("select count(*)::int n from zorvin_respostas_automaticas where conversa_id <> $1", [aAud])).n;
+      ok("a resposta automática vai junto — a do mesmo período, uma só",
+         JSON.stringify(respostas.map((x) => x.texto)) === JSON.stringify(["fechado B2", "fechado A"]) && soltas === 0,
+         JSON.stringify(respostas));
+      ok("a distribuição da conversa que saiu vai com ela, sem estourar a de uma por conversa",
+         (await um("select count(*)::int n from zorvin_distribuicoes")).n === 1);
+
+      // ---- 80d. a espera e o "Já tratei" ----
+      const depoisDeA = await um("select tratada_em, esperando_desde from conversas where id = $1", [aAud]);
+      ok("o \"Já tratei\" da conversa do aviso não vira o da conversa do cliente",
+         tratadaDeB !== null && String(depoisDeA.tratada_em) === String(antesDeA.tratada_em), JSON.stringify({ antesDeA, depoisDeA, tratadaDeB }));
+      ok("a espera é recontada: o cliente espera desde a pergunta sem resposta que estava na conversa do aviso",
+         antesDeA.esperando_desde && new Date(antesDeA.esperando_desde).toISOString() === "2026-10-27T19:57:00.000Z"
+         && depoisDeA.esperando_desde && new Date(depoisDeA.esperando_desde).toISOString() === "2026-10-27T15:00:00.000Z",
+         JSON.stringify({ antesDeA, depoisDeA }));
+
+      // ---- 80e. a conversa de outra linha muda de dono ----
+      ok("a conversa de uma linha que quem fica não tinha passa para ele",
+         (await um("select contato_id = $2 as dele from conversas where id = $1", [bSdc, A])).dele === true);
+
+      // ---- 80f. o funil ----
+      const cartoes = await q("select departamento_id::int dep, etapa_id = $2 as da_equipe from zorvin_cartoes where contato_id = $1 order by 1",
+                              [A, etapasAud[1].id]);
+      ok("o cartão de quem fica continua na etapa que a equipe escolheu, e o do outro departamento vem junto",
+         JSON.stringify(cartoes) === JSON.stringify([{ dep: 1, da_equipe: false }, { dep: 2, da_equipe: true }, { dep: 3, da_equipe: false }]),
+         JSON.stringify(cartoes));
+      ok("o histórico do funil não fica preso ao contato que saiu",
+         (await um("select count(*)::int n from zorvin_movimentos where contato_id = $1", [B])).n === 0);
+
+      // ---- 80g. o que só o contato que saiu tinha ----
+      const convC = await um("select ultima_mensagem, ultima_atividade from conversas where id = $1", [cAud]);
+      ok("e quando a conversa que sai é a mais recente, a última mensagem vem dela",
+         convC.ultima_mensagem === "Olá, EDNALVA"
+         && new Date(convC.ultima_atividade).toISOString() === "2026-10-27T18:00:00.000Z", JSON.stringify(convC));
+      const ednalva = await um("select nome, foto_url, vantoro_cliente_id::int vantoro from contatos where id = $1", [C]);
+      ok("EDNALVA: o nome fica o dela, e a foto e o cliente do Vantoro do contato que saiu passam para ela",
+         ednalva.nome === "EDNALVA NUNES SILVA" && ednalva.foto_url === "d.jpg" && ednalva.vantoro === 777, JSON.stringify(ednalva));
+      const girleis = await um("select foto_url, vantoro_cliente_id::int vantoro from contatos where id = $1", [A]);
+      ok("e o que quem fica já tinha não é trocado", girleis.foto_url === "a.jpg" && girleis.vantoro === 501, JSON.stringify(girleis));
+      const historico = await q("select tipo, contato_id = $1 as de_a, conversa_id = $2 as na_conversa from alteracoes order by tipo", [A, aAud]);
+      ok("o histórico de alterações passa para o contato e a conversa que ficam",
+         JSON.stringify(historico) === JSON.stringify([{ tipo: "cadastro", de_a: true, na_conversa: null },
+                                                       { tipo: "nota_criada", de_a: true, na_conversa: true }]),
+         JSON.stringify(historico));
+
+      // ---- 80h. o registro ----
+      const log = await q("select ficou_numero, saiu_numero, conversas, detalhe from juntada_contatos_log order by celular");
+      const doLog = log.find((x) => x.saiu_numero === "5577981545221") || {};
+      ok("fica o registro de cada junção, de quem ficou e de quem saiu",
+         log.length === 4 && doLog.ficou_numero === "557781545221" && doLog.conversas === 2, JSON.stringify(log));
+
+      // ---- 80i. de novo ----
+      const r2 = await aplicar(S035);
+      ok("rodado de novo, não junta nada", item(r2, /juntados agora/) === "0" && item(r2, /dois contatos/) === "true", JSON.stringify(r2));
+      ok("e nada muda", (await um("select count(*)::int n from contatos")).n === 6
+         && (await um("select count(*)::int n from mensagens where conversa_id = $1", [aAud])).n === 6);
+
+      // ---- 80j. o índice que a junção não sabe comparar ----
+      await c.query("create unique index notas_texto_unico on notas (conversa_id, lower(texto))");
+      const K = await contato("553188887777"); const L = await contato("5531988887777");
+      const kAud = await conversa("AUD", K); const lAud = await conversa("AUD", L);
+      await msg(kAud, "contato", "2026-10-27T12:00:00Z", "oi");
+      await q("insert into notas (conversa_id, texto) values ($1, 'Ligar amanhã'), ($2, 'ligar amanhã'), ($2, 'outra nota')", [kAud, lAud]);
+      let recusou = null;
+      try { await aplicar(S035); } catch (e) { recusou = e.message; }
+      const intactos = (await um("select count(*)::int n from contatos where id in ($1, $2)", [K, L])).n;
+      const notasDeL = (await um("select count(*)::int n from notas where conversa_id = $1", [lAud])).n;
+      ok("com um índice único de expressão que bate, a junção é recusada inteira — e nada se perde",
+         recusou !== null && intactos === 2 && notasDeL === 2, JSON.stringify({ recusou, intactos, notasDeL }));
+    } catch (e) {
+      ok("a seção 80 rodou até o fim", false, e.message);
+    } finally {
+      if (c) await c.end().catch(() => {});
+      await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

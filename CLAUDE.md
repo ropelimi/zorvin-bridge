@@ -832,12 +832,60 @@ desde o caso da MARIA DE JESUS DA SILVA; o aviso não.
   e o log manda usar "Juntar duas conversas";
 - fixo não ganha nono dígito (a régua de `variantesDoNumero`).
 
-**Os duplicados que já existem não se juntam sozinhos:** juntar histórico é
-decisão de gente. Ou "Juntar duas conversas" no painel, uma a uma, ou o par de
-scripts de agosto, que continua valendo: `2026-08-conferir-duplicados-nono-digito.sql`
-(só lista) e depois `2026-08-juntar-duplicados-nono-digito.sql`.
+**Os duplicados que já existiam** foram juntados depois, a pedido do Rodrigo,
+pelo script automático 035 (a seção seguinte). O de agosto
+(`sql/2026-08-juntar-duplicados-nono-digito.sql`) não serve mais para isso.
 
 As provas são a **seção 79**; com o laço antigo, 6 das 11 conferências reprovam.
+
+## Os duplicados do nono dígito, juntos (script 035, 27/10)
+
+Pedido do Rodrigo, depois da correção dos avisos: *"Junta as conversas
+duplicadas que já existem."*
+
+`sql/automaticos/035-os-contatos-do-nono-digito-juntos.sql` faz no banco, uma
+vez, para todo celular com mais de um contato (as formas com e sem o nono
+dígito, com e sem o 55), o que o "Juntar duas conversas" do painel faz uma a uma.
+
+**Quem fica:** o contato por onde o cliente **escreve** — o da mensagem mais
+recente dele. É a forma que o WhatsApp usa. Sem mensagem do cliente em nenhum,
+fica o mais antigo. **O número de quem fica não muda.**
+
+**O que vai junto:**
+
+- as conversas do mesmo telefone do escritório viram uma: mensagem, nota,
+  envio da fila, tarefa, "Já tratei", etiqueta e resposta automática. O que
+  bateria de frente (a mesma etiqueta, o mesmo aviso gravado nas duas) sai em
+  vez de duplicar. As não lidas se somam, a última mensagem é a mais recente
+  das duas, e a espera (005) e a situação (028) são recontadas;
+- a conversa de um telefone que quem fica não tinha só muda de dono;
+- o cartão do funil, com o histórico (o painel apagava o cartão junto com o
+  contato);
+- o nome, a foto e o cliente do Vantoro que só o contato que sai tinha;
+- o histórico de alterações (cadastro e notas).
+
+**O que não vai:** o "Já tratei" da conversa que sai não vira o da que fica.
+O clique tratou aquela conversa, e levá-lo poderia tirar da fila uma pergunta
+do cliente que ninguém respondeu. A distribuição e os atendimentos contados na
+conversa que sai vão com ela, como no painel.
+
+**Por que não o script de agosto:** ele apagava o cartão do funil (a cascata
+do 017), perdia o nome e o cliente do Vantoro do contato que saía, trocava o
+número de quem ficava pela forma com o nono dígito, e movia toda tabela com
+`conversa_id` — inclusive a da distribuição, que aceita uma linha por conversa
+(023).
+
+**Tudo ou nada:** a ponte roda cada script numa transação. Um índice único de
+expressão que bata faz o banco recusar a junção inteira, em vez de o script
+apagar o que não sabe comparar. Rodável de novo; num banco sem o Zorvin, sai
+cedo. O registro fica em `juntada_contatos_log`, e a conferência na janela de
+scripts do painel: quantos saíram, e se sobrou algum celular com dois contatos.
+
+As provas são a **seção 80**, num Postgres de verdade, com os gatilhos de
+produção que a junção dispara. Os 16 defeitos plantados um a um (quem fica,
+o que bate de frente, o funil, o número, o fixo, a espera, o histórico, a
+resposta automática, o índice de expressão, o "Já tratei", as não lidas, a
+última mensagem) são todos reprovados.
 
 ## Os scripts que se aplicam sozinhos
 
