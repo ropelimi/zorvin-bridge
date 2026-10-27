@@ -1,5 +1,5 @@
 -- ------------------------------------------------------------
---  035. OS CONTATOS DUPLICADOS PELO NONO DÍGITO, JUNTOS (27/10)
+--  036. OS CONTATOS DUPLICADOS PELO NONO DÍGITO, JUNTOS (27/10)
 --
 --  Pedido do Rodrigo: "Junta as conversas duplicadas que já existem."
 --
@@ -59,7 +59,7 @@
 --  Fica o registro em `juntada_contatos_log`, a mesma tabela de agosto.
 -- ------------------------------------------------------------
 
-create temporary table zorvin_conferencia_035 (item text, resposta text) on commit drop;
+create temporary table zorvin_conferencia_036 (item text, resposta text) on commit drop;
 
 do $juntar$
 declare
@@ -86,7 +86,7 @@ declare
   tem_alteracoes boolean;
 begin
   if to_regclass('public.contatos') is null or to_regclass('public.conversas') is null then
-    insert into zorvin_conferencia_035 values
+    insert into zorvin_conferencia_036 values
       ('contatos duplicados pelo nono dígito', 'nenhum — este banco não tem o Zorvin');
     return;
   end if;
@@ -133,7 +133,7 @@ begin
   -- celular de 10 dígitos. Só celular ganha o 9 — fixo tem 8 dígitos começando
   -- em 2..5, e pôr um 9 nele juntaria dois clientes diferentes.
   ------------------------------------------------------------------
-  create temporary table _035_contatos on commit drop as
+  create temporary table _036_contatos on commit drop as
   with limpos as (
     select id::text as id, nome, numero,
            regexp_replace(coalesce(numero, ''), '[^0-9]', '', 'g') as dig
@@ -160,14 +160,14 @@ begin
 
   -- A mensagem mais recente que o CLIENTE mandou, por contato.
   if to_regclass('public.mensagens') is not null then
-    update _035_contatos d
+    update _036_contatos d
        set escreveu = (select max(m.criado_em)
                          from public.mensagens m
                          join public.conversas v on v.id = m.conversa_id
                         where v.contato_id::text = d.id and m.origem = 'contato');
   end if;
   if tem_criado then
-    execute 'update _035_contatos d set nasceu = (select ct.criado_em from public.contatos ct
+    execute 'update _036_contatos d set nasceu = (select ct.criado_em from public.contatos ct
                                                    where ct.id::text = d.id)';
   end if;
 
@@ -175,7 +175,7 @@ begin
   -- O que se leva de uma conversa para a outra: o que o "Juntar duas
   -- conversas" leva, das tabelas que existem neste banco.
   ------------------------------------------------------------------
-  create temporary table _035_tabelas on commit drop as
+  create temporary table _036_tabelas on commit drop as
   select t as tabela
     from unnest(array['mensagens', 'notas', 'fila_envio', 'zorvin_tarefas',
                       'zorvin_tratamentos', 'conversa_tags',
@@ -189,7 +189,7 @@ begin
   -- colunas, o de expressão pareceria "uma linha por conversa" e apagaria o
   -- que não bate. Se um deles existisse e batesse, o banco recusaria a
   -- junção inteira, que é o lado seguro.
-  create temporary table _035_unicos on commit drop as
+  create temporary table _036_unicos on commit drop as
   select pc.relname::text as tabela,
          array(select a.attname::text
                  from unnest(i.indkey) with ordinality k(attnum, ord)
@@ -201,7 +201,7 @@ begin
     join pg_namespace ns on ns.oid = pc.relnamespace
    where ns.nspname = 'public' and i.indisunique and i.indpred is null
      and i.indexprs is null
-     and pc.relname in (select tabela from _035_tabelas)
+     and pc.relname in (select tabela from _036_tabelas)
      and exists (select 1 from pg_attribute a
                   where a.attrelid = i.indrelid and a.attname = 'conversa_id'
                     and a.attnum = any (i.indkey));
@@ -209,15 +209,15 @@ begin
   ------------------------------------------------------------------
   -- Um celular por vez.
   ------------------------------------------------------------------
-  for g in select distinct chave from _035_contatos order by chave loop
+  for g in select distinct chave from _036_contatos order by chave loop
 
     select d.id into fica
-      from _035_contatos d where d.chave = g.chave
+      from _036_contatos d where d.chave = g.chave
      order by d.escreveu desc nulls last, d.nasceu asc nulls last, d.id
      limit 1;
 
     for perdedor in
-      select d.id, d.nome, d.numero from _035_contatos d
+      select d.id, d.nome, d.numero from _036_contatos d
        where d.chave = g.chave and d.id <> fica
        order by d.id
     loop
@@ -245,8 +245,8 @@ begin
         end if;
 
         -- As duas existem: leva o que está pendurado e apaga a que sobra.
-        for tab in select tabela from _035_tabelas order by tabela loop
-          for u in select outras from _035_unicos where tabela = tab loop
+        for tab in select tabela from _036_tabelas order by tabela loop
+          for u in select outras from _036_unicos where tabela = tab loop
             select string_agg(format('d.%I = o.%I', c, c), ' and ') into cond
               from unnest(u.outras) c;
             execute format(
@@ -390,7 +390,7 @@ begin
   ------------------------------------------------------------------
   -- A conferência: quantos saíram, e se sobrou algum celular repetido.
   ------------------------------------------------------------------
-  insert into zorvin_conferencia_035
+  insert into zorvin_conferencia_036
   select 'contatos juntados agora', juntados::text
   union all
   select 'nenhum celular com dois contatos',
@@ -412,4 +412,4 @@ begin
 end $juntar$;
 
 -- A RESPOSTA DE "DEU CERTO?", na última linha, que é a que o editor mostra.
-select * from zorvin_conferencia_035;
+select * from zorvin_conferencia_036;

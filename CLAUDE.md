@@ -195,7 +195,8 @@ SQL: `sql/2026-09-a-caixa-de-entrada-do-webhook.sql`. Variável **opcional**
 `CAIXA_INTERVALO_MS` (padrão 30s), que existe para a bancada encurtar a rodada.
 
 **A limpeza da caixa nunca rodava, e quando rodou, levou o que faltava resgatar
-(26/10).** `limpar_eventos_recebidos` (sete dias) morava depois de um "não há
+(26/10).** `limpar_eventos_recebidos` (que guardava sete dias; desde o 035,
+trinta) morava depois de um "não há
 pendente? então volta", e só rodava na volta em que algum evento tinha ficado
 pela metade. Ver "O que não entrava no histórico (26/10)", logo abaixo da
 seção das rápidas com anexo.
@@ -833,17 +834,17 @@ desde o caso da MARIA DE JESUS DA SILVA; o aviso não.
 - fixo não ganha nono dígito (a régua de `variantesDoNumero`).
 
 **Os duplicados que já existiam** foram juntados depois, a pedido do Rodrigo,
-pelo script automático 035 (a seção seguinte). O de agosto
+pelo script automático 036 (a seção seguinte). O de agosto
 (`sql/2026-08-juntar-duplicados-nono-digito.sql`) não serve mais para isso.
 
 As provas são a **seção 79**; com o laço antigo, 6 das 11 conferências reprovam.
 
-## Os duplicados do nono dígito, juntos (script 035, 27/10)
+## Os duplicados do nono dígito, juntos (script 036, 27/10)
 
 Pedido do Rodrigo, depois da correção dos avisos: *"Junta as conversas
 duplicadas que já existem."*
 
-`sql/automaticos/035-os-contatos-do-nono-digito-juntos.sql` faz no banco, uma
+`sql/automaticos/036-os-contatos-do-nono-digito-juntos.sql` faz no banco, uma
 vez, para todo celular com mais de um contato (as formas com e sem o nono
 dígito, com e sem o 55), o que o "Juntar duas conversas" do painel faz uma a uma.
 
@@ -881,7 +882,7 @@ apagar o que não sabe comparar. Rodável de novo; num banco sem o Zorvin, sai
 cedo. O registro fica em `juntada_contatos_log`, e a conferência na janela de
 scripts do painel: quantos saíram, e se sobrou algum celular com dois contatos.
 
-As provas são a **seção 80**, num Postgres de verdade, com os gatilhos de
+As provas são a **seção 81**, num Postgres de verdade, com os gatilhos de
 produção que a junção dispara. Os 16 defeitos plantados um a um (quem fica,
 o que bate de frente, o funil, o número, o fixo, a espera, o histórico, a
 resposta automática, o índice de expressão, o "Já tratei", as não lidas, a
@@ -2715,9 +2716,60 @@ subida, e o que ele procura é o que a limpeza apagaria. `CAIXA_LIMPEZA_MS` é
 opcional, para a bancada. O aviso dos eventos que desistiram continua logo
 depois da volta que os tentou.
 
-**Ainda em aberto, e é decisão do Rodrigo:** sete dias é o prazo para resgatar
+~~**Ainda em aberto, e é decisão do Rodrigo:** sete dias é o prazo para resgatar
 o que a ponte não souber ler. Trinta dariam mais folga (uns 40 mil eventos,
-70 MB), e guardariam por mais tempo uma segunda cópia do que o cliente escreveu.
+70 MB), e guardariam por mais tempo uma segunda cópia do que o cliente escreveu.~~
+**Decidido em 27/10: trinta dias** — ver logo abaixo.
+
+### A cópia passou a durar 30 dias (script 035, 27/10)
+
+Decidido pelo Rodrigo em 27/10, depois de ler a conta em linguagem simples.
+`sql/automaticos/035-a-caixa-de-entrada-guarda-30-dias.sql` recria
+`limpar_eventos_recebidos()` com `interval '30 days'`. A razão: a cópia é o
+único jeito de devolver às conversas uma mensagem que a ponte não soube ler, e
+o defeito de 26/10 foi achado semanas depois. Com 7 dias, só 2 das 27 voltaram.
+
+**O que custa, medido em 27/10:** a tabela vai de uns 10 mil para uns 40 mil
+eventos. Ela já ocupa 108 MB no disco, porque o Postgres não devolve ao disco o
+espaço da limpeza de 26/10 (guarda para reaproveitar), e o banco inteiro tem
+208 MB. A segunda cópia do que os clientes escrevem fica guardada mais tempo; a
+primeira, a conversa, já fica para sempre.
+
+**O que não mudou, e a prova confere cada um:**
+
+- os pendentes nunca saem;
+- a conta é pelo `processado_em`: o evento que chegou há 35 dias e foi
+  processado há 29 fica;
+- poder de dono, `search_path` fixo e só para a ponte. `create or replace`
+  guarda as permissões da função que já existe, e a que tivesse sumido nasceria
+  com as da herança — por isso o script as diz de novo;
+- a ponte chama do mesmo jeito: o `index.js` não mudou.
+
+**A guarda é obrigatória aqui:** a função é `language sql`, e o Postgres
+confere o corpo dela ao criar. Num banco sem `eventos_recebidos` (o da
+51l-bis), o `create` estouraria.
+
+Prova: seção 80, num Postgres de verdade, sobre o script de setembro que criou
+a caixa, com o 035 por cima: 31 conferências, **12 sabotagens e 12 pegas**,
+todas limpas, rodadas em cópias e lidas uma a uma:
+
+- os 7 dias de sempre;
+- apagar também os pendentes;
+- a conta pela chegada, e não pelo processamento;
+- sem o poder de dono;
+- sem o `search_path`;
+- sem tirar de `public`;
+- sem tirar de `anon`, e sem tirar de `authenticated`;
+- sem dar à ponte;
+- sem a guarda do banco limpo;
+- a tabela da conferência criada depois da guarda;
+- e a conferência que diz "true" com os 7 dias de volta: quem pega é a conta
+  dos eventos que ficam, e não a conferência.
+
+**As de `anon` e `authenticated` só são pegas na cena com a herança da
+Supabase.** No banco de prova as funções nascem para `public`, e tirar
+`public` já bastaria; na Supabase os dois recebem pelo NOME (a armadilha nº 5).
+Sem essa cena, as duas sabotagens vazariam.
 
 ### O resgate do histórico, uma vez só
 
