@@ -2801,6 +2801,20 @@ scripts que se aplicam sozinhos". Daqui para a frente:
   chat — a consulta só de leitura, para medir alguma coisa, como a que
   conferiu de 001 a 020 antes do marco.
 
+**E o SQL pelo conector do Supabase roda sem pedir permissão a ele (26/10).**
+Nas palavras dele: *"Sempre que for para executar o SQL, não precisa me pedir
+permissão, pode sempre fazer."* O que a autorização não muda:
+
+- **mudança de estrutura** (tabela, coluna, regra) continua indo por
+  `sql/automaticos/`. Não é por falta de permissão: é o que mantém o banco e o
+  código dizendo a mesma coisa, e o que passa pelas provas antes de chegar ao
+  escritório;
+- **correção de dados** (mudar ou apagar linhas) se faz quando o pedido dele
+  precisa, olhando antes o que vai mudar e contando a ele depois exatamente o
+  que mudou;
+- **consulta pequena, uma pergunta de cada vez**: a pesada atrasa o webhook
+  (ver a limpeza da caixa de 26/10, às 16h25).
+
 ## As provas rodavam duas vezes, e a franquia da conta acabou
 
 **MEDIDO em 28/09**, com a página de cobrança do GitHub aberta: **2.000 de
