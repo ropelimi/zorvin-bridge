@@ -9949,6 +9949,57 @@ function numeroComPais(digitos) {
   return d.startsWith('55') ? d : `55${d}`;
 }
 
+// O CONTATO DO AVISO DE AUDIÊNCIA (27/10): o que já existe, em qualquer forma
+// do nono dígito, e um novo só quando não há nenhum.
+//
+// O cadastro do Vantoro guarda "(77) 98154-5221"; o WhatsApp de muitos
+// clientes antigos é "(77) 8154-5221" — a mesma linha, com um dígito a menos
+// (ver `variantesDoNumero`). O upsert pelo número exato criava um SEGUNDO
+// contato, e com ele uma conversa só com os avisos, enquanto o cliente
+// continuava escrevendo na antiga: a equipe via a mesma pessoa duas vezes, e a
+// resposta ao aviso, chegando na outra conversa, não ia para o Vantoro. Foi o
+// caso da GIRLEIS RIBEIRO MATOS e da EDNALVA NUNES SILVA.
+//
+// O CONTATO QUE EXISTE FICA COMO ESTÁ. Quem cria o contato com o número que o
+// WhatsApp usa é a entrada de mensagens, e é ela que o acerta quando ele muda
+// (`processarEventoDoWebhook`, "ANTES DE CRIAR, PROCURA O MESMO CELULAR");
+// trocar o número aqui pela forma do cadastro faria a próxima mensagem do
+// cliente procurar de novo.
+//
+// SE AS DUAS FORMAS JÁ EXISTEM — o duplicado de antes desta correção —, o
+// aviso vai para a que teve conversa mais recente, que é por onde o cliente
+// está falando hoje: a régua do script que junta os duplicados
+// (sql/2026-08-juntar-duplicados-nono-digito.sql). Juntar as duas continua
+// sendo decisão de gente.
+async function contatoDoAviso(destino) {
+  const { data: achados, error } = await supabase
+    .from('contatos').select('id, numero').in('numero', variantesDoNumero(destino));
+  if (error) {
+    console.log(`Aviso para ${destino}: não consegui procurar o contato (${error.message}).`);
+    return null;
+  }
+  const lista = achados || [];
+  if (lista.length === 1) return lista[0];
+  if (lista.length > 1) {
+    const { data: conversas } = await supabase.from('conversas')
+      .select('contato_id, ultima_atividade').in('contato_id', lista.map((c) => c.id));
+    const vista = new Map();
+    for (const c of conversas || []) {
+      const quando = Date.parse(c.ultima_atividade || '') || 0;
+      vista.set(c.contato_id, Math.max(vista.get(c.contato_id) || 0, quando));
+    }
+    const exato = (c) => (c.numero === destino ? 1 : 0);
+    const [escolhido] = [...lista].sort((a, b) =>
+      (vista.get(b.id) || 0) - (vista.get(a.id) || 0) || exato(b) - exato(a));
+    console.log(`Aviso para ${destino}: ${lista.map((c) => c.numero).join(' e ')} são o mesmo `
+              + `celular; vai pela conversa de ${escolhido.numero}. Use "Juntar duas conversas".`);
+    return escolhido;
+  }
+  const { data: novo } = await supabase.from('contatos')
+    .upsert({ numero: destino }, { onConflict: 'numero' }).select('id, numero').single();
+  return novo || null;
+}
+
 let avisosRodando = false;
 async function buscarAvisosDeAudiencia() {
   if (desligando) return;   // saindo do ar: os avisos continuam pendentes no Vantoro
@@ -10014,8 +10065,9 @@ async function buscarAvisosDeAudiencia() {
         continue;
       }
 
-      const { data: contato } = await supabase.from('contatos')
-        .upsert({ numero: destino }, { onConflict: 'numero' }).select('id').single();
+      // O CONTATO QUE JÁ EXISTE, na forma do nono dígito que estiver: ver
+      // `contatoDoAviso`.
+      const contato = await contatoDoAviso(destino);
       if (!contato) { await avisoDeuErro(aviso.id, 'Não consegui criar o contato.'); continue; }
 
       const { data: conversa } = await supabase.from('conversas')
@@ -10038,7 +10090,7 @@ async function buscarAvisosDeAudiencia() {
         console.log(`Aviso ${aviso.id}: não entrou na fila (${filaErro.message}).`);
         continue;
       }
-      console.log(`Aviso ${aviso.id} enfileirado para ${destino} por ${adv.nome}.`);
+      console.log(`Aviso ${aviso.id} enfileirado para ${contato.numero} por ${adv.nome}.`);
     }
   } catch (e) {
     console.error('Avisos de audiência:', (e && e.message) || e);
