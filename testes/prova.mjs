@@ -7094,11 +7094,37 @@ console.log("\n50. A busca pede só o que o painel usa");
       const t = await pontOuNada(b, "", { SCRIPTS_AUTOMATICOS: "aplicar" });
       ok("a ponte fica de pé aplicando os scripts de verdade", t !== null && t.filho.exitCode === null);
 
-      const aplicados = await b.consultar(
-        "select nome, sucesso, erro from zorvin_scripts_aplicados order by nome");
+      // A RODADA INTEIRA, E NÃO O COMEÇO DELA. `pontComScripts` volta 400 ms
+      // depois da primeira linha da rodada, e falando direto com o banco essa
+      // linha é "falei com o banco", dita antes do primeiro script. Para os
+      // scripts de mentira das outras cenas, de milissegundos, isso basta. Para
+      // os da pasta de verdade, não. Medido em 27/10, com a máquina parada: na
+      // hora desta conferência havia 2 dos 34 anotados, e a ponte era
+      // derrubada no fim da cena depois do 11º — os outros 23 nunca rodaram
+      // aqui. Em 26/10, o `drop table` lá embaixo trombou com o 032 ("tuple
+      // concurrently updated") e derrubou a prova inteira. E um script
+      // quebrado no fim da pasta passava daqui sem ser visto.
+      //
+      // Então a cena espera o banco anotar TODOS os da pasta, ou um falhar:
+      // falhando, a ponte para nos seguintes, e não há mais o que esperar. E
+      // confere pelos NOMES, porque contar linhas aprovaria uma rodada que
+      // pulou um script calada.
+      const naPasta = fs.readdirSync(new URL("../sql/automaticos/", import.meta.url))
+        .filter((n) => n.toLowerCase().endsWith(".sql"));
+      let aplicados = { rows: [] };
+      for (let i = 0; i < 300 && t && t.filho.exitCode === null && t.filho.signalCode === null; i++) {
+        try {
+          aplicados = await b.consultar(
+            "select nome, sucesso, erro from zorvin_scripts_aplicados order by nome");
+        } catch (_e) { /* a tabela de controle ainda não nasceu */ }
+        if (aplicados.rows.length >= naPasta.length || aplicados.rows.some((r) => r.sucesso !== true)) break;
+        await espera(100);
+      }
+      const faltam = naPasta.filter((n) => !aplicados.rows.some((r) => r.nome === n && r.sucesso === true));
       ok("todos os scripts da pasta aplicaram sem falha",
-         aplicados.rows.length > 0 && aplicados.rows.every((r) => r.sucesso === true),
-         JSON.stringify(aplicados.rows));
+         naPasta.length > 0 && faltam.length === 0,
+         `${naPasta.length - faltam.length} de ${naPasta.length} anotados; faltam ${faltam.join(", ")}; `
+         + JSON.stringify(aplicados.rows.filter((r) => r.sucesso !== true)));
 
       // ---- e o 001 faz o que promete
       await b.consultar(

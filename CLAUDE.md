@@ -875,6 +875,33 @@ lá aplica num banco limpo. Vale para todo script futuro: erro de digitação em
 SQL passa por revisão de código sem ninguém notar e só aparece na hora de
 instalar.
 
+**E ela conferia o começo da pasta, e não a pasta (27/10).** `pontComScripts`
+volta 400 ms depois da primeira linha da rodada, e falando direto com o banco
+essa linha (*"falei com o banco"*) sai antes do primeiro script. Com um ou dois
+scripts, como quando a cena nasceu, isso bastava. Com 34, não:
+
+- medido com a máquina parada: a conferência *"todos os scripts da pasta
+  aplicaram sem falha"* aprovou com **2 dos 34** anotados, e a ponte foi
+  derrubada no fim da cena depois do 11º. Os outros 23 nunca rodaram ali;
+- com a máquina quente, a mesma cena via os 34. A cobertura dependia da sorte;
+- em 26/10, na suíte inteira, o `drop table` da cena trombou com o 032
+  (*"tuple concurrently updated"*) e derrubou a prova toda.
+
+Hoje a cena espera o banco anotar todos os `.sql` da pasta, ou um falhar, e
+confere pelos **nomes**. Reproduzido numa cópia, com a ponte atrasando 80 ms
+por script, que é o que faz uma máquina ocupada:
+
+| a cópia | a cena de antes | a de hoje |
+|---|---|---|
+| um script quebrado no fim da pasta | passava, conferindo com 5 de 35 | reprova, com o nome e o erro dele |
+| a ponte parando calada depois do 10º | passava, com 10 anotados e todos certos | reprova: "10 de 34 anotados" |
+| só a ponte lenta | — | passa |
+
+E as duas partes do conserto fazem falta, medido tirando uma de cada vez: sem
+a espera, a ponte lenta reprova com 4 de 34 anotados; contando linhas no lugar
+dos nomes, a ponte que para calada passa. **Esperar o primeiro sinal de um
+trabalho não é esperar o trabalho.**
+
 Variável **opcional** `SCRIPTS_PASTA`, para a bancada apontar scripts de mentira
 sem escrever dentro do repositório — mesma linha de `CAIXA_INTERVALO_MS`. Prova:
 seção 51, que sobe um **Postgres de verdade** (a integração contínua traz um), e
@@ -2800,6 +2827,20 @@ scripts que se aplicam sozinhos". Daqui para a frente:
 - **as quatro regras acima continuam valendo** para o SQL que ainda vai para o
   chat — a consulta só de leitura, para medir alguma coisa, como a que
   conferiu de 001 a 020 antes do marco.
+
+**E o SQL pelo conector do Supabase roda sem pedir permissão a ele (26/10).**
+Nas palavras dele: *"Sempre que for para executar o SQL, não precisa me pedir
+permissão, pode sempre fazer."* O que a autorização não muda:
+
+- **mudança de estrutura** (tabela, coluna, regra) continua indo por
+  `sql/automaticos/`. Não é por falta de permissão: é o que mantém o banco e o
+  código dizendo a mesma coisa, e o que passa pelas provas antes de chegar ao
+  escritório;
+- **correção de dados** (mudar ou apagar linhas) se faz quando o pedido dele
+  precisa, olhando antes o que vai mudar e contando a ele depois exatamente o
+  que mudou;
+- **consulta pequena, uma pergunta de cada vez**: a pesada atrasa o webhook
+  (ver a limpeza da caixa de 26/10, às 16h25).
 
 ## As provas rodavam duas vezes, e a franquia da conta acabou
 
