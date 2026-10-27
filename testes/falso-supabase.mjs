@@ -148,7 +148,7 @@ const COLUNAS_DO_BANCO = {
   contatos: ["id", "numero", "nome", "nome_zorvin", "foto_url", "vantoro_cliente_id",
              "vantoro_nome", "criado_em", "atualizado_em"],
   conversas: ["id", "contato_id", "advogado_id", "arquivada", "fixada", "favorita",
-              "nao_lidas", "ultima_mensagem", "ultima_em", "criado_em"],
+              "nao_lidas", "ultima_mensagem", "ultima_em", "ultima_atividade", "criado_em"],
   // AS COLUNAS QUE A PONTE USA, e não a tabela inteira do banco. A lista serve
   // para o falso saber recusar o que não existe; uma coluna real que a ponte
   // nunca toca não faz falta aqui, e inventá-la de memória seria pior.

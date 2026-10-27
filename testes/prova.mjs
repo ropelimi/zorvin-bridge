@@ -13752,5 +13752,126 @@ console.log("\n78. A IA lê as respostas douradas");
   }
 }
 
+// ==================================================================
+//  79. O AVISO VAI PARA O CONTATO QUE JÁ EXISTE (27/10)
+// ==================================================================
+//
+//  "As mensagens enviadas para os clientes, sobre audiência, estão criando
+//  conversa duplicada" — a GIRLEIS RIBEIRO MATOS em (77) 8154-5221 e em
+//  (77) 98154-5221. O cadastro do Vantoro tem o celular com o nono dígito; o
+//  WhatsApp do cliente antigo, sem. O aviso procurava o contato pelo número
+//  exato e criava outro, e a resposta do cliente ficava na conversa antiga.
+//
+//  O que se confere:
+//    - o contato que já existe na outra forma do nono dígito recebe o aviso na
+//      conversa dele, com ou sem conversa com a linha das audiências, e nenhum
+//      contato novo nasce;
+//    - o número do contato que existe não muda;
+//    - sem contato nenhum, nasce um, com o número do cadastro;
+//    - com as duas formas já existindo, vai a que teve conversa mais recente —
+//      nos dois sentidos —, e o log manda juntar;
+//    - o fixo não ganha nono dígito: o aviso para (11) 3333-4444 não vai
+//      parar no celular (11) 93333-4444.
+{
+  console.log("\n79. O aviso vai para o contato que já existe");
+
+  const aviso = (id, telefone) => ({ id, telefone, texto: "Sua audiência é amanhã às 14h.",
+                                     remetente: TELEFONE.numero, finalidade: "CLIENTE" });
+  const rodar = async (tabelas, avisos) => {
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "500" },
+      { tabelas, vantoro: { avisos: avisos.slice() } });
+    const limite = Date.now() + 8000;
+    while (Date.now() < limite && (t.sb.dados.fila_envio || []).length < avisos.length) {
+      await espera(200);
+    }
+    return t;
+  };
+  const filaDe = (t, id) => (t.sb.dados.fila_envio || []).find((f) => f.aviso_vantoro_id === id);
+  const contatoDaFila = (t, id) => {
+    const conversa = (t.sb.dados.conversas || []).find((c) => c.id === filaDe(t, id)?.conversa_id);
+    return (t.sb.dados.contatos || []).find((c) => c.id === conversa?.contato_id);
+  };
+  const numeros = (t) => (t.sb.dados.contatos || []).map((c) => c.numero).sort();
+
+  // ---- 79a. o contato sem o nono, com conversa na linha das audiências ----
+  {
+    const t = await rodar({
+      contatos: [{ id: "c-velho", numero: "557781545221", nome: "GIRLEIS RIBEIRO MATOS" }],
+      conversas: [{ id: "cv-velha", contato_id: "c-velho", advogado_id: TELEFONE.id,
+                    ultima_atividade: "2026-10-27T19:57:00Z" }],
+    }, [aviso("AV-9a", "77981545221")]);
+    ok("o aviso entra na conversa que o cliente já tem, sem o nono dígito",
+       filaDe(t, "AV-9a")?.conversa_id === "cv-velha", JSON.stringify(t.sb.dados.fila_envio));
+    ok("e nenhum contato novo nasce", numeros(t).length === 1, JSON.stringify(numeros(t)));
+    ok("o número do contato fica o que o WhatsApp usa", numeros(t)[0] === "557781545221",
+       JSON.stringify(numeros(t)));
+    await t.parar();
+  }
+
+  // ---- 79b. o contato sem o nono, ainda sem conversa com a linha ----
+  {
+    const t = await rodar({
+      contatos: [{ id: "c-velho", numero: "557599052309", nome: "EDNALVA NUNES SILVA" }],
+    }, [aviso("AV-9b", "75999052309")]);
+    ok("a conversa nova da linha das audiências é do contato que já existe",
+       contatoDaFila(t, "AV-9b")?.id === "c-velho", JSON.stringify(t.sb.dados.conversas));
+    ok("e nenhum contato novo nasce, também aqui", numeros(t).length === 1,
+       JSON.stringify(numeros(t)));
+    await t.parar();
+  }
+
+  // ---- 79c. sem contato nenhum, nasce um com o número do cadastro ----
+  {
+    const t = await rodar({}, [aviso("AV-9c", "77981545221")]);
+    ok("sem contato nenhum, nasce um, com o número do cadastro",
+       contatoDaFila(t, "AV-9c")?.numero === "5577981545221", JSON.stringify(numeros(t)));
+    await t.parar();
+  }
+
+  // ---- 79d. as duas formas já existem: vai a conversa mais recente ----
+  //
+  // Nos dois sentidos, de propósito: com um só, a régua "sempre a forma sem o
+  // nove" (ou "sempre a do cadastro") passaria igual.
+  {
+    const t = await rodar({
+      contatos: [
+        { id: "x-sem", numero: "557781545221" }, { id: "x-com", numero: "5577981545221" },
+        { id: "y-sem", numero: "557599052309" }, { id: "y-com", numero: "5575999052309" },
+      ],
+      conversas: [
+        { id: "cv-x-sem", contato_id: "x-sem", advogado_id: TELEFONE.id,
+          ultima_atividade: "2026-10-27T19:57:00Z" },
+        { id: "cv-x-com", contato_id: "x-com", advogado_id: TELEFONE.id,
+          ultima_atividade: "2026-10-27T11:01:00Z" },
+        { id: "cv-y-sem", contato_id: "y-sem", advogado_id: TELEFONE.id,
+          ultima_atividade: "2026-10-27T11:01:00Z" },
+        { id: "cv-y-com", contato_id: "y-com", advogado_id: TELEFONE.id,
+          ultima_atividade: "2026-10-27T13:15:00Z" },
+      ],
+    }, [aviso("AV-9d1", "77981545221"), aviso("AV-9d2", "75999052309")]);
+    ok("com as duas formas, vai a conversa mais recente (a sem o nove)",
+       filaDe(t, "AV-9d1")?.conversa_id === "cv-x-sem", JSON.stringify(t.sb.dados.fila_envio));
+    ok("e a mais recente vale também quando é a com o nove",
+       filaDe(t, "AV-9d2")?.conversa_id === "cv-y-com", JSON.stringify(t.sb.dados.fila_envio));
+    ok("nenhum contato nasce nem muda", JSON.stringify(numeros(t)) === JSON.stringify(
+       ["557599052309", "5575999052309", "557781545221", "5577981545221"]), JSON.stringify(numeros(t)));
+    const log = t.registro.join("");
+    ok("e o log manda juntar as duas conversas",
+       (log.match(/Use "Juntar duas conversas"/g) || []).length === 2,
+       log.split("\n").filter((l) => /mesmo celular/.test(l)).join(" | ") || "(nada no log)");
+    await t.parar();
+  }
+
+  // ---- 79e. o fixo não ganha nono dígito ----
+  {
+    const t = await rodar({
+      contatos: [{ id: "c-cel", numero: "5511933334444", nome: "Outra pessoa" }],
+    }, [aviso("AV-9e", "1133334444")]);
+    ok("o aviso para o fixo não vai parar no celular com o nove",
+       contatoDaFila(t, "AV-9e")?.numero === "551133334444", JSON.stringify(numeros(t)));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

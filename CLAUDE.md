@@ -803,6 +803,42 @@ só vale para a dourada, e com as mesmas condições de marcar.
 As provas são a **seção 78**: o Claude de mentira lê a resposta no pedido e
 devolve a leitura de uma tabela; o Vantoro de mentira diz quais não entende.
 
+## O aviso de audiência vai para o contato que já existe (27/10)
+
+Relato do Rodrigo: "as mensagens enviadas para os clientes, sobre audiência,
+estão criando conversa duplicada" — a GIRLEIS RIBEIRO MATOS aparecia em
+(77) 8154-5221 e em (77) 98154-5221, e a EDNALVA NUNES SILVA em
+(75) 9905-2309 e em (75) 99905-2309.
+
+**A causa:** o cadastro do Vantoro guarda o celular com o nono dígito, e o
+WhatsApp de muitos clientes antigos é a forma sem ele. O laço dos avisos
+(`buscarAvisosDeAudiencia`) fazia `upsert` do contato pelo número EXATO, e
+nascia um segundo contato, com uma conversa só de avisos. O cliente continuava
+respondendo na antiga — e a resposta ao aviso, longe da conversa do aviso,
+também não chegava ao Vantoro para marcar o "Cliente confirmou?".
+
+Era a lacuna anotada na auditoria de 07/10 ("os avisos de audiência sem as
+variantes do nono dígito"): a entrada de mensagens já procurava as duas formas
+desde o caso da MARIA DE JESUS DA SILVA; o aviso não.
+
+**A correção (`contatoDoAviso`):**
+
+- procura o contato nas formas de `variantesDoNumero` — com e sem o 55, com e
+  sem o nono dígito — e usa o que existe, **sem mudar o número dele**: quem
+  acerta o número pelo WhatsApp é a entrada de mensagens;
+- só cria contato quando nenhuma forma existe, com o número do cadastro;
+- se as duas formas já existem (o duplicado de antes), vai a que teve conversa
+  mais recente — a régua de `sql/2026-08-juntar-duplicados-nono-digito.sql` —
+  e o log manda usar "Juntar duas conversas";
+- fixo não ganha nono dígito (a régua de `variantesDoNumero`).
+
+**Os duplicados que já existem não se juntam sozinhos:** juntar histórico é
+decisão de gente. Ou "Juntar duas conversas" no painel, uma a uma, ou o par de
+scripts de agosto, que continua valendo: `2026-08-conferir-duplicados-nono-digito.sql`
+(só lista) e depois `2026-08-juntar-duplicados-nono-digito.sql`.
+
+As provas são a **seção 79**; com o laço antigo, 6 das 11 conferências reprovam.
+
 ## Os scripts que se aplicam sozinhos
 
 Até 14/09, **toda** mudança de banco foi rodada à mão: 55 arquivos em `sql/`,
@@ -2769,7 +2805,8 @@ inteira, na ordem — rodar o 004 sozinho depois do 006 desfaz a espera.
 
 **Ficou de fora, de propósito:** a reação e o envio para grupo com `@g.us`
 (depende de como a Uazapi responde — medir com um grupo de verdade); os
-avisos de audiência sem as variantes do nono dígito; o `/anexos/resgatar`
+avisos de audiência sem as variantes do nono dígito (feito em 27/10: ver "O
+aviso de audiência vai para o contato que já existe"); o `/anexos/resgatar`
 pedindo mais de 1000 linhas.
 
 Prova: seção 57 (10 conferências) e a seção da busca do advogado refeita em
