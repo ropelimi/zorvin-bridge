@@ -2958,7 +2958,10 @@ e toda conta que pergunta *"a equipe já agiu?"* o lia como gente respondendo:
 conversa fora da fila só por causa do aviso; 6 protocolos com um aviso como
 primeira resposta. E um protocolo foi **aberto** por um aviso — já está
 finalizado, e o 037 não mexe nele: protocolo que muda de número deixa de ser
-protocolo.
+protocolo. **Dos 6, 3 continuam abertos, e os 3 já têm resposta de gente
+depois do aviso**: nenhuma conversa muda de aba com o 037. O que muda é o
+tempo até a primeira resposta na contabilização, e a conversa que volta para
+a fila de espera.
 
 O 037 cria `mensagens.automatica` (padrão falso), marca as linhas que já
 existem pelo item da fila que as mandou (mesma conversa, mesmo texto, sem
