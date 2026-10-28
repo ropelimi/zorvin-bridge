@@ -3069,8 +3069,36 @@ conferência reprovava dizendo "a junção não reconta", sobre uma junção que
 aconteceu. Hoje ela diz também o status da resposta.
 
 Provas: seção 82 (o 037 e o 038 num Postgres de verdade, **com o defeito
-conferido antes do conserto**, 28 conferências) e seção 83 (a ponte, 44
-conferências).
+conferido antes do conserto**, 28 conferências) e seção 83 (a ponte, 45
+conferências). **28 sabotagens, 27 pegas e uma que vaza com razão**, todas
+rodadas em cópias e lidas uma a uma:
+
+- **os avisos:** o tropeço nos telefones e a conversa que falha virando
+  `/erro`; sem reconferir o que já está na fila (8 reprovações); a confirmação
+  sem conferir a resposta; o DDD 55 lido como o país; a linha do aviso sem a
+  marca;
+- **quem sai do Vantoro:** quem sai fica; o desligamento sem bloquear a
+  entrada; quem volta não volta; sem a trava; a entrada que não tira o
+  bloqueio;
+- **o resto:** a senha por extenso no histórico; o preso com eco saindo de
+  novo; o eco entre os mais antigos; o eco sem o mais perto; a junção sem
+  recontar a espera; o login gigante; o nome do arquivo sem `semAEtiqueta`; o
+  aviso dito como "Equipe";
+- **o 037 e o 038:** sem marcar as que existem; o gatilho da espera e as
+  funções da situação sem a guarda; a primeira resposta não corrigida; sem
+  recontar a espera; a recontagem contando o aviso; sem o gatilho das senhas;
+  sem esconder as que existem;
+- **e a que vaza:** calar o `23505` em vez de reconferir. A cópia recusada é a
+  outra ponte enfileirando o mesmo aviso no mesmo segundo: o item acabou de
+  entrar, não há desfecho a dizer, e a conferência do começo do laço o pega na
+  rodada seguinte. O trecho foi SIMPLIFICADO para o `continue` — a régua de
+  25/09, *sabotagem que o resto do sistema conserta sozinho não prova nada*.
+
+**E uma vazou primeiro, e a culpa era da cena:** tirar a ordem "o mais perto
+do eco primeiro" passava, porque a cena só tinha UM item com o texto do eco.
+Entrou o caso que a ordem existe para separar: dois "pode ser amanhã?" na
+janela, e o mais novo pela criação não é o que saiu mais perto da hora do eco
+(o mais velho foi tentado de novo há um minuto e meio). Hoje ela é pega.
 
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 

@@ -10350,7 +10350,10 @@ async function buscarAvisosDeAudiencia() {
       if (filaErro) {
         // A CÓPIA RECUSADA é a outra ponte, nos segundos de uma publicação,
         // tendo enfileirado o mesmo aviso agora: ele está na fila, e é dela.
-        if (filaErro.code === '23505') { await reconferirAvisoNaFila(aviso.id); continue; }
+        // Não há desfecho a dizer — ele acabou de entrar —, e quem o diz é a
+        // conferência do começo do laço, na rodada seguinte. Só não é "não
+        // consegui pôr na fila", que é o que `adiarAviso` diria.
+        if (filaErro.code === '23505') continue;
         adiarAviso(aviso.id, 'pôr o aviso na fila', filaErro);
         continue;
       }

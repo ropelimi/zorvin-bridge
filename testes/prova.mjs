@@ -14928,6 +14928,15 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
                 criado_em: ha(1500), enviando_em: ha(1500) });
     fila.push({ id: "alvo", conversa_id: 1, tipo: "texto", texto: "ok, combinado", status: "erro", tentativas: 1,
                 criado_em: ha(120), enviando_em: ha(120) });
+    // E O MAIS PERTO NÃO É O MAIS NOVO: o "pode ser amanhã?" de 20 minutos
+    // atrás foi tentado de novo há um minuto e meio; o outro, igual, nasceu há
+    // 10 minutos e não foi tentado desde então. O eco de agora é da segunda
+    // tentativa do mais velho — e, pela ordem da leitura, o mais novo vem
+    // primeiro.
+    fila.push({ id: "tentado-agora", conversa_id: 1, tipo: "texto", texto: "pode ser amanhã?", status: "erro", tentativas: 2,
+                criado_em: ha(1200), enviando_em: ha(90) });
+    fila.push({ id: "criado-depois", conversa_id: 1, tipo: "texto", texto: "pode ser amanhã?", status: "erro", tentativas: 1,
+                criado_em: ha(600), enviando_em: ha(600) });
     const t = await subirTudo({}, { tabelas: {
       contatos: [{ id: 1, numero: CLIENTE, nome: "Cliente" }],
       conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }],
@@ -14944,6 +14953,16 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     ok("com 60 envios antigos na conversa, o eco ainda acha o item de agora", item("alvo").status === "enviada", JSON.stringify(item("alvo")));
     ok("e é o mais perto da hora do eco, e não o dispensado de antes, que fica com ele",
        item("alvo-velho").status === "descartada", JSON.stringify(item("alvo-velho")));
+    await fetch(`http://127.0.0.1:${t.porta}/webhook`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ EventType: "messages", owner: TELEFONE.numero,
+        chat: { phone: CLIENTE, id: `${CLIENTE}@s.whatsapp.net`, wa_name: "Cliente" },
+        message: { messageid: "ECO-K2", id: "ECO-K2", chatid: `${CLIENTE}@s.whatsapp.net`, fromMe: true, wasSentByApi: true,
+                   type: "text", messageType: "ExtendedTextMessage", text: "pode ser amanhã?", content: { text: "pode ser amanhã?" },
+                   messageTimestamp: Date.now() - 60e3 } }) });
+    await esperarAte(() => item("tentado-agora").status === "enviada" || item("criado-depois").status === "enviada", 4000);
+    ok("dois iguais na janela: o eco fica com o que saiu mais perto da hora dele, e não com o mais novo",
+       item("tentado-agora").status === "enviada" && item("criado-depois").status === "erro",
+       JSON.stringify({ tentado: item("tentado-agora").status, depois: item("criado-depois").status }));
     await t.parar();
   }
 
