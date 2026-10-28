@@ -67,6 +67,9 @@ Variáveis de ambiente (no Render):
 - `ANEXO_TETO_MB` — acima de quantos MB um anexo recebido não é baixado.
   **Opcional**, padrão 50, que é o que a memória da ponte aguenta com folga.
   Ver "A memória da ponte", abaixo.
+- `PERMISSOES_INTERVALO_MS` e `PERMISSOES_PRIMEIRA_MS` — de quanto em quanto
+  a rodada das permissões roda (padrão 3 min) e quando é a primeira (20 s
+  depois de subir). **Opcionais**, para a bancada. Ver "A auditoria de 27/10".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -2911,6 +2914,163 @@ pedindo mais de 1000 linhas.
 
 Prova: seção 57 (10 conferências) e a seção da busca do advogado refeita em
 duas cenas (com e sem a caixa), **5 sabotagens e 5 pegas**.
+
+## A auditoria de 27/10 (28/10)
+
+Pedido do Rodrigo: *"Faça uma auditoria completa, analise todos os arquivos,
+encontre possíveis erros, faça os ajustes necessários, me dê sugestões de
+melhorias"*. Sete leituras em paralelo (o painel em três pedaços, os
+componentes, a ponte em dois e os scripts SQL), e **cada achado conferido no
+código, e quando possível medido no banco, antes de mexer**. A lista inteira
+está na PR; aqui fica o que mudou na ponte, e por quê. A do painel está no
+CLAUDE.md dele.
+
+### Os avisos de audiência: um tropeço não é o desfecho
+
+O Vantoro tira um aviso da lista de pendentes quando ouve `/enviado` ou
+`/erro` — **e lá o ERRO é o fim**: o aviso não volta para a fila. Três coisas
+erravam isso:
+
+| o que acontecia | agora |
+|---|---|
+| um tropeço do banco no meio do caminho (ler os telefones, achar o contato, abrir a conversa, gravar na fila) virava `/erro`: o cliente ficava sem saber da audiência por causa de um segundo ruim | **adia** (`adiarAviso`): o aviso continua pendente lá, e a rodada seguinte (5 min) tenta de novo. `/erro` fica para o que não muda sozinho: o cliente sem número, o telefone que o Zorvin não tem, a linha desativada |
+| `/enviado` e `/erro` eram mandados sem olhar a resposta: o Vantoro que tossia na confirmação deixava o aviso pendente para sempre — e a ponte tentava enfileirá-lo de novo a cada 5 minutos, o banco recusava (`23505`, o índice único de `aviso_vantoro_id`) e o log ganhava uma linha de "duplicate key" por rodada | **a lista de pendentes reconcilia** (`reconferirAvisoNaFila`): o aviso que já está na fila tem o desfecho dito de novo — saiu, `/enviado`; falhou, foi dispensado ou cancelado, `/erro` com o motivo. O que ainda está saindo fica quieto. A confirmação só diz "confirmado" no 2xx (`confirmarAvisoNoVantoro`) |
+| `numeroComPais` lia "começa com 55" como "já tem o país" — e **55 é o DDD de Santa Maria** e do centro do RS: o celular (55) 99999-8888 virava um número que não existe | pelo **tamanho**: 10 ou 11 dígitos ganham o 55; 12 ou 13 já o têm |
+
+**O cliente não recebe duas vezes** em nenhum desses caminhos: reconferir
+não põe nada na fila de novo, e a confirmação repetida é só uma chamada ao
+Vantoro (`marcar_enviado` lá aceita vir depois).
+
+### A linha do aviso é marcada como automática (script 037)
+
+`sql/automaticos/037-o-aviso-automatico-nao-e-atendimento.sql`. O aviso entra
+em `mensagens` como mensagem do escritório (`origem = 'advogado'`, sem autor),
+e toda conta que pergunta *"a equipe já agiu?"* o lia como gente respondendo:
+
+- **a fila de espera** (004–006, 020): o cliente que tinha perguntado algo
+  saía da fila quando o aviso saía, sem ninguém ter respondido;
+- **a situação e o protocolo** (028): o aviso virava a primeira resposta do
+  atendimento e tirava a conversa de "Novos";
+- por tabela, **a contabilização** (029): o tempo até a primeira resposta era
+  o do aviso.
+
+**Medido em 28/10, só contando:** 38 avisos desde 13/08, em 14 conversas; uma
+conversa fora da fila só por causa do aviso; 6 protocolos com um aviso como
+primeira resposta. E um protocolo foi **aberto** por um aviso — já está
+finalizado, e o 037 não mexe nele: protocolo que muda de número deixa de ser
+protocolo.
+
+O 037 cria `mensagens.automatica` (padrão falso), marca as linhas que já
+existem pelo item da fila que as mandou (mesma conversa, mesmo texto, sem
+autor, até 10 minutos da hora do envio), tira a mensagem automática das
+contas de "a equipe agiu" (o gatilho da espera, a recontagem e as cinco
+funções da situação — **são as versões de referência daqui para a frente**,
+regra 5 do LEIA-ME), corrige a primeira resposta dos 6 protocolos e reconta
+as conversas com aviso. **A ponte marca a linha nova ao gravá-la**
+(`gravarEnviadaNoHistorico`: `automatica = true` quando o item tem
+`aviso_vantoro_id`).
+
+**O que não muda, e é decisão:** a origem continua `'advogado'` — a bolha, o
+lado dela, a resposta do cliente ao aviso (26/10) e o Controle de atendimento
+do Vantoro leem a origem, e o aviso continua sendo do escritório; a resposta
+fora do horário (022) continua contando o aviso como conversa em andamento
+(responder "estamos fechados" ao "ok, ciente" seria pior do que calar); e a
+distribuição (023) continua sem distribuir quem responde a um aviso — é
+cliente que o escritório procurou, e não um lead. **A conversa que só tem o
+aviso** fica em "Em Atendimento", sem protocolo; quando o cliente responde, o
+protocolo é dele e ela vai para "Novos".
+
+### Quem é desligado no Vantoro sai do Zorvin
+
+O Vantoro lista em `/usuarios` só quem tem acesso ativo — quem foi desligado
+**some da lista**. E a rodada das permissões só percorria a lista: quem sumiu
+nunca era visitado, continuava com as permissões, e a sessão do Zorvin se
+renova sozinha. **O Vantoro recusa a senha de quem saiu; a sessão aberta,
+não.**
+
+Hoje, ao fim da rodada (`desligarQuemSaiuDoVantoro`), quem estava ativo no
+Zorvin e não está na lista é **desligado**: `ativo` falso (a marca que as
+regras do banco e a distribuição já leem), as permissões saem, e a conta é
+**bloqueada no Auth** (`ban_duration`) — sem isso a sessão aberta continuaria
+se renovando. **Quem volta à lista, volta**: ativa e desbloqueada, e com as
+permissões na rodada seguinte; entrando antes disso, a própria entrada tira o
+bloqueio (`/auth/login` lê como a pessoa estava antes de espelhá-la).
+
+**A trava:** lista vazia, ou mais de `max(3, 20%)` das contas ativas sumindo
+de uma vez, **não desliga ninguém**, e o log diz uma vez. Isso é o Vantoro
+respondendo errado (outro endereço, um defeito lá), e não meio escritório
+demitido no mesmo minuto — desligar por engano é a equipe inteira sem entrar.
+
+**Medido em 28/10, antes de publicar** (impressões digitais md5 do login e do
+e-mail nos dois bancos, sem ler nome de ninguém): **as 23 contas do Zorvin
+casam, todas, com alguém ativo no Vantoro.** A primeira rodada depois da
+publicação não desliga ninguém. **Só vale com Vantoro**: sem
+`VANTORO_API_URL`, a rodada nem começa.
+
+Duas variáveis **opcionais**, para a bancada encurtar a rodada:
+`PERMISSOES_INTERVALO_MS` (padrão 3 min) e `PERMISSOES_PRIMEIRA_MS` (a
+primeira, 20 s depois de subir).
+
+### As senhas saem do histórico de alterações (script 038)
+
+O histórico de alterações do cadastro (`alteracoes`, `tipo = 'cadastro'`)
+guardava o "de → para" de cada campo da ficha — **a Senha SERASA e a Senha GOV
+inclusive, por extenso**, numa tabela que quem entrou lê. **Medido: 59
+linhas.** `sql/automaticos/038-as-senhas-fora-do-historico.sql` esconde as que
+existem (`••••••`) e põe um gatilho que esconde as que chegam, de quem quer que
+as escreva; **a ponte também esconde ao gravar** (`registrarEdicaoDeCadastro`).
+A linha fica — quem trocou, e quando —, e a conta de "mudou?" é feita com o
+valor de verdade, antes de esconder.
+
+### E o resto
+
+| o que acontecia | agora |
+|---|---|
+| o item preso em "enviando" voltava à fila depois de 5 minutos — **mesmo com o eco do WhatsApp provando que saiu** (a ponte caiu no meio do envio, e a nova anotou o eco): o cliente recebia duas vezes | a recuperação confere a anotação do eco (`tirarEcoDoQueEstaSaindo`) e confirma pelo eco; só volta para a fila o que não tem eco |
+| o eco do envio procurava o item entre os **50 mais antigos** dos dois dias: numa conversa de muito vaivém, o item de agora ficava de fora | os 50 **mais recentes**, e o mais perto da hora do eco primeiro (`distanciaDoEco`) — dois "ok" na janela, o dono é o que saiu mais perto |
+| juntar conversas recontava a situação e não a **espera**: a pergunta sem resposta que veio da outra conversa ficava fora da fila | `zorvin_recontar_espera` antes da situação (na ordem contrária, a espera recontada depois poria a finalizada de volta na fila) |
+| um "usuário" de megas ia inteiro para o log, para a memória do freio e para o Vantoro | 400 acima de 200 caracteres de login ou 500 de senha, antes do log |
+| o copiloto: o nome do arquivo ia sem `semAEtiqueta` (um `</conversa>` no nome fecharia o bloco), e o aviso chegava ao modelo como "Equipe" | as duas consertadas: o nome passa pela mesma limpeza do texto, e o aviso é dito "Aviso automático do escritório" |
+
+### O que ficou como sugestão, e por quê
+
+- **juntar conversas apaga em cascata** os protocolos, as respostas
+  automáticas e as distribuições da conversa que sai — o 036 decidiu igual, e a
+  rota não tem botão no painel; mudar é decisão;
+- **a classificação semanal** troca o vínculo escolhido à mão quando o Vantoro
+  acha outra pessoa pelo número;
+- `/transcrever` baixa o áudio inteiro, de qualquer tamanho;
+- `contatoDoAviso` desempata pela última atividade, que conta os próprios
+  avisos;
+- o "desligado até reiniciar" de um recurso pode ser decidido no meio da
+  rodada de scripts que o cria;
+- `/importar-historico` grava o endereço temporário da Uazapi quando o download
+  falha; `juntarConversasDoGrupo` roda em toda mensagem de grupo;
+  `fetchComTimeout` só cobre os cabeçalhos; a resposta automática acima de 30
+  segundos vira "não saiu";
+- nos scripts: a finalizada pode voltar para a fila com uma mensagem atrasada
+  ou importada (o 028 só grava `tratada_em` quando havia espera); o banco
+  aceita um `quando` escrito por quem grava o "Já tratei" (o painel não manda,
+  e o 020 só força o `quem`); e, sem Vantoro, duas primeiras contas criadas no
+  mesmo instante nascem as duas administradoras (o 001).
+
+### A bancada
+
+`falso-supabase.mjs` aprendeu `mensagens.automatica` e `fila_envio.erro_detalhe`
+(a bancada recusa a coluna que não conhece, como o banco); o Vantoro de mentira
+ganhou `pendentesAteODesfecho` (a lista guarda o aviso até ouvir `/enviado` ou
+`/erro`, como o de verdade), `desfechosQueFalham` (um 500 de verdade na
+confirmação) e `ficha` (o `GET /clientes/:id`).
+
+**E uma conferência minha estava errada, e a prova mostrou.** Na cena da
+junção, a pessoa que pedia não era administradora ali (os ids da cena são
+UUID, e as contas de mentira de sempre, não), e a ponte recusou com razão. A
+conferência reprovava dizendo "a junção não reconta", sobre uma junção que nem
+aconteceu. Hoje ela diz também o status da resposta.
+
+Provas: seção 82 (o 037 e o 038 num Postgres de verdade, **com o defeito
+conferido antes do conserto**, 28 conferências) e seção 83 (a ponte, 44
+conferências).
 
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 

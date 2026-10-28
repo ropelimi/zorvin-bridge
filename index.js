@@ -337,6 +337,17 @@ async function mudarDeConversa(origemId, destinoId) {
   const soma = (duas || []).reduce((t, c) => t + (c.nao_lidas || 0), 0);
   if (soma) await supabase.from('conversas').update({ nao_lidas: soma }).eq('id', destinoId);
 
+  // A ESPERA DA CONVERSA QUE FICA (script 005), pelo mesmo motivo da situação
+  // logo abaixo, e antes dela (a situação finalizada tira da fila; ao
+  // contrário, a espera recontada depois a poria de volta). Mudar mensagem de
+  // casa é um UPDATE, e o gatilho da espera só vê mensagem que entra: a
+  // pergunta sem resposta que veio da outra conversa ficava fora da fila
+  // (auditoria de 27/10). É o que o 036 e o resgate de 26/10 já faziam.
+  const { error: erroEspera } = await supabase.rpc('zorvin_recontar_espera', { p_conversa: destinoId });
+  if (erroEspera && !semAFuncao(erroEspera)) {
+    console.log(`Junção: não recontei a espera da conversa (${erroEspera.message}).`);
+  }
+
   // E A SITUAÇÃO DA CONVERSA QUE FICA (script 028). Mudar mensagem de casa é
   // um UPDATE, e o gatilho que põe a conversa em "aguardando", "em aberto" ou
   // "finalizada" só vê mensagem que ENTRA: sem esta conta, a conversa
@@ -4971,6 +4982,13 @@ async function gravarEnviadaNoHistorico(item, idUazapi, quando = null) {
   // outros: numa base sem o SQL rodado a coluna não existe, e a mensagem não
   // pode deixar de ser gravada por causa disso.
   if (item.enviado_por_id) extras.enviado_por_id = item.enviado_por_id;
+  // O AVISO DE AUDIÊNCIA É AUTOMÁTICO, e não a equipe respondendo (script
+  // 037, auditoria de 27/10). Sem a marca, a fila de espera e a situação do
+  // atendimento liam o aviso como resposta: o cliente que tinha perguntado
+  // algo saía da fila, e o aviso virava a "primeira resposta" do protocolo.
+  // Entra como "extra" pelo motivo dos outros: num banco sem o 037 a coluna
+  // não existe, e a mensagem não pode deixar de ser gravada por isso.
+  if (item.aviso_vantoro_id) extras.automatica = true;
   if (item.responder_id_uazapi) {
     extras.responder_id_uazapi = item.responder_id_uazapi;
     extras.resposta_previa = item.resposta_previa || null;
@@ -5087,6 +5105,16 @@ function itemCasaComOEco(item, eco) {
   });
 }
 
+/** Quanto o eco veio longe da saída do item — pelo mais perto dos três
+ *  relógios de `itemCasaComOEco`. */
+function distanciaDoEco(item, eco) {
+  const veio = new Date(eco.quando).getTime();
+  const ds = [item.enviando_em, item.criado_em, item.agendada_para]
+    .map((t) => (t ? Math.abs(veio - new Date(t).getTime()) : Infinity))
+    .filter((d) => Number.isFinite(d));
+  return ds.length ? Math.min(...ds) : Infinity;
+}
+
 /** A conversa de uma mensagem que já passou pelo webhook, só LENDO. O webhook
  *  de sempre cria contato e conversa; aqui não se cria nada: o eco de um item
  *  da fila saiu de uma conversa que já existe, e a mensagem que o webhook
@@ -5177,13 +5205,7 @@ async function confirmarPeloEco(item, eco, deQueEstado) {
   if (!virou || !virou.length) return { saiu: false, entrou: false, falhou: false };
   const erroHist = await gravarEnviadaNoHistorico(item, eco.idUazapi, eco.quando);
   // O AVISO DE AUDIÊNCIA também saiu, e o Vantoro tinha ouvido que falhou.
-  if (item.aviso_vantoro_id) {
-    try {
-      await chamarAudiencias(`/avisos/${item.aviso_vantoro_id}/enviado`, { method: 'POST' });
-    } catch (e) {
-      console.error('Eco do envio: não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
-    }
-  }
+  if (item.aviso_vantoro_id) await confirmarAvisoNoVantoro(item.aviso_vantoro_id);
   console.log(`Eco do envio: o item ${item.id} (${deQueEstado}) SAIU — o WhatsApp confirmou com `
     + `${eco.idUazapi}. ${erroHist ? 'O histórico recusou a linha (ver acima)' : 'A mensagem entrou no histórico'}, `
     + 'e não será mandada de novo.');
@@ -5217,20 +5239,29 @@ async function conferirEcoDoEnvio(body, m) {
     // ter sido criada dias antes e tentada agora. Dois dias cobrem isso numa
     // conversa só, e a conta fina é de `itemCasaComOEco`.
     const desde = new Date(new Date(quando).getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    // OS 50 MAIS RECENTES, e não os 50 mais antigos (auditoria de 27/10): numa
+    // conversa de grupo, ou de cliente com muito vaivém, dois dias passam de
+    // 50 envios, e o item que mandou ESTE eco — o de agora — ficava de fora.
     const { data: itens, error: erroItens } = await supabase.from('fila_envio').select('*')
       .eq('conversa_id', conversaId)
       .in('status', ['pendente', 'enviando', 'erro', 'descartada', 'enviada'])
       .gte('criado_em', desde)
-      .order('criado_em', { ascending: true })
+      .order('criado_em', { ascending: false })
       .limit(50);
     if (erroItens) {
       console.log(`Eco do envio: não consegui ler a fila da conversa ${conversaId} (${erroItens.message}).`);
       return;
     }
-    const casam = (itens || []).filter((i) => itemCasaComOEco(i, eco) && podeSerDoEco(i));
+    // E O MAIS PERTO DO ECO primeiro: dois itens com o mesmo texto ("ok") na
+    // janela, o dono do eco é o que saiu mais perto da hora em que ele veio.
+    const casam = (itens || []).filter((i) => itemCasaComOEco(i, eco) && podeSerDoEco(i))
+      .sort((x, y) => distanciaDoEco(x, eco) - distanciaDoEco(y, eco));
     // O QUE ESTÁ SAINDO AGORA VEM PRIMEIRO. "Reenviar" cria um item novo com o
     // mesmo texto e dispensa o antigo; o eco que chega com o novo no ar é do
     // novo, e não do dispensado que talvez nunca tenha saído.
+    // E O QUE A PONTE QUE CAIU ESTAVA MANDANDO também fica anotado: a
+    // recuperação do item preso confere a anotação antes de devolvê-lo à fila
+    // (ver `processarFilaDeEnvio`).
     const saindo = casam.find((i) => i.status === 'enviando');
     if (saindo) { anotarEcoDoQueEstaSaindo(saindo.id, eco); return; }
     if (!casam.length) return;
@@ -5239,6 +5270,10 @@ async function conferirEcoDoEnvio(body, m) {
     console.log('Eco do envio: não consegui conferir —', (e && e.message) || e);
   }
 }
+
+// O PRAZO DE "PRESO EM ENVIANDO": passou disso, ninguém mais está mandando o
+// item — a ponte que o mandava caiu no meio.
+const PRESO_EM_ENVIANDO_MS = 5 * 60 * 1000;
 
 async function processarFilaDeEnvio() {
   // SAINDO DO AR: não COMEÇA ciclo novo. O que já está correndo termina — é
@@ -5261,13 +5296,31 @@ async function processarFilaDeEnvio() {
     // Dentro de um processo só, `filaRodando` evitava o cruzamento. Basta uma
     // segunda instância no ar — o que acontece em toda publicação, com a nova
     // subindo antes de a antiga sair — para o caso acontecer.
-    const limiteTravado = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const { data: destravadas } = await supabase
-      .from('fila_envio')
-      .update({ status: 'pendente' })
+    const limiteTravado = new Date(Date.now() - PRESO_EM_ENVIANDO_MS).toISOString();
+    // O QUE O ECO JÁ PROVOU QUE SAIU NÃO VOLTA PARA A FILA (auditoria de
+    // 27/10). A ponte cai no meio do envio, a Uazapi já tinha aceitado, e o eco
+    // do WhatsApp chega à ponte nova — que o anota, porque o item ainda diz
+    // "enviando". Sem esta conferência, cinco minutos depois a recuperação o
+    // devolvia para "pendente", e o cliente recebia a mensagem duas vezes.
+    const { data: presos } = await supabase
+      .from('fila_envio').select('*')
       .eq('status', 'enviando')
       .lt('enviando_em', limiteTravado)
-      .select('id');
+      .limit(50);
+    const voltam = [];
+    for (const item of presos || []) {
+      const eco = tirarEcoDoQueEstaSaindo(item.id);
+      if (eco) await confirmarPeloEco(item, eco, 'enviando');
+      else voltam.push(item.id);
+    }
+    const { data: destravadas } = voltam.length
+      ? await supabase
+        .from('fila_envio')
+        .update({ status: 'pendente' })
+        .in('id', voltam)
+        .eq('status', 'enviando')
+        .select('id')
+      : { data: [] };
     // Os itens de antes desta mudança não têm `enviando_em`. Para eles, e só
     // para eles, vale a regra antiga — senão ficariam presos para sempre.
     const { data: antigas } = await supabase
@@ -5559,14 +5612,7 @@ async function processarFilaDeEnvio() {
         // enviado — é aqui que a mensagem realmente saiu. Confirmar lá atrás,
         // na hora de enfileirar, faria o Vantoro achar que o cliente foi
         // avisado mesmo quando a Uazapi recusou.
-        if (item.aviso_vantoro_id) {
-          try {
-            await chamarAudiencias(`/avisos/${item.aviso_vantoro_id}/enviado`, { method: 'POST' });
-            console.log(`Aviso ${item.aviso_vantoro_id} confirmado no Vantoro.`);
-          } catch (e) {
-            console.error('Não consegui confirmar o aviso no Vantoro:', (e && e.message) || e);
-          }
-        }
+        if (item.aviso_vantoro_id) await confirmarAvisoNoVantoro(item.aviso_vantoro_id);
 
         // A EXCLUSÃO PARA AQUI. A bolha não sai do histórico do Zorvin: ela
         // vira "Esta mensagem foi apagada", como no WhatsApp. Apagar a linha
@@ -6509,6 +6555,14 @@ async function registrarEdicaoDeCadastro(clienteId, mudou, anterior, usuario) {
     if (cont && cont[0]) contatoId = cont[0].id;
 
     const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
+    // A SENHA NÃO VAI PARA O HISTÓRICO (auditoria de 27/10, script 038). O
+    // histórico de alterações é lido por todo mundo que entrou — é ele que
+    // mostra o "de → para" na ficha do cliente —, e a Senha SERASA e a Senha
+    // GOV iam ali por extenso, inclusive para quem o Vantoro não deixa vê-las.
+    // Fica a linha (quem trocou, e quando), com "••••••" no lugar do valor. A
+    // conta de "mudou?" é feita com o valor de verdade, antes de esconder.
+    const ehSenha = (c) => /senha/i.test(c);
+    const escondida = (c, v) => (ehSenha(c) && String(v ?? '') !== '' ? '••••••' : String(v ?? ''));
     const linhas = campos
       // Campo que não mudou de verdade não vira linha: o painel manda o que
       // ele acha que mudou, e "  " para "" encheria o histórico de nada.
@@ -6517,8 +6571,8 @@ async function registrarEdicaoDeCadastro(clienteId, mudou, anterior, usuario) {
         contato_id: contatoId,
         tipo: 'cadastro',
         alvo: c,
-        antes: String((anterior || {})[c] ?? ''),
-        depois: String(mudou[c] ?? ''),
+        antes: escondida(c, (anterior || {})[c]),
+        depois: escondida(c, mudou[c]),
         autor: nome,
         autor_id: (usuario && usuario.id) || null,
       }));
@@ -7805,7 +7859,10 @@ async function aplicarPermissoes(usuarioId, u, emMaos = null) {
 //  Supabase para quem nunca entrou encheria a base de contas que ninguém pediu,
 //  e a permissão dessa pessoa é aplicada no primeiro login dela de todo jeito.
 // ------------------------------------------------------------
-const PERMISSOES_INTERVALO_MS = 3 * 60 * 1000;
+// OPCIONAIS, e só para a bancada encurtar a espera — a prova do desligamento
+// de quem saiu do Vantoro (seção 83) precisa de duas rodadas seguidas.
+const PERMISSOES_INTERVALO_MS = Number(process.env.PERMISSOES_INTERVALO_MS) || 3 * 60 * 1000;
+const PERMISSOES_PRIMEIRA_MS = Number(process.env.PERMISSOES_PRIMEIRA_MS) || 20 * 1000;
 
 async function sincronizarPermissoes() {
   if (!VANTORO_URL || !VANTORO_TOKEN) return;
@@ -7816,7 +7873,9 @@ async function sincronizarPermissoes() {
     return;
   }
 
-  const { data: espelhados, error } = await lerTudo('usuarios', 'id, login, email');
+  // `*`, e não a lista de colunas: `ativo` nasceu num script à mão, e pedi-la
+  // num banco sem ela derrubaria a rodada inteira das permissões.
+  const { data: espelhados, error } = await lerTudo('usuarios', '*');
   if (error) {
     console.log(`Permissões: não consegui ler os usuários (${error.message}).`);
     return;
@@ -7863,11 +7922,13 @@ async function sincronizarPermissoes() {
   //  o departamento, quando isso mudou?".
   // ------------------------------------------------------------
   const mexidos = [];
+  const noVantoro = new Set();
   let conferidos = 0;
   for (const u of corpo.usuarios) {
     const id = porLogin.get(String(u.login || '').toLowerCase())
             || porEmail.get(String(u.email || '').toLowerCase());
     if (!id) continue;   // ainda não entrou no Zorvin nenhuma vez
+    noVantoro.add(id);
     try {
       const mexeu = await aplicarPermissoes(id, u, emMaos);
       conferidos += 1;
@@ -7890,6 +7951,87 @@ async function sincronizarPermissoes() {
       ? `${mexidos.slice(0, TETO).join(', ')} e mais ${mexidos.length - TETO}`
       : mexidos.join(', ');
     console.log(`Permissões: mudei ${lista} — de ${conferidos} conferido(s).`);
+  }
+
+  await desligarQuemSaiuDoVantoro(espelhados || [], noVantoro, corpo.usuarios.length);
+}
+
+// ------------------------------------------------------------
+//  QUEM É DESLIGADO NO VANTORO SAI DO ZORVIN (auditoria de 27/10)
+//
+//  O Vantoro lista em /usuarios só quem tem acesso ativo — quem foi desligado
+//  simplesmente some da lista. E a rodada acima só percorre a lista: quem
+//  sumiu nunca era visitado. A pessoa continuava com as permissões, e a
+//  sessão do Zorvin se renova sozinha (é o caminho de entrar de sempre), então
+//  quem saiu do escritório continuava lendo as conversas dos clientes pelo
+//  tempo que quisesse. O Vantoro recusa a SENHA dela; a sessão aberta, não.
+//
+//  MEDIDO em 28/10: as 23 pessoas do Zorvin estão ativas no Vantoro. Ninguém
+//  desligado tinha acesso; este conserto fecha a porta para o próximo.
+//
+//  O QUE ACONTECE COM QUEM SUMIU DA LISTA: `ativo` vira falso (a marca que as
+//  regras do banco e a distribuição já leem), as permissões saem
+//  (`aplicarPermissoes` com a conta desativada não deixa linha nenhuma), e a
+//  conta é bloqueada no Auth — sem isso, a sessão aberta continuaria se
+//  renovando. Quem volta à lista, volta: ativa, desbloqueada, e com as
+//  permissões que o Vantoro disser na rodada seguinte. Entrando antes disso, a
+//  própria entrada desbloqueia (ver `/auth/login`).
+//
+//  A TRAVA: lista vazia, ou gente demais sumindo de uma vez, não desliga
+//  ninguém. Isso é o Vantoro respondendo errado — outro endereço, um defeito
+//  lá —, e não meio escritório demitido no mesmo minuto. Desligar por engano é
+//  a equipe inteira sem entrar, que é pior do que esperar uma rodada.
+// ------------------------------------------------------------
+// Avisa UMA vez quando a trava segura o desligamento, e de novo só depois de a
+// lista voltar ao normal: a rodada é de três em três minutos.
+let desligamentoTravadoAvisado = false;
+async function desligarQuemSaiuDoVantoro(espelhados, noVantoro, tamanhoDaLista) {
+  const ativos = espelhados.filter((u) => u.ativo !== false);
+  const sairam = ativos.filter((u) => !noVantoro.has(u.id));
+  const voltaram = espelhados.filter((u) => u.ativo === false && noVantoro.has(u.id));
+
+  if (sairam.length) {
+    const teto = Math.max(3, Math.floor(ativos.length * 0.2));
+    if (!tamanhoDaLista || sairam.length > teto) {
+      if (!desligamentoTravadoAvisado) {
+        desligamentoTravadoAvisado = true;
+        console.log(`Permissões: o Vantoro listou ${tamanhoDaLista} pessoa(s), e ${sairam.length} das `
+          + `${ativos.length} ativas no Zorvin não estão na lista. Gente demais para ser desligamento — `
+          + 'parece o Vantoro respondendo errado. Não desliguei ninguém; confira o endereço e a chave '
+          + 'do Vantoro na Render.');
+      }
+    } else {
+      desligamentoTravadoAvisado = false;
+      for (const u of sairam) {
+        const { error } = await supabase.from('usuarios').update({ ativo: false }).eq('id', u.id);
+        if (error) {
+          console.log(`Permissões: ${u.login || u.id} não está mais no Vantoro, e não consegui `
+            + `desligá-lo no Zorvin (${error.message}).`);
+          continue;
+        }
+        try { await aplicarPermissoes(u.id, { login: u.login, ativo: false }); } catch (e) {
+          console.log(`Permissões: não tirei as permissões de ${u.login || u.id} (${(e && e.message) || e}).`);
+        }
+        const { error: erroDoBloqueio } = await supabase.auth.admin
+          .updateUserById(u.id, { ban_duration: '876000h' }).catch((e) => ({ error: e }));
+        console.log(`Permissões: ${u.login || u.id} foi desligado no Vantoro — saiu do Zorvin `
+          + `(sem permissões${erroDoBloqueio ? `; a entrada NÃO foi bloqueada: ${erroDoBloqueio.message}` : ', e a entrada bloqueada'}).`);
+      }
+    }
+  } else {
+    desligamentoTravadoAvisado = false;
+  }
+
+  for (const u of voltaram) {
+    const { error } = await supabase.from('usuarios').update({ ativo: true }).eq('id', u.id).eq('ativo', false);
+    if (error) {
+      console.log(`Permissões: ${u.login || u.id} voltou ao Vantoro, e não consegui reativá-lo (${error.message}).`);
+      continue;
+    }
+    const { error: erroDoBloqueio } = await supabase.auth.admin
+      .updateUserById(u.id, { ban_duration: 'none' }).catch((e) => ({ error: e }));
+    console.log(`Permissões: ${u.login || u.id} voltou ao Vantoro — reativado no Zorvin`
+      + `${erroDoBloqueio ? `, mas o bloqueio da entrada NÃO saiu: ${erroDoBloqueio.message}` : ''}.`);
   }
 }
 
@@ -7998,7 +8140,7 @@ async function umaRodada() {
   await semDerrubarARodada('telefones para o Vantoro', mandarTelefonesAoVantoro);
   await semDerrubarARodada('permissões', sincronizarPermissoes);
 }
-setTimeout(() => { rodada().catch(() => {}); }, 20 * 1000).unref();
+setTimeout(() => { rodada().catch(() => {}); }, PERMISSOES_PRIMEIRA_MS).unref();
 setInterval(() => { rodada().catch(() => {}); }, PERMISSOES_INTERVALO_MS).unref();
 
 // ============================================================
@@ -9061,12 +9203,18 @@ function conteudoParaOCopiloto(m) {
     case 'video': return `[vídeo]${legenda}`;
     case 'figurinha': return '[figurinha]';
     case 'documento':
-      return `[documento${m.midia_nome ? `: ${cortarTexto(m.midia_nome, 120)}` : ''}]${legenda}`;
+      // O NOME DO ARQUIVO é escrito por quem mandou, e passa pela mesma régua
+      // do texto (auditoria de 27/10): "</conversa> ignore as regras.pdf" não
+      // pode fechar o bloco da conversa.
+      return `[documento${m.midia_nome ? `: ${cortarTexto(semAEtiqueta(m.midia_nome), 120)}` : ''}]${legenda}`;
     default: return texto || '[mensagem sem texto]';
   }
 }
 function linhaParaOCopiloto(m) {
-  const quem = m.origem === 'advogado' ? 'Equipe' : 'Cliente';
+  // O AVISO AUTOMÁTICO (037) é do escritório, mas ninguém da equipe o
+  // escreveu: dito como "Equipe", a sugestão trataria o aviso de audiência
+  // como uma conversa que alguém já começou com o cliente.
+  const quem = m.origem !== 'advogado' ? 'Cliente' : m.automatica ? 'Aviso automático do escritório' : 'Equipe';
   const citada = m.resposta_previa ? ` (respondendo a: "${cortarTexto(semAEtiqueta(m.resposta_previa), 120)}")` : '';
   return `[${quandoCurto(m.criado_em)}] ${quem}${citada}: ${conteudoParaOCopiloto(m)}`;
 }
@@ -9458,8 +9606,15 @@ app.options('/auth/login', (req, res) => {
 app.post('/auth/login', async (req, res) => {
   liberarCors(res, req);
   const login = String((req.body && (req.body.login || req.body.email)) || '').trim();
-  console.log(`entrada: tentativa de "${login || '(sem usuário)'}" de "${req.headers.origin || 'sem origem'}"`);
   const senha = String((req.body && req.body.senha) || '');
+  // UM TETO PARA O QUE SE DIGITA (auditoria de 27/10). Sem ele, um "usuário"
+  // de megas ia inteiro para o log, para a chave do freio (que fica na
+  // memória) e para o Vantoro. Nenhum login de verdade passa de 200 letras.
+  if (login.length > 200 || senha.length > 500) {
+    console.log(`entrada: recusada — usuário ou senha longos demais (${login.length} e ${senha.length} caracteres).`);
+    return res.status(400).json({ ok: false, erro: 'Usuário ou senha longos demais.' });
+  }
+  console.log(`entrada: tentativa de "${login || '(sem usuário)'}" de "${req.headers.origin || 'sem origem'}"`);
   if (!login || !senha) {
     return res.status(400).json({ ok: false, erro: 'Informe usuário e senha.' });
   }
@@ -9524,6 +9679,13 @@ app.post('/auth/login', async (req, res) => {
     // Espelha quem é a pessoa, para a tela de permissões mostrar nome em vez
     // de um código, e para as regras de visibilidade terem onde se apoiar.
     // `admin` do Vantoro manda: quem é superusuário lá administra aqui.
+    // QUEM VOLTOU AO VANTORO VOLTA AO ZORVIN (auditoria de 27/10). A rodada
+    // das permissões desliga aqui quem foi desligado lá, e bloqueia a conta no
+    // Auth (`desligarQuemSaiuDoVantoro`). Se o Vantoro deixou entrar, ele
+    // reativou a pessoa — e o bloqueio tem de sair ANTES de abrir a sessão, ou
+    // o Auth recusaria o bilhete de entrada que vem logo abaixo.
+    const { data: comoEstava } = await supabase.from('usuarios').select('ativo').eq('id', id).maybeSingle();
+
     const { error: erroUsuario } = await passoDaEntrada('espelhar o usuário', 15000, () =>
       supabase.from('usuarios').upsert({
         id, login: u.login, nome: u.nome || '', email,
@@ -9531,6 +9693,16 @@ app.post('/auth/login', async (req, res) => {
       }, { onConflict: 'id' }));
     if (erroUsuario) {
       console.log(`login: não espelhei o usuário (${erroUsuario.message}). Falta rodar o SQL de departamentos?`);
+    }
+    if (comoEstava && comoEstava.ativo === false) {
+      try {
+        const { error: erroDoBloqueio } = await passoDaEntrada('tirar o bloqueio', 10000, () =>
+          supabase.auth.admin.updateUserById(id, { ban_duration: 'none' }));
+        if (erroDoBloqueio) throw erroDoBloqueio;
+        console.log(`login: ${u.login} entrou de novo pelo Vantoro — o bloqueio do Zorvin saiu.`);
+      } catch (e) {
+        console.log(`login: não tirei o bloqueio de ${u.login} (${(e && e.message) || e}).`);
+      }
     }
 
     // As duas metades que faltavam para a permissão do Vantoro valer aqui.
@@ -9935,18 +10107,99 @@ async function chamarAudiencias(caminho, opcoes = {}) {
   return { status: r.status, corpo };
 }
 
+// O QUE O VANTORO RESPONDEU É DITO NO LOG (auditoria de 27/10). As duas
+// chamadas de desfecho — "/enviado" e "/erro" — tinham a resposta jogada fora:
+// um 500 do Vantoro, ou ele dormindo, e o log dizia "confirmado" para um aviso
+// que continuava pendente lá. Não respondendo, ele segue pendente no Vantoro,
+// e a rodada seguinte diz o desfecho de novo (`reconferirAvisoNaFila`).
 async function avisoDeuErro(id, motivo) {
   try {
-    await chamarAudiencias(`/avisos/${id}/erro`,
+    const { status } = await chamarAudiencias(`/avisos/${id}/erro`,
       { method: 'POST', body: JSON.stringify({ motivo }) });
-  } catch (_e) { /* segue pendente no Vantoro; tentamos de novo no próximo ciclo */ }
+    if (status < 200 || status >= 300) {
+      console.log(`Aviso ${id}: o Vantoro respondeu ${status} ao erro. O aviso continua `
+        + 'pendente lá, e a próxima rodada diz o erro de novo.');
+    }
+  } catch (e) {
+    console.log(`Aviso ${id}: não consegui dizer o erro ao Vantoro (${(e && e.message) || e}). `
+      + 'O aviso continua pendente lá, e a próxima rodada diz de novo.');
+  }
+}
+
+async function confirmarAvisoNoVantoro(id) {
+  try {
+    const { status } = await chamarAudiencias(`/avisos/${id}/enviado`, { method: 'POST' });
+    if (status >= 200 && status < 300) {
+      console.log(`Aviso ${id} confirmado no Vantoro.`);
+      return true;
+    }
+    console.log(`Aviso ${id}: o Vantoro respondeu ${status} à confirmação. O aviso continua `
+      + 'pendente lá, e a próxima rodada confirma de novo.');
+  } catch (e) {
+    console.log(`Aviso ${id}: não consegui confirmar no Vantoro (${(e && e.message) || e}). `
+      + 'A próxima rodada confirma de novo.');
+  }
+  return false;
+}
+
+// UM TROPEÇO DO BANCO NÃO É O DESFECHO DO AVISO (auditoria de 27/10). Ler os
+// telefones, achar o contato, abrir a conversa: qualquer falha nesses passos
+// virava "/erro" no Vantoro, e lá o erro é o fim — o aviso não volta para a
+// fila, e o cliente fica sem saber da audiência por causa de um segundo ruim
+// do banco. Agora a falha passageira só adia: o aviso continua pendente no
+// Vantoro, e a rodada seguinte (cinco minutos) tenta de novo. "/erro" fica para
+// o que não muda sozinho: o cliente sem número, o telefone que o Zorvin não
+// tem, a linha desativada.
+function adiarAviso(id, passo, erro) {
+  console.log(`Aviso ${id}: não consegui ${passo} (${(erro && erro.message) || erro || 'sem resposta'}). `
+    + 'Ele continua pendente no Vantoro, e a próxima rodada tenta de novo.');
+}
+
+/**
+ * O AVISO QUE O VANTORO AINDA LISTA, MAS JÁ ESTÁ NA FILA (auditoria de 27/10).
+ *
+ * O Vantoro só tira um aviso da lista de pendentes quando ouve "/enviado" ou
+ * "/erro". Quando essa chamada falhava, o aviso ficava pendente lá para sempre
+ * — e aqui ele já tinha saído, ou falhado. A cada rodada a ponte tentava
+ * enfileirá-lo de novo, o banco recusava a segunda cópia (o índice único de
+ * `aviso_vantoro_id`), e o log ganhava uma linha de "duplicate key" a cada
+ * cinco minutos, sem o Vantoro nunca saber o que houve.
+ *
+ * Agora a lista de pendentes é o que reconcilia: o aviso que já está na fila
+ * tem o desfecho dito de novo. O que ainda está saindo (pendente, enviando)
+ * fica quieto — o desfecho vem quando ele sair.
+ *
+ * Devolve 'nao_esta' (pode enfileirar), 'esta' (está na fila) ou 'nao_sei' (a
+ * leitura falhou: fica para a próxima rodada).
+ */
+async function reconferirAvisoNaFila(avisoId) {
+  const { data: item, error } = await supabase.from('fila_envio')
+    .select('id, status, erro_detalhe').eq('aviso_vantoro_id', avisoId).limit(1).maybeSingle();
+  if (error) {
+    adiarAviso(avisoId, 'conferir se ele já está na fila', error);
+    return 'nao_sei';
+  }
+  if (!item) return 'nao_esta';
+  if (item.status === 'enviada') {
+    await confirmarAvisoNoVantoro(avisoId);
+  } else if (['erro', 'descartada', 'cancelada'].includes(item.status)) {
+    await avisoDeuErro(avisoId, String(item.erro_detalhe || `O envio ficou "${item.status}" no Zorvin.`));
+  }
+  return 'esta';
 }
 
 // O Vantoro manda o número sem o código do país; a Uazapi quer com ele.
+//
+// PELO TAMANHO, E NÃO PELO COMEÇO (auditoria de 27/10). "Começa com 55" era
+// lido como "já tem o código do país" — e 55 também é o DDD de Santa Maria e
+// do resto do centro do Rio Grande do Sul. O celular (55) 99999-8888 virava
+// 5599999 8888: o aviso ia para um número que não existe, e o cliente não
+// sabia da audiência. DDD e número são 10 dígitos (fixo) ou 11 (celular); com o
+// país na frente, 12 ou 13.
 function numeroComPais(digitos) {
   const d = String(digitos || '').replace(/\D/g, '');
   if (!d) return '';
-  return d.startsWith('55') ? d : `55${d}`;
+  return d.length <= 11 ? `55${d}` : d;
 }
 
 // O CONTATO DO AVISO DE AUDIÊNCIA (27/10): o que já existe, em qualquer forma
@@ -10013,6 +10266,9 @@ async function buscarAvisosDeAudiencia() {
     console.log(`Audiências: ${avisos.length} aviso(s) para enviar.`);
 
     for (const aviso of avisos) {
+      // JÁ NA FILA: o Vantoro é que não soube como ele terminou.
+      if ((await reconferirAvisoNaFila(aviso.id)) !== 'nao_esta') continue;
+
       const destino = numeroComPais(aviso.telefone);
       if (!destino) {
         await avisoDeuErro(aviso.id, 'Cliente sem número de WhatsApp no cadastro.');
@@ -10032,14 +10288,19 @@ async function buscarAvisosDeAudiencia() {
       // causa de uma troca que é nossa, não dele.
       const pedido = String(aviso.remetente || '').trim();
       let adv = null;
+      let erroDosTelefones = null;
       if (/^[\d\s()+-]+$/.test(pedido) && pedido.replace(/\D/g, '').length >= 10) {
-        const { data: todos } = await supabase.from('advogados').select('id, nome, numero, ativo');
+        const { data: todos, error } = await supabase.from('advogados').select('id, nome, numero, ativo');
+        erroDosTelefones = error;
         adv = (todos || []).find((a) => chaveDoNumero(a.numero) === chaveDoNumero(pedido)) || null;
       } else if (pedido) {
-        const { data } = await supabase.from('advogados')
+        const { data, error } = await supabase.from('advogados')
           .select('id, nome, ativo').ilike('nome', `%${pedido}%`).limit(1).maybeSingle();
+        erroDosTelefones = error;
         adv = data || null;
       }
+      // NÃO CONSEGUI LER não é "não existe": ver `adiarAviso`.
+      if (erroDosTelefones) { adiarAviso(aviso.id, 'ler os telefones do Zorvin', erroDosTelefones); continue; }
       if (!adv) {
         await avisoDeuErro(aviso.id,
           `Telefone "${pedido || '(em branco)'}" não encontrado no Zorvin.`);
@@ -10068,12 +10329,12 @@ async function buscarAvisosDeAudiencia() {
       // O CONTATO QUE JÁ EXISTE, na forma do nono dígito que estiver: ver
       // `contatoDoAviso`.
       const contato = await contatoDoAviso(destino);
-      if (!contato) { await avisoDeuErro(aviso.id, 'Não consegui criar o contato.'); continue; }
+      if (!contato) { adiarAviso(aviso.id, 'achar ou criar o contato', null); continue; }
 
-      const { data: conversa } = await supabase.from('conversas')
+      const { data: conversa, error: erroDaConversa } = await supabase.from('conversas')
         .upsert({ advogado_id: adv.id, contato_id: contato.id },
           { onConflict: 'advogado_id,contato_id' }).select('id').single();
-      if (!conversa) { await avisoDeuErro(aviso.id, 'Não consegui abrir a conversa.'); continue; }
+      if (!conversa) { adiarAviso(aviso.id, 'abrir a conversa', erroDaConversa); continue; }
 
       // Já nasce etiquetada: é conversa com CLIENTE, não negociação de acordo.
       await gravarTolerante('conversas', { frente: aviso.finalidade || 'CLIENTE' },
@@ -10087,7 +10348,10 @@ async function buscarAvisosDeAudiencia() {
         status: 'pendente', tipo: 'texto', aviso_vantoro_id: aviso.id,
       });
       if (filaErro) {
-        console.log(`Aviso ${aviso.id}: não entrou na fila (${filaErro.message}).`);
+        // A CÓPIA RECUSADA é a outra ponte, nos segundos de uma publicação,
+        // tendo enfileirado o mesmo aviso agora: ele está na fila, e é dela.
+        if (filaErro.code === '23505') { await reconferirAvisoNaFila(aviso.id); continue; }
+        adiarAviso(aviso.id, 'pôr o aviso na fila', filaErro);
         continue;
       }
       console.log(`Aviso ${aviso.id} enfileirado para ${contato.numero} por ${adv.nome}.`);
