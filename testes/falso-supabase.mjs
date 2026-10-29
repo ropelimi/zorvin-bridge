@@ -163,7 +163,9 @@ const COLUNAS_DO_BANCO = {
               "midia_segundos", "enviado_por", "enviado_por_id",
               "enviado_por_foto", "apagada", "apagada_pelo_contato", "reacoes",
               "resposta_previa", "resposta_autor", "responder_id_uazapi",
-              "transcricao", "transcrita_em"],
+              "transcricao", "transcrita_em",
+              // O AVISO AUTOMÁTICO (script 037).
+              "automatica"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
           "vantoro_atividade_id", "atualizado_em"],
   advogados: ["id", "nome", "numero", "departamento_id", "foto_url", "ativo", "token"],
@@ -175,7 +177,11 @@ const COLUNAS_DO_BANCO = {
   // linha que as mencione.
   fila_envio: ["id", "conversa_id", "texto", "estado", "criado_em", "enviando_em",
                "tentativas", "erro", "tentar_em", "agendada_para",
-               "status", "aviso_vantoro_id", "enviado_em"],
+               "status", "aviso_vantoro_id", "enviado_em",
+               // O MOTIVO DA FALHA, que existe desde a primeira fila. A conferência
+               // do aviso que já está na fila (auditoria de 27/10) o lê antes de
+               // qualquer linha que o mencione.
+               "erro_detalhe"],
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],
@@ -665,7 +671,20 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // COMO ELE LÊ CADA RESPOSTA: `(corpo) => resposta`. Sem isto, o
                                     // Vantoro de ANTES da leitura da IA — confirmou, e sem dizer
                                     // `lida_pela_ia` —, que é o que faz a ponte não perguntar à IA.
-                                    lerResposta = null } = {}) {
+                                    lerResposta = null,
+                                    // O AVISO FICA NA LISTA ATÉ O DESFECHO, como no de verdade
+                                    // (`audiencias/api.py`, `pendentes`: os de status PENDENTE).
+                                    // Sem isto, cada aviso é entregue uma vez só — e o defeito de
+                                    // 27/10, o aviso que a ponte tentava enfileirar de novo a cada
+                                    // rodada porque o Vantoro não tinha ouvido o desfecho, não
+                                    // tinha como aparecer aqui. Ligado só nas cenas que o medem,
+                                    // para não mudar a conta de pedidos das outras.
+                                    pendentesAteODesfecho = false,
+                                    // AS PRIMEIRAS N CONFIRMAÇÕES ("/enviado") respondem 500.
+                                    desfechosQueFalham = 0,
+                                    // A FICHA que `GET /clientes/:id` devolve — é dela que a ponte
+                                    // lê o "antes" de uma edição do cadastro.
+                                    ficha = null } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -706,12 +725,20 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
       res.writeHead(404, { "Content-Type": "text/html" });
       return res.end("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>");
     }
+    if (desfechosQueFalham > 0 && /\/avisos\/[^/]+\/enviado$/.test(url.pathname)) {
+      desfechosQueFalham -= 1;
+      res.writeHead(500, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, erro: "o Vantoro tossiu" }));
+    }
     if (avisosQueNaoExistem.some((id) => url.pathname.endsWith(`/avisos/${id}/resposta`))) {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ ok: false, erro: "Aviso não encontrado." }));
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url.pathname === "/usuarios") return res.end(JSON.stringify({ ok: true, usuarios: lista }));
+    if (ficha && req.method === "GET" && /^\/clientes\/[^/]+$/.test(url.pathname) && url.pathname !== "/clientes/buscar") {
+      return res.end(JSON.stringify({ ok: true, cliente: ficha }));
+    }
 
     // A BUSCA DE CLIENTES, com o recorte `leve` como o Vantoro de verdade faz.
     //
@@ -739,10 +766,15 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     // aconteceu com cada aviso, e é por ele que se sabe que um aviso NÃO saiu.
     if (url.pathname.endsWith("/avisos/pendentes")) {
       const devolver = avisos.slice();
-      avisos.length = 0;   // como o de verdade: cada aviso é entregue uma vez
+      if (!pendentesAteODesfecho) avisos.length = 0;
       return res.end(JSON.stringify({ ok: true, avisos: devolver }));
     }
     if (/\/avisos\/[^/]+\/(enviado|erro)$/.test(url.pathname)) {
+      if (pendentesAteODesfecho) {
+        const id = url.pathname.split("/").slice(-2)[0];
+        const i = avisos.findIndex((a) => String(a.id) === id);
+        if (i >= 0) avisos.splice(i, 1);
+      }
       return res.end(JSON.stringify({ ok: true }));
     }
     // A RESPOSTA DO CLIENTE AO AVISO, respondida como o Vantoro de verdade
