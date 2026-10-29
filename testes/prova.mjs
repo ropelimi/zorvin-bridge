@@ -14371,9 +14371,11 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
 //  conta feita do zero concordando com a do gatilho.
 //
 //  O 038 tira as senhas do histórico de alterações: as linhas que existem e as
-//  que chegam, de quem quer que as escreva.
+//  que chegam, de quem quer que as escreva. E o 039 o desfaz no dia seguinte
+//  (29/10, a pedido do Rodrigo): o gatilho sai, a senha nova é gravada como
+//  veio, e as linhas que o 038 já escondeu são contadas, e não inventadas.
 {
-  console.log("\n82. O aviso automático não é atendimento (037) e as senhas fora do histórico (038)");
+  console.log("\n82. O aviso automático não é atendimento (037), e as senhas no histórico (038 e 039)");
   const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
   if (!BANCO_BASE && process.env.CI) {
     ok("há um Postgres para provar o aviso automático (obrigatório na integração contínua)",
@@ -14391,6 +14393,7 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
                    "028-aguardando-em-aberto-e-finalizados.sql"];
     const S037 = ler("037-o-aviso-automatico-nao-e-atendimento.sql");
     const S038 = ler("038-as-senhas-fora-do-historico.sql");
+    const S039 = ler("039-as-senhas-voltam-ao-historico.sql");
     const ESQUEMA = `
 -- O Zorvin mínimo da seção 81, com a hora de envio da fila: é por ela que o
 -- 037 acha a linha de cada aviso que já saiu.
@@ -14619,6 +14622,27 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
       ok("a linha nova e a regravada, de quem quer que venham, também ficam escondidas", vazou.n === 0, JSON.stringify(vazou));
       const s2 = await aplicar(S038);
       ok("rodado de novo, não esconde nada", item(s2, /escondidas agora/) === "0" && !defeito(s2), JSON.stringify(s2));
+
+      // ---- 82g. as senhas voltam ao histórico (039, 29/10) ----
+      const s3 = await aplicar(S039);
+      ok("o 039 se aplica, e a conferência dele não acusa nada", !defeito(s3), JSON.stringify(s3));
+      ok("o 039 diz que o gatilho que escondia a senha saiu", item(s3, /gatilho que escondia/) === "true", JSON.stringify(s3));
+      ok("e conta as linhas que o 038 já tinha escondido, sem inventar o valor de antes",
+         item(s3, /continuam escondidas/) === "3", JSON.stringify(s3));
+      const semGatilho = await um(`select count(*)::int n from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                                    where c.relname = 'alteracoes' and t.tgname = 'zorvin_senha_fora_do_historico'`);
+      const semFuncao = await um("select count(*)::int n from pg_proc where proname = 'zorvin_senha_fora_do_historico'");
+      ok("o gatilho e a função dele não existem mais", semGatilho.n === 0 && semFuncao.n === 0, JSON.stringify({ semGatilho, semFuncao }));
+      await q("insert into alteracoes (tipo, alvo, antes, depois) values ('cadastro', 'senha_gov', 'gov-de-hoje', 'gov-de-amanha')");
+      await q("update alteracoes set depois = 'serasa-nova' where tipo = 'cadastro' and alvo = 'senha_serasa'");
+      const gravadas = await q(`select antes, depois from alteracoes where tipo = 'cadastro' and alvo ~* 'senha'
+                                 and (antes = 'gov-de-hoje' or depois = 'serasa-nova') order by antes`);
+      ok("depois do 039, a senha nova é gravada como veio, e a regravada também",
+         gravadas.length === 2 && gravadas.some((g) => g.antes === "gov-de-hoje" && g.depois === "gov-de-amanha")
+         && gravadas.some((g) => g.depois === "serasa-nova"), JSON.stringify(gravadas));
+      const s4 = await aplicar(S039);
+      ok("rodado de novo, o 039 não estoura nem acusa nada, e conta as que ainda estão escondidas",
+         !defeito(s4) && item(s4, /gatilho que escondia/) === "true" && item(s4, /continuam escondidas/) === "2", JSON.stringify(s4));
     } catch (e) {
       ok("a seção 82 rodou até o fim", false, e.message);
     } finally {
@@ -14645,7 +14669,8 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
 //    f. quem sai do Vantoro sai do Zorvin, e quem volta, volta;
 //    g. a trava: gente demais sumindo de uma vez não desliga ninguém;
 //    h. quem foi desligado e voltou entra, e o bloqueio sai;
-//    i. a senha não vai para o histórico;
+//    i. a senha vai para o histórico como qualquer campo (29/10, o 038
+//       desfeito);
 //    j. o item preso em "enviando" com o eco provando a saída não sai de novo;
 //    k. o eco acha o item numa conversa com mais de 50 envios, e o mais perto;
 //    l. a junção reconta a espera, antes da situação;
@@ -14851,7 +14876,10 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     await t.parar();
   }
 
-  // ---- 83i. a senha não vai para o histórico ----
+  // ---- 83i. a senha vai para o histórico como qualquer campo (29/10) ----
+  //  Ela ia como "••••••" desde a auditoria de 27/10, e o Rodrigo pediu de
+  //  volta: todo mundo da equipe precisa saber a senha, e na ficha todo mundo
+  //  já a vê.
   {
     const t = await subirTudo({}, {
       tabelas: { usuarios: equipe(), alteracoes: [] },
@@ -14864,14 +14892,14 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     await esperarAte(() => (t.sb.dados.alteracoes || []).length >= 3, 4000);
     const de = (alvo) => (t.sb.dados.alteracoes || []).find((a) => a.alvo === alvo) || {};
     ok("a edição passa", r.status === 200, String(r.status));
-    ok("a senha trocada fica •••••• dos dois lados", de("senha_gov").antes === "••••••" && de("senha_gov").depois === "••••••",
+    ok("a senha trocada vai com o de-para de verdade", de("senha_gov").antes === "gov-velha-999" && de("senha_gov").depois === "gov-nova-123",
        JSON.stringify(de("senha_gov")));
-    ok("a senha cadastrada pela primeira vez fica (vazio) → ••••••", de("senha_serasa").antes === "" && de("senha_serasa").depois === "••••••",
+    ok("a senha cadastrada pela primeira vez fica (vazio) → a senha", de("senha_serasa").antes === "" && de("senha_serasa").depois === "serasa-1",
        JSON.stringify(de("senha_serasa")));
     ok("o que não é senha continua com o de-para", de("profissao").antes === "servente" && de("profissao").depois === "pedreiro",
        JSON.stringify(de("profissao")));
-    ok("e nenhum valor de senha chega ao banco", !JSON.stringify(t.sb.chamadas.filter((c) => /alteracoes/.test(c.caminho)))
-       .match(/gov-velha|gov-nova|serasa-1/), "a senha foi no pedido ao banco");
+    ok("e nada vira ••••••", (t.sb.dados.alteracoes || []).length === 3
+       && !JSON.stringify(t.sb.dados.alteracoes).includes("••••••"), JSON.stringify(t.sb.dados.alteracoes));
     await t.parar();
   }
 

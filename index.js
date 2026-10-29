@@ -6555,14 +6555,12 @@ async function registrarEdicaoDeCadastro(clienteId, mudou, anterior, usuario) {
     if (cont && cont[0]) contatoId = cont[0].id;
 
     const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
-    // A SENHA NÃO VAI PARA O HISTÓRICO (auditoria de 27/10, script 038). O
-    // histórico de alterações é lido por todo mundo que entrou — é ele que
-    // mostra o "de → para" na ficha do cliente —, e a Senha SERASA e a Senha
-    // GOV iam ali por extenso, inclusive para quem o Vantoro não deixa vê-las.
-    // Fica a linha (quem trocou, e quando), com "••••••" no lugar do valor. A
-    // conta de "mudou?" é feita com o valor de verdade, antes de esconder.
-    const ehSenha = (c) => /senha/i.test(c);
-    const escondida = (c, v) => (ehSenha(c) && String(v ?? '') !== '' ? '••••••' : String(v ?? ''));
+    // A SENHA VAI PARA O HISTÓRICO COMO QUALQUER CAMPO (29/10, script 039).
+    // A auditoria de 27/10 passou a gravar "••••••" no lugar da Senha SERASA
+    // e da Senha GOV, supondo que parte da equipe não as via na ficha. Não é
+    // assim: quem decide se o Vantoro manda as senhas é a chave da ponte, e
+    // ela vê — na ficha, todo mundo do Zorvin as vê. E o Rodrigo disse, no
+    // dia seguinte: "todos os usuários precisam saber qual é a senha".
     const linhas = campos
       // Campo que não mudou de verdade não vira linha: o painel manda o que
       // ele acha que mudou, e "  " para "" encheria o histórico de nada.
@@ -6571,8 +6569,8 @@ async function registrarEdicaoDeCadastro(clienteId, mudou, anterior, usuario) {
         contato_id: contatoId,
         tipo: 'cadastro',
         alvo: c,
-        antes: escondida(c, (anterior || {})[c]),
-        depois: escondida(c, mudou[c]),
+        antes: String((anterior || {})[c] ?? ''),
+        depois: String(mudou[c] ?? ''),
         autor: nome,
         autor_id: (usuario && usuario.id) || null,
       }));
