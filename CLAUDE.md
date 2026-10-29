@@ -3025,6 +3025,10 @@ as escreva; **a ponte também esconde ao gravar** (`registrarEdicaoDeCadastro`).
 A linha fica — quem trocou, e quando —, e a conta de "mudou?" é feita com o
 valor de verdade, antes de esconder.
 
+**Desfeito em 29/10, a pedido do Rodrigo**: a premissa estava errada, e na
+ficha todo mundo do Zorvin já vê as senhas. Ver "As senhas voltam ao histórico
+(script 039, 29/10)", logo abaixo desta seção.
+
 ### E o resto
 
 | o que acontecia | agora |
@@ -3102,6 +3106,75 @@ do eco primeiro" passava, porque a cena só tinha UM item com o texto do eco.
 Entrou o caso que a ordem existe para separar: dois "pode ser amanhã?" na
 janela, e o mais novo pela criação não é o que saiu mais perto da hora do eco
 (o mais velho foi tentado de novo há um minuto e meio). Hoje ela é pega.
+
+## As senhas voltam ao histórico (script 039, 29/10)
+
+Pedido do Rodrigo, logo depois do merge da auditoria: *"As senhas do SERASA e
+GOV precisam aparecer, todos os usuários precisam saber qual é a senha."*
+
+**O 038 partia de uma premissa errada, e ela foi medida depois.** A auditoria
+supôs que parte da equipe não via as senhas na ficha e as lia pelo histórico.
+No Vantoro, quem decide se as senhas vêm é a CHAVE com que se pergunta
+(`ChaveDaAPI.ve_segredos`; o token do ambiente vê tudo), e não a pessoa.
+**Medido no banco do Vantoro em 29/10:** as duas chaves nomeadas (Andon e
+Midório) veem os segredos, e a ponte usa o token do ambiente. **Na ficha, todo
+mundo do Zorvin vê as duas senhas.** Esconder no histórico não protegia nada:
+só apagava o que a equipe precisa ler.
+
+**O 039 tira o gatilho e a função do 038**, e a ponte voltou a gravar o "de →
+para" da senha como o de qualquer campo (`registrarEdicaoDeCadastro`, igual a
+antes da auditoria). **O 038 não foi editado** — script aplicado não se edita
+(regra 3). **E o 038 não se roda de novo à mão**: quem rodar a pasta inteira,
+na ordem, esconde de novo as senhas que existirem.
+
+### O que se perdeu, e a culpa é desta casa
+
+**O 038 rodou às 01:02 UTC de 29/10 (22h02 de Brasília), dois minutos depois
+do merge**, e trocou por "••••••" o valor de **62 linhas**. A mensagem do
+Rodrigo chegou depois disso, e uma cópia de `alteracoes` tirada às 01:04
+(`zorvin_copia_alteracoes_2810`, com RLS e sem acesso de quem entra) já veio
+com o "••••••". Ela não serve para nada, e sai na próxima conversa com o
+conector do Supabase.
+
+**O valor de antes não está em lugar nenhum deste banco.** O `UPDATE` grava por
+cima. A versão velha da linha continua no disco até o próximo `VACUUM`
+(medido: 61 linhas mortas, nenhum `VACUUM` ainda), mas só o superusuário a lê
+(`pageinspect`, `pg_walinspect`), e o papel do conector (`postgres`) não é
+superusuário.
+
+**As senhas ATUAIS de cada cliente continuam inteiras no Vantoro**, que é onde
+elas moram. O que sumiu foi o registro das senhas de antes de cada troca.
+
+**O caminho para recuperar é o backup diário do Supabase** (plano Pro, 7 dias,
+backup físico): "Restore to a New Project" com o backup de 28/10 cria um
+projeto separado, de onde as linhas podem voltar sem que o valor passe aberto
+por ninguém (cifrado com `pgcrypto` na ida e decifrado no banco do escritório).
+O projeto novo custa enquanto existir, então é decisão do Rodrigo.
+
+**A lição que fica:** o merge publica sozinho, e o script roda na subida. **Um
+script que reescreve dado de produção sem volta pede a pergunta ANTES do
+merge**, e não depois. A decisão de esconder foi minha, numa auditoria, sem
+perguntar se a equipe precisava ler aquilo.
+
+### As provas
+
+Seção 82 (82g: o 039 tira o gatilho e a função, a senha nova é gravada como
+veio, e as linhas já escondidas são contadas) e seção 83 (83i invertida: a
+senha vai para o histórico com o "de → para" de verdade). **4 sabotagens e 4
+pegas**, rodadas em cópias e lidas uma a uma:
+
+- o 039 sem tirar o gatilho (a função não sai, e o script para);
+- o 039 sem tirar a função;
+- a ponte escondendo a senha de novo (3 reprovações);
+- o 039 sem a guarda do banco limpo (a 51l-bis diz qual script e o erro).
+
+**A última precisou ser rodada sozinha.** Com duas sabotagens ao mesmo tempo,
+a cena 51c reprovou ("a tabela existe no Postgres") e a prova estourou na linha
+seguinte, antes de chegar à 51l-bis. A 51c confere 400 ms depois da primeira
+linha da rodada, como a 51l-bis conferia até 27/10, e sob carga a rodada dos
+dois scripts dela não terminou a tempo. Sozinha, a sabotagem foi pega pela
+conferência certa. **A 51c tem o mesmo defeito que a 51l-bis tinha**, e não foi
+mexida aqui.
 
 ## Mandar SQL para o Rodrigo — a conferência vai DENTRO do script
 
