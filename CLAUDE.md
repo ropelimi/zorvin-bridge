@@ -3225,6 +3225,18 @@ Entrou o caso que a ordem existe para separar: dois "pode ser amanhã?" na
 janela, e o mais novo pela criação não é o que saiu mais perto da hora do eco
 (o mais velho foi tentado de novo há um minuto e meio). Hoje ela é pega.
 
+**E a cena de quem sai do Vantoro conferia antes da hora (31/10).** Ela
+esperava o `ativo` virar falso e já conferia as permissões, o bloqueio e o
+registro. Só que a ponte faz as quatro coisas uma depois da outra, e o
+registro é a última. Na integração contínua da PR da transcrição ela
+reprovou três conferências sem defeito nenhum. Reproduzido aqui com 400 ms
+de atraso entre a primeira e a segunda gravação: as mesmas três, e uma
+quarta na volta, onde o `ativo` também vem antes do desbloqueio. Hoje as
+duas esperas aguardam a linha do registro. Cinco sabotagens e cinco pegas
+com a espera nova: quem sai fica, sem tirar as permissões, sem bloquear,
+quem volta não volta, volta sem desbloquear. É a régua de 26/10 outra vez:
+**espere a ÚLTIMA coisa que o código faz, e não a primeira.**
+
 ## As senhas voltam ao histórico (script 039, 29/10)
 
 Pedido do Rodrigo, logo depois do merge da auditoria: *"As senhas do SERASA e

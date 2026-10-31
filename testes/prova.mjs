@@ -14825,7 +14825,11 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     });
     const joao = () => t.sb.dados.usuarios.find((u) => u.id === U(3));
     const contaDe = (id) => t.sb.contas.find((c) => c.id === id) || {};
-    await esperarAte(() => joao().ativo === false, 8000);
+    // ESPERA A ÚLTIMA DAS QUATRO COISAS, e não a primeira. A ponte desliga
+    // (`ativo`), tira as permissões, bloqueia a entrada e só então escreve no
+    // registro. Esperando o `ativo`, a prova conferia no meio do caminho — e na
+    // máquina do GitHub, mais lenta, reprovou em 31/10 sem defeito nenhum.
+    await esperarAte(() => /Permissões: joao foi desligado no Vantoro/.test(log(t)), 8000);
     ok("quem sumiu da lista do Vantoro fica desativado no Zorvin", joao().ativo === false, JSON.stringify(joao()));
     ok("sem permissão nenhuma", !t.sb.dados.permissoes.some((p) => p.usuario_id === U(3)), JSON.stringify(t.sb.dados.permissoes));
     ok("e com a entrada bloqueada no Auth (a sessão aberta não se renova mais)", contaDe(U(3)).ban_duration === "876000h",
@@ -14836,7 +14840,8 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
        log(t).split("\n").filter((l) => /joao/.test(l)).join(" | "));
     // ELE VOLTA À LISTA.
     t.van.usuarios.push(...doVantoro(["joao"]));
-    await esperarAte(() => joao().ativo === true, 8000);
+    // Idem na volta: o `ativo` primeiro, o desbloqueio depois, o registro por último.
+    await esperarAte(() => /Permissões: joao voltou ao Vantoro/.test(log(t)), 8000);
     ok("quem volta à lista volta: ativo, desbloqueado", joao().ativo === true && contaDe(U(3)).ban_duration === "none",
        JSON.stringify({ u: joao(), conta: contaDe(U(3)) }));
     await esperarAte(() => t.sb.dados.permissoes.some((p) => p.usuario_id === U(3)), 4000);
