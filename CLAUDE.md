@@ -2588,6 +2588,94 @@ guarda — a régua de 25/09.
   campo lido de uma resposta que já tinha falhado, e uma conferência que
   esperava lista e recebeu o erro. Os acessos passaram a ser guardados.
 
+## Quem está esperando demais (script 041, 31/10)
+
+Pedido do Rodrigo, da lista de recomendações de 31/10: *"Pode seguir para a
+segunda recomendação"* — um aviso quando um cliente passa de alguns minutos
+sem resposta no expediente, e, ao abrir o Zorvin, as conversas de cada pessoa
+esperando há 3 dias ou mais. A segunda metade é só do painel (ver o CLAUDE.md
+dele); a primeira precisa do banco, porque o expediente mora nele.
+`sql/automaticos/041-quem-esta-esperando-demais.sql`.
+
+**Medido em 31/10, só contando**, nos 30 dias anteriores e só nos atendimentos
+que o cliente abriu (sem grupos):
+
+| | |
+|---|---|
+| abertos dentro do expediente | 297 |
+| respondidos em até 30 minutos | 57 (19%) |
+| mediana até a primeira resposta | 1 h 46 min |
+| sem resposta nenhuma | 118 (40%) |
+
+E 596 conversas esperando há 3 dias ou mais: 193 com responsável (17 pessoas,
+de 1 a 56 cada) e 403 sem — 315 delas paradas há mais de um mês.
+
+| peça | o quê |
+|---|---|
+| `zorvin_minutos_no_expediente(semana, fuso, desde, ate)` | quantos minutos de expediente há entre duas horas, dia a dia, pela régua de `zorvin_expediente_do_dia` (021) — que já sabe dos feriados |
+| `zorvin_aviso_de_espera` | por departamento: ligado ou não, e depois de quantos minutos (de 5 a 480). **Sem linha, vale o padrão: ligado, 30** |
+| `zorvin_clientes_sem_resposta()` | os clientes que abriram um atendimento e esperam a primeira resposta há mais que o limite do departamento, contado só no expediente |
+
+**A lista:** o atendimento de agora (`conversas.protocolo`), aberto pelo
+cliente, sem primeira resposta e sem finalização; aberto nos últimos 7 dias
+(o pior caso de 30 minutos de expediente: sexta à noite, feriado na segunda);
+sem grupo, conversa arquivada nem linha desativada; com o aviso ligado no
+departamento. **`security invoker`**: cada um recebe só as conversas que vê.
+De `advogados`, só `ativo` e `departamento_id`, pelo nome — a régua do 012.
+
+**A mesma semana da resposta fora do horário.** O expediente de cada
+departamento já morava em `zorvin_fora_do_horario.semana` (021), e os quatro
+departamentos do escritório têm a sua escrita (medido em 31/10). Uma segunda
+escrita do expediente divergiria dela no primeiro feriado. **Sem semana
+escrita, conta o relógio inteiro**: calar o aviso por isso seria o cliente
+esperando sem ninguém saber. A semana toda fechada é escolha, e vale: nada
+soma.
+
+**Quem é avisado é decisão do painel**, pela régua do aviso de mensagem nova:
+a conversa com responsável avisa só ele; a sem responsável, todo mundo que a
+vê. Por isso a função devolve o `responsavel_id`, e não recorta por ele.
+
+**Ligado desde a publicação, e é decisão.** A resposta fora do horário e a
+distribuição nasceram desligadas porque falam com o cliente ou dão trabalho a
+alguém sem ninguém ter escolhido. Este aviso só toca para a equipe, e foi
+pedido. Quem administra desliga por departamento, na aba Aviso de espera do
+painel.
+
+**30 minutos, e não 15 nem 60.** Dos clientes do expediente, 14% tinham
+resposta em 15 minutos, 19% em 30 e 24% em 60. Quantos avisos tocam quase não
+muda — a maioria espera horas —; o que muda é quando.
+
+**A herança sai inteira da tabela antes de dar só o que a tela usa** (ler,
+criar, mudar): `truncate` não passa pela regra de acesso, e quem entrou o
+herdaria com a tabela. Ninguém apaga linha: voltar ao padrão é escrever 30.
+
+**O primeiro dia útil com o aviso valendo é terça, 03/11**: segunda, 02/11, é
+Finados, que já está entre os feriados do 021.
+
+**A ponte não faz nada com isso.** É banco e painel.
+
+Prova: seção 86, num Postgres de verdade, sobre o 004, 005, 006, 008, 020,
+021 e 028 aplicados a partir dos próprios arquivos — 56 conferências: a conta
+(feriado, fim de semana, o fuso de Manaus, sem semana, a semana fechada, os
+segundos que não arredondam), um cliente por caso na lista, o telefone que a
+pessoa não vê, a configuração e quem pode mudá-la, a conferência no papel de
+quem atende, e rodar de novo sem desfazer a escolha de ninguém. **28
+sabotagens e 28 pegas**, todas limpas, rodadas em cópias e lidas uma a uma.
+
+**Uma vazou primeiro, e a culpa era da prova.** Tirar `anon` da conta dos
+minutos passava: a conferência chamava a função como quem não entrou, e a
+chamada estourava assim mesmo — na função do 021, que ela usa por dentro e
+que já é fechada. Hoje a prova pergunta ao banco quem pode
+(`has_function_privilege`), e a conferência do script também. **Para saber
+quem alcança uma função, pergunte ao banco, e não chame: a chamada pode
+estourar por outro motivo.** E o banco da prova passou a dar `execute` a
+`anon` pelo nome em toda função nova, como a Supabase dá (a armadilha nº 5):
+sem isso, tirar `anon` do 041 não faria diferença ali, e faria lá.
+
+**E a prova não depende do calendário.** As cenas da lista medem "agora":
+elas apagam os feriados e deixam o departamento aberto todo dia, das 00:00 às
+23:59. Sem isso, a seção reprovaria em todo feriado nacional.
+
 ## Quem não entrou não alcança nada (script 032, 22/10)
 
 Pedido do Rodrigo, depois de ler comigo os avisos de segurança da Supabase:
