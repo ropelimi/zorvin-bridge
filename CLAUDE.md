@@ -70,6 +70,13 @@ Variáveis de ambiente (no Render):
 - `PERMISSOES_INTERVALO_MS` e `PERMISSOES_PRIMEIRA_MS` — de quanto em quanto
   a rodada das permissões roda (padrão 3 min) e quando é a primeira (20 s
   depois de subir). **Opcionais**, para a bancada. Ver "A auditoria de 27/10".
+- `GROQ_API_KEY` — a chave do Groq, para transcrever os áudios (no clique e
+  sozinho). **Sem ela, nada é transcrito** e o botão diz qual variável falta.
+  `GROQ_API_URL` e `GROQ_MODELO` são opcionais. Ver "Transcrever um áudio".
+- `TRANSCRICAO_AUTOMATICA` — `desligada` volta a transcrição a ser só no
+  clique, sem mexer no código. **Opcional: sem ela, os áudios são
+  transcritos sozinhos.** `TRANSCRICAO_INTERVALO_MS` e
+  `TRANSCRICAO_PRIMEIRA_MS` (os dois com padrão de 20 s) são para a bancada.
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -307,11 +314,12 @@ edição dá ERRO (42501), e não zero linhas**: a regra do cancelar alcança a
 mesma linha, e a checagem de saída de nenhuma das duas passa. Conferido num
 Postgres 16.
 
-## Transcrever um áudio — `POST /transcrever` (02/10)
+## Transcrever um áudio — `POST /transcrever` (02/10) e sozinho (31/10)
 
 Pedido da equipe: transcrição dos áudios. Decidido com o Rodrigo: pelo
 **Groq** (Whisper `whisper-large-v3-turbo`, ~US$ 0,04 por hora de áudio) e
-**ao clicar** — nada é transcrito sozinho. A chave é `GROQ_API_KEY`, na
+**ao clicar**. ~~Nada é transcrito sozinho.~~ **Desde 31/10, também
+sozinho** — ver "Sozinho, assim que chega", logo abaixo. A chave é `GROQ_API_KEY`, na
 Render; `GROQ_API_URL` e `GROQ_MODELO` são opcionais (a bancada aponta para um
 Groq de mentira).
 
@@ -329,6 +337,116 @@ cliques juntos são uma ida só** (`transcricoesEmVoo`). A língua vai dita
 Prova: seção 56, 24 conferências, **6 sabotagens e 6 pegas** (ler com a chave
 da ponte; sem a língua; sem devolver o guardado; sem juntar os cliques; sem a
 chave no cabeçalho; sem guardar).
+
+### Sozinho, assim que chega (31/10)
+
+Pedido do Rodrigo, da lista de recomendações: *"Vamos trabalhar nas suas
+recomendações! Pode mandar bala na primeira"* — transcrever todo áudio sozinho,
+assim que chega. **A decisão de 02/10 caiu pela medição:** nos 14 dias até
+31/10 chegaram 388 áudios de clientes (2 h 12 min de fala, uns US$ 0,10 no
+Groq), e 161 deles (41%) já tinham sido transcritos no clique. O "não pagar
+pelo que ninguém precisou ler" custava centavos, e a equipe clicava em quase
+metade.
+
+**A rodada** (`transcreverOsQueChegaram`, no `index.js`): de 20 em 20 segundos,
+os áudios dos **últimos sete dias** ainda sem texto, **os mais novos
+primeiro**, no máximo **cinco por volta**, um de cada vez. Do cliente e da
+equipe, de conversa e de grupo — a busca e o copiloto precisam também do que a
+equipe disse. **O apagado não é transcrito.** Na primeira subida eram uns 170
+pendentes (medido em 31/10), e a fila anda em uns doze minutos.
+
+**Vinte segundos, e não quinze, para sobrar vez ao clique.** O limite de
+pedidos por minuto do Groq vale para a rodada e para o botão juntos, e cinco
+por volta de 15 em 15 segundos seriam 20 por minuto — o que o plano gratuito
+dele aceitava pela documentação que eu conhecia. **Não foi conferido:** a
+página de limites não abriu daqui em 31/10 (o proxy da sessão não alcança
+`console.groq.com`), e o plano da conta do escritório não se vê. De 20 em 20
+são 15 por minuto, e passando do limite a rodada para pelo tempo que o Groq
+pedir.
+
+**Uma escrita só para o clique e a rodada** (`transcreverEGuardar`). A
+promessa fica em `transcricoesEmVoo` até o texto estar GUARDADO: o clique que
+chega no meio da rodada espera a resposta dela, sem segunda ida ao Groq, e
+recebe `guardada` certo.
+
+**O que fica no banco e o que fica na memória** — e essa é a decisão que
+segura o resto:
+
+| desfecho | o que acontece |
+|---|---|
+| texto | guardado em `transcricao` |
+| sem fala (o Groq leu e não há fala) | só `transcrita_em`: a marca de "já tentei", que impede pagar de novo pelo mesmo silêncio |
+| grande demais (mais de 25 MB) | só `transcrita_em`; o tamanho é conferido pelo `Content-Length` ANTES de ler (a memória de 22/10) |
+| chave recusada (401/403) | a rodada para por 30 minutos, com uma linha no log |
+| limite do Groq (429) | a rodada para pelo tempo que ele pedir (`retry-after`, de 30 s a 10 min): o clique usa a mesma cota |
+| qualquer outra falha | tenta de novo depois de 1, 5 e 30 minutos, e depois fica para o clique — **só na memória** |
+
+**Nenhuma recusa do Groq nem do depósito vira "desisti" no banco.** Um 400
+tanto pode ser o arquivo quanto um modelo trocado na Render, e um 404 do
+depósito, um balde fechado: guardar a desistência marcaria de uma vez todos os
+áudios da semana, que ninguém transcreveria depois do conserto. A memória da
+ponte esquece ao reiniciar, e aí ela tenta de novo. **O painel só olha
+`transcricao`**: o áudio marcado como "sem fala" continua com o botão.
+
+**O prazo vale até o fim do corpo** (`pedirComPrazo`). `fetchComTimeout` solta
+o relógio quando chegam os cabeçalhos, e um arquivo que parasse no meio
+prenderia a rodada inteira até a ponte reiniciar.
+
+**O que para a rodada:** sem `GROQ_API_KEY`; `TRANSCRICAO_AUTOMATICA=desligada`;
+e **sem a coluna do 015** — sem guardar, ela pagaria pelo mesmo áudio a cada
+volta. O clique continua nos três casos em que pode.
+
+**A primeira volta espera 20 segundos:** numa publicação, a ponte velha ainda
+termina o que começou, e as duas não podem pegar o mesmo áudio. **Nada do que
+foi dito vai para o log**: só quantos áudios e quantos segundos.
+
+**O risco que fica dito:** o Whisper às vezes "ouve" uma frase pronta num áudio
+de silêncio ou só de barulho (em português, "Legendas pela comunidade
+Amara.org" é a conhecida). Já acontecia no clique; sozinho, acontece sem
+ninguém ter pedido. Se aparecer na tela, o caminho é filtrar essas frases
+conhecidas, depois de medir quantas existem.
+
+**E a busca acha o que foi dito** — `sql/automaticos/040-o-que-foi-dito-nos-audios-entra-na-busca.sql`:
+
+- **`buscar_conversas` procura também em `transcricao`**, numa pergunta à
+  parte (`casadas_no_audio`), e não num `or`, que não usaria nenhum dos dois
+  índices. A conversa achada por um áudio volta com o motivo **`'audio'`** e o
+  trecho falado; vale a mais recente da conversa, escrita ou falada; o nome
+  continua vencendo. **A assinatura e as colunas são as mesmas**: `create or
+  replace`, sem o instante em que a função não existe;
+- **só troca a busca que existe** — ela nasceu num script colado à mão;
+- **dois índices**: o trigrama só nas linhas com transcrição
+  (`mensagens_transcricao_busca_idx`), e o da rodada
+  (`mensagens_audio_por_transcrever`), com o predicado escrito igual à
+  pergunta da ponte — é só assim que o banco aceita usar um índice parcial. O
+  `m.transcricao is not null` da função é o que deixa o primeiro servir;
+- **a conferência chama a busca no papel de quem atende** (regra 4).
+
+Provas: seção 84 (a rodada, 39 conferências, com um Groq de mentira que
+também serve os arquivos — o "grande" anuncia 30 MB, o "parado" para no meio)
+e seção 85 (o 040 num Postgres de verdade, 28, montado pelos dois scripts de
+agosto a partir dos próprios arquivos). **29 sabotagens e 29 pegas**, todas
+limpas, rodadas em cópias e lidas uma a uma:
+
+- **a rodada:** que nunca começa; sem a janela de 7 dias; transcrevendo o
+  apagado; sem a escrita única (na rodada, e no clique); os mais velhos
+  primeiro; sem o teto de cinco; o "sem fala" fora do banco; sem conferir o
+  tamanho anunciado; a falha passageira virando desistência; o limite que não
+  pausa, e sem o `retry-after`; a chave recusada que não pausa; o prazo só até
+  os cabeçalhos; desligada que não desliga; sem a chave rodando assim mesmo;
+  sem a coluna pagando de novo a cada volta; o log levando o que foi dito; a
+  promessa saindo de `transcricoesEmVoo` antes de guardar;
+- **o 040:** sem o áudio na busca; o áudio com acento; a escrita sempre
+  vencendo o áudio; o áudio com o motivo 'mensagem'; o áudio de outro
+  telefone; o áudio vencendo o nome; o índice da rodada com outra pergunta; a
+  busca sem o `is not null` (pega pelo `auto_explain`, que mostra o plano de
+  DENTRO da função — o `explain` de fora só vê "Function Scan"); criando a
+  busca que não existia; sem a guarda das colunas do 015.
+
+**As provas que não são desta rotina empurram a rodada para daqui a uma hora**
+(em `subirTudo`), como o resgate dos anexos: na seção 56, que liga a chave do
+Groq para o clique, a rodada pegaria sozinha os áudios da cena e a conta de
+idas ao Groq mudaria de assunto.
 
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
@@ -3106,6 +3224,18 @@ do eco primeiro" passava, porque a cena só tinha UM item com o texto do eco.
 Entrou o caso que a ordem existe para separar: dois "pode ser amanhã?" na
 janela, e o mais novo pela criação não é o que saiu mais perto da hora do eco
 (o mais velho foi tentado de novo há um minuto e meio). Hoje ela é pega.
+
+**E a cena de quem sai do Vantoro conferia antes da hora (31/10).** Ela
+esperava o `ativo` virar falso e já conferia as permissões, o bloqueio e o
+registro. Só que a ponte faz as quatro coisas uma depois da outra, e o
+registro é a última. Na integração contínua da PR da transcrição ela
+reprovou três conferências sem defeito nenhum. Reproduzido aqui com 400 ms
+de atraso entre a primeira e a segunda gravação: as mesmas três, e uma
+quarta na volta, onde o `ativo` também vem antes do desbloqueio. Hoje as
+duas esperas aguardam a linha do registro. Cinco sabotagens e cinco pegas
+com a espera nova: quem sai fica, sem tirar as permissões, sem bloquear,
+quem volta não volta, volta sem desbloquear. É a régua de 26/10 outra vez:
+**espere a ÚLTIMA coisa que o código faz, e não a primeira.**
 
 ## As senhas voltam ao histórico (script 039, 29/10)
 

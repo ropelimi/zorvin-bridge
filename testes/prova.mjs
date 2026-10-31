@@ -81,6 +81,12 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            // essas leituras mudariam a conta de pedidos dela. A seção 77, que
            // é a dele, encurta.
            RESGATE_DO_HISTORICO_MS: "3600000",
+           // A TRANSCRIÇÃO AUTOMÁTICA, pelo mesmo motivo: numa prova que liga a
+           // chave do Groq para o CLIQUE (seção 56), a rodada pegaria sozinha
+           // os áudios da cena e a conta de idas ao Groq mudaria de assunto. A
+           // seção 84, que é a dela, encurta.
+           TRANSCRICAO_PRIMEIRA_MS: "3600000",
+           TRANSCRICAO_INTERVALO_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -14819,7 +14825,11 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     });
     const joao = () => t.sb.dados.usuarios.find((u) => u.id === U(3));
     const contaDe = (id) => t.sb.contas.find((c) => c.id === id) || {};
-    await esperarAte(() => joao().ativo === false, 8000);
+    // ESPERA A ÚLTIMA DAS QUATRO COISAS, e não a primeira. A ponte desliga
+    // (`ativo`), tira as permissões, bloqueia a entrada e só então escreve no
+    // registro. Esperando o `ativo`, a prova conferia no meio do caminho — e na
+    // máquina do GitHub, mais lenta, reprovou em 31/10 sem defeito nenhum.
+    await esperarAte(() => /Permissões: joao foi desligado no Vantoro/.test(log(t)), 8000);
     ok("quem sumiu da lista do Vantoro fica desativado no Zorvin", joao().ativo === false, JSON.stringify(joao()));
     ok("sem permissão nenhuma", !t.sb.dados.permissoes.some((p) => p.usuario_id === U(3)), JSON.stringify(t.sb.dados.permissoes));
     ok("e com a entrada bloqueada no Auth (a sessão aberta não se renova mais)", contaDe(U(3)).ban_duration === "876000h",
@@ -14830,7 +14840,8 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
        log(t).split("\n").filter((l) => /joao/.test(l)).join(" | "));
     // ELE VOLTA À LISTA.
     t.van.usuarios.push(...doVantoro(["joao"]));
-    await esperarAte(() => joao().ativo === true, 8000);
+    // Idem na volta: o `ativo` primeiro, o desbloqueio depois, o registro por último.
+    await esperarAte(() => /Permissões: joao voltou ao Vantoro/.test(log(t)), 8000);
     ok("quem volta à lista volta: ativo, desbloqueado", joao().ativo === true && contaDe(U(3)).ban_duration === "none",
        JSON.stringify({ u: joao(), conta: contaDe(U(3)) }));
     await esperarAte(() => t.sb.dados.permissoes.some((p) => p.usuario_id === U(3)), 4000);
@@ -15064,6 +15075,528 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
        texto.slice(0, 600));
     await t.parar();
     await new Promise((r2) => srv.close(r2));
+  }
+}
+
+// ============================================================
+//  84. A TRANSCRIÇÃO AUTOMÁTICA DOS ÁUDIOS (31/10)
+//
+//  A ponte transcreve sozinha, de tantos em tantos segundos, os áudios que
+//  chegaram e ainda não têm texto. O que esta seção guarda:
+//    - o áudio novo é transcrito sem ninguém clicar, do cliente e da equipe;
+//      o sem arquivo, o de mais de sete dias, o apagado e o já transcrito, não;
+//    - o arquivo que chega depois é transcrito quando chega;
+//    - o clique no meio da rodada não paga uma segunda vez;
+//    - os mais novos primeiro, e no máximo cinco por volta;
+//    - o "sem fala" e o "grande demais" vão para o banco (não se paga de novo);
+//      a falha passageira, não, e não segura os outros da volta;
+//    - o limite do Groq e a chave recusada param a rodada inteira;
+//    - um arquivo que para no meio não prende a rodada;
+//    - desligada, sem a chave ou sem a coluna do 015, ela não roda;
+//    - e o que foi dito nunca vai para o log.
+// ============================================================
+{
+  console.log("\n84. A transcrição automática dos áudios");
+  const http84 = await import("node:http");
+  const esperarAte = async (cond, ms = 8000) => {
+    for (let i = 0; i < ms / 100; i++) { if (cond()) return true; await espera(100); }
+    return Boolean(cond());
+  };
+  const ha = (minutos) => new Date(Date.now() - minutos * 60000).toISOString();
+  const log = (t) => t.registro.join("");
+  const comoAdmin = { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" };
+
+  // O GROQ DE MENTIRA, que também serve os arquivos. Cada arquivo leva o nome
+  // no conteúdo (`OggS:<nome>`), e é por ele que o Groq de mentira decide o que
+  // responder — e que a prova sabe a ordem em que os áudios foram mandados.
+  //   respostas: nome → { status, texto, retryAfter }
+  //   arquivos:  nome → "grande" (anuncia 30 MB) | "parado" (manda os
+  //              cabeçalhos e para) | 404
+  async function subirGroq({ respostas = {}, arquivos = {}, demora = 0, padrao = "Mandei o comprovante agora." } = {}) {
+    const pedidos = [];
+    const srv = http84.createServer(async (req, res) => {
+      if (req.url.startsWith("/audios/")) {
+        const nome = decodeURIComponent(req.url.slice("/audios/".length));
+        const como = arquivos[nome];
+        if (como === 404) { res.writeHead(404); return res.end("não achei"); }
+        if (como === "grande") {
+          res.writeHead(200, { "Content-Type": "audio/ogg", "Content-Length": String(30 * 1024 * 1024) });
+          res.write(Buffer.alloc(1024));
+          return; // não termina: quem pediu tem de desistir pelo tamanho anunciado
+        }
+        if (como === "parado") {
+          res.writeHead(200, { "Content-Type": "audio/ogg", "Content-Length": "4096" });
+          res.write(Buffer.from("OggS"));
+          return; // para no meio: quem pediu tem de desistir pelo prazo
+        }
+        res.writeHead(200, { "Content-Type": "audio/ogg" });
+        return res.end(Buffer.from(`OggS:${nome}`));
+      }
+      let corpo = Buffer.alloc(0);
+      for await (const p of req) corpo = Buffer.concat([corpo, p]);
+      const texto = corpo.toString("latin1");
+      const nome = (texto.match(/OggS:([\w.-]+)/) || [])[1] || "?";
+      pedidos.push({ nome, autorizacao: req.headers.authorization });
+      if (demora) await espera(demora);
+      const r = respostas[nome] || {};
+      const status = r.status || 200;
+      const cab = { "Content-Type": "application/json" };
+      if (r.retryAfter) cab["retry-after"] = String(r.retryAfter);
+      res.writeHead(status, cab);
+      res.end(JSON.stringify(status === 200 ? { text: r.texto !== undefined ? r.texto : ` ${padrao} ` }
+                                            : { error: { message: "recusado" } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const url = `http://127.0.0.1:${srv.address().port}`;
+    return { url, pedidos, parar: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) };
+  }
+  const audio = (groq, id, nome, extra = {}) => ({ id, conversa_id: 1, origem: "contato", tipo: "audio",
+    midia_url: `${groq.url}/audios/${nome}`, midia_mime: "audio/ogg; codecs=opus", midia_segundos: 12, criado_em: ha(2), ...extra });
+  const base = (mensagens) => ({
+    contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" }],
+    conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }],
+    mensagens,
+  });
+  const rapido = (groq, extra = {}) => ({ GROQ_API_KEY: "gsk-de-mentira", GROQ_API_URL: `${groq.url}/openai/v1`,
+    TRANSCRICAO_PRIMEIRA_MS: "200", TRANSCRICAO_INTERVALO_MS: "400", ...extra });
+  const msg = (t, id) => t.sb.dados.mensagens.find((m) => String(m.id) === String(id)) || {};
+
+  // ---- 84a. o áudio novo é transcrito sozinho ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(rapido(groq), { tabelas: base([
+      audio(groq, 701, "do-cliente"),
+      audio(groq, 702, "da-equipe", { origem: "advogado", midia_segundos: null, criado_em: ha(60 * 24 * 6) }),
+      { id: 703, conversa_id: 1, origem: "contato", tipo: "texto", texto: "oi", criado_em: ha(1) },
+      audio(groq, 704, "sem-arquivo-ainda", { midia_url: null }),
+      audio(groq, 705, "de-oito-dias", { criado_em: ha(60 * 24 * 8) }),
+      audio(groq, 706, "apagado", { apagada: true }),
+      audio(groq, 707, "ja-transcrito", { transcricao: "Já estava transcrito.", transcrita_em: ha(1) }),
+      audio(groq, 708, "apagado-pelo-cliente", { apagada_pelo_contato: true }),
+    ]) });
+    await esperarAte(() => msg(t, 701).transcricao && msg(t, 702).transcricao, 6000);
+    ok("o áudio do cliente foi transcrito sem ninguém clicar",
+       msg(t, 701).transcricao === "Mandei o comprovante agora.", JSON.stringify(msg(t, 701)));
+    ok("e ficou marcado quando", Boolean(msg(t, 701).transcrita_em));
+    ok("o da equipe também, e o de seis dias atrás também (a janela é de sete)",
+       msg(t, 702).transcricao === "Mandei o comprovante agora.", JSON.stringify(msg(t, 702)));
+    await espera(1200); // mais duas voltas
+    const nomes = groq.pedidos.map((p) => p.nome).sort();
+    ok("ao Groq foram só esses dois — nem o de oito dias, nem o apagado, nem o já transcrito",
+       JSON.stringify(nomes) === JSON.stringify(["da-equipe", "do-cliente"]), JSON.stringify(nomes));
+    ok("a chave do Groq foi no cabeçalho", groq.pedidos.every((p) => p.autorizacao === "Bearer gsk-de-mentira"));
+    ok("o que já estava transcrito ficou como estava", msg(t, 707).transcricao === "Já estava transcrito.");
+    ok("o apagado e o apagado pelo cliente ficaram sem texto", !msg(t, 706).transcricao && !msg(t, 708).transcricao);
+    ok("o log diz que a rodada está ligada", /transcrição automática: ligada/.test(log(t)), log(t).slice(-600));
+    ok("e quantos transcreveu", /transcrição automática: 2 áudio\(s\) transcrito\(s\)/.test(log(t)), log(t).slice(-600));
+    ok("e NUNCA o que foi dito", !/comprovante/i.test(log(t)), log(t).slice(-600));
+
+    // ---- 84b. o arquivo que chega depois é transcrito quando chega ----
+    msg(t, 704).midia_url = `${groq.url}/audios/chegou-depois`;
+    await esperarAte(() => msg(t, 704).transcricao, 4000);
+    ok("o áudio cujo arquivo chegou depois é transcrito na volta seguinte",
+       msg(t, 704).transcricao === "Mandei o comprovante agora.", JSON.stringify(msg(t, 704)));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84c. o clique no meio da rodada não paga uma segunda vez ----
+  {
+    const groq = await subirGroq({ demora: 1500 });
+    const t = await subirTudo(rapido(groq), { tabelas: base([audio(groq, 801, "no-meio")]) });
+    await esperarAte(() => groq.pedidos.length === 1, 4000);
+    const r = await fetch(`http://127.0.0.1:${t.porta}/transcrever`, {
+      method: "POST", headers: comoAdmin, body: JSON.stringify({ mensagem_id: 801 }),
+    }).then(async (x) => ({ status: x.status, corpo: await x.json() }));
+    ok("o clique durante a rodada recebe o texto", r.status === 200 && r.corpo.texto === "Mandei o comprovante agora.",
+       JSON.stringify(r));
+    ok("já guardado", r.corpo.guardada === true, JSON.stringify(r.corpo));
+    ok("e o Groq foi chamado uma vez só", groq.pedidos.length === 1, `foram ${groq.pedidos.length}`);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84d. os mais novos primeiro, e no máximo cinco por volta ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(rapido(groq, { TRANSCRICAO_INTERVALO_MS: "2500" }), { tabelas: base(
+      [1, 2, 3, 4, 5, 6, 7].map((n) => audio(groq, 900 + n, `a${n}`, { criado_em: ha(n) })),
+    ) });
+    await esperarAte(() => groq.pedidos.length >= 5, 4000);
+    await espera(500);
+    const primeira = groq.pedidos.map((p) => p.nome);
+    ok("a primeira volta manda cinco", primeira.length === 5, JSON.stringify(primeira));
+    ok("os cinco mais novos, do mais novo para o mais velho",
+       JSON.stringify(primeira) === JSON.stringify(["a1", "a2", "a3", "a4", "a5"]), JSON.stringify(primeira));
+    await esperarAte(() => groq.pedidos.length >= 7, 5000);
+    ok("e a volta seguinte, os dois que sobraram", JSON.stringify(groq.pedidos.slice(5).map((p) => p.nome)) === JSON.stringify(["a6", "a7"]),
+       JSON.stringify(groq.pedidos.map((p) => p.nome)));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84e. o "sem fala" e o "grande demais" não são pagos de novo; a falha passageira não segura a volta ----
+  {
+    const groq = await subirGroq({
+      respostas: { silencio: { texto: "   " }, "erro-do-groq": { status: 500 } },
+      arquivos: { enorme: "grande", sumiu: 404 },
+    });
+    const t = await subirTudo(rapido(groq), { tabelas: base([
+      audio(groq, 1001, "silencio", { criado_em: ha(1) }),
+      audio(groq, 1002, "enorme", { criado_em: ha(2) }),
+      audio(groq, 1003, "erro-do-groq", { criado_em: ha(3) }),
+      audio(groq, 1004, "sumiu", { criado_em: ha(4) }),
+      audio(groq, 1005, "depois-dos-erros", { criado_em: ha(5) }),
+    ]) });
+    await esperarAte(() => msg(t, 1005).transcricao, 6000);
+    await espera(1500); // mais voltas: nada disto pode voltar ao Groq
+    ok("a falha passageira não segurou os outros da volta", msg(t, 1005).transcricao === "Mandei o comprovante agora.",
+       JSON.stringify(msg(t, 1005)));
+    const contar = (nome) => groq.pedidos.filter((p) => p.nome === nome).length;
+    ok("o áudio sem fala foi ao Groq uma vez só", contar("silencio") === 1, String(contar("silencio")));
+    ok("e ficou marcado, sem texto", Boolean(msg(t, 1001).transcrita_em) && !msg(t, 1001).transcricao,
+       JSON.stringify(msg(t, 1001)));
+    ok("o grande demais NÃO foi ao Groq", contar("enorme") === 0, String(contar("enorme")));
+    ok("e ficou marcado, sem texto (não se baixa de novo a cada volta)",
+       Boolean(msg(t, 1002).transcrita_em) && !msg(t, 1002).transcricao, JSON.stringify(msg(t, 1002)));
+    ok("o que o Groq recusou com 500 foi tentado uma vez e espera a próxima vez", contar("erro-do-groq") === 1,
+       String(contar("erro-do-groq")));
+    ok("e NÃO ficou marcado no banco — a falha passageira não vira desistência",
+       !msg(t, 1003).transcrita_em && !msg(t, 1004).transcrita_em,
+       JSON.stringify([msg(t, 1003), msg(t, 1004)]));
+    ok("o log conta o sem fala, o grande e o que falhou",
+       /1 sem fala/.test(log(t)) && /1 grande\(s\) demais/.test(log(t)) && /2 para tentar de novo/.test(log(t)),
+       log(t).slice(-800));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84f. o limite do Groq para a rodada pelo tempo que ele pedir ----
+  {
+    const groq = await subirGroq({ respostas: { limitado: { status: 429, retryAfter: 45 } } });
+    const t = await subirTudo(rapido(groq), { tabelas: base([
+      audio(groq, 1101, "limitado", { criado_em: ha(1) }),
+      audio(groq, 1102, "esperando", { criado_em: ha(2) }),
+    ]) });
+    await esperarAte(() => groq.pedidos.length >= 1, 4000);
+    await espera(1800); // quatro voltas
+    ok("depois do limite, nada mais foi ao Groq", groq.pedidos.length === 1, JSON.stringify(groq.pedidos.map((p) => p.nome)));
+    ok("o log diz que pausou, por quanto tempo e por quê",
+       /pausada por 45 s — o limite de uso do Groq foi atingido/.test(log(t)), log(t).slice(-600));
+    ok("e o áudio limitado não ficou marcado", !msg(t, 1101).transcrita_em);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84g. a chave recusada para a rodada, com uma linha no log ----
+  {
+    const groq = await subirGroq({ respostas: { primeiro: { status: 401 }, segundo: { status: 401 } } });
+    const t = await subirTudo(rapido(groq), { tabelas: base([
+      audio(groq, 1201, "primeiro", { criado_em: ha(1) }),
+      audio(groq, 1202, "segundo", { criado_em: ha(2) }),
+    ]) });
+    await esperarAte(() => groq.pedidos.length >= 1, 4000);
+    await espera(1800);
+    ok("com a chave recusada, o Groq foi chamado uma vez só", groq.pedidos.length === 1, String(groq.pedidos.length));
+    ok("e o log manda conferir a GROQ_API_KEY, uma vez",
+       (log(t).match(/pausada por 30 min — o Groq recusou a chave\. Confira a variável GROQ_API_KEY/g) || []).length === 1,
+       log(t).slice(-600));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84h. o arquivo que para no meio não prende a rodada ----
+  {
+    const groq = await subirGroq({ arquivos: { parado: "parado" } });
+    const t = await subirTudo(rapido(groq, { UAZAPI_TIMEOUT_MS: "800" }), { tabelas: base([
+      audio(groq, 1301, "parado", { criado_em: ha(1) }),
+      audio(groq, 1302, "atras-do-parado", { criado_em: ha(2) }),
+    ]) });
+    await esperarAte(() => msg(t, 1302).transcricao, 6000);
+    ok("o áudio atrás do arquivo parado foi transcrito assim mesmo", msg(t, 1302).transcricao === "Mandei o comprovante agora.",
+       JSON.stringify(msg(t, 1302)));
+    ok("e o parado não foi ao Groq", !groq.pedidos.some((p) => p.nome === "parado"));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84i. desligada, ela não roda; e o clique continua ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(rapido(groq, { TRANSCRICAO_AUTOMATICA: "desligada" }), { tabelas: base([audio(groq, 1401, "desligada")]) });
+    await espera(1500);
+    ok("com TRANSCRICAO_AUTOMATICA=desligada, nada vai ao Groq sozinho", groq.pedidos.length === 0, String(groq.pedidos.length));
+    ok("e o log diz que está desligada", /transcrição automática: desligada/.test(log(t)), log(t).slice(-400));
+    const r = await fetch(`http://127.0.0.1:${t.porta}/transcrever`, {
+      method: "POST", headers: comoAdmin, body: JSON.stringify({ mensagem_id: 1401 }),
+    }).then(async (x) => ({ status: x.status, corpo: await x.json() }));
+    ok("e o clique continua transcrevendo", r.status === 200 && r.corpo.guardada === true, JSON.stringify(r));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84j. sem a chave do Groq, ela não roda ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo({ GROQ_API_URL: `${groq.url}/openai/v1`, TRANSCRICAO_PRIMEIRA_MS: "200", TRANSCRICAO_INTERVALO_MS: "400" },
+      { tabelas: base([audio(groq, 1501, "sem-chave")]) });
+    await espera(1500);
+    ok("sem GROQ_API_KEY, nada vai ao Groq", groq.pedidos.length === 0, String(groq.pedidos.length));
+    ok("e a rodada nem anuncia que está ligada", !/transcrição automática: ligada/.test(log(t)));
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 84k. sem a coluna do 015, ela não roda (pagaria pelo mesmo áudio a cada volta) ----
+  {
+    const groq = await subirGroq();
+    const t = await subirTudo(rapido(groq), { tabelas: base([audio(groq, 1601, "sem-coluna")]),
+      semColunas: { mensagens: ["transcricao", "transcrita_em"] } });
+    await espera(1500);
+    ok("sem a coluna da transcrição, nada vai ao Groq sozinho", groq.pedidos.length === 0, String(groq.pedidos.length));
+    ok("e o log diz qual script falta", /015-a-transcricao-do-audio\.sql/.test(log(t)), log(t).slice(-400));
+    await t.parar(); await groq.parar();
+  }
+}
+
+// ============================================================
+//  85. O QUE FOI DITO NOS ÁUDIOS ENTRA NA BUSCA (040), num Postgres de verdade
+//
+//  A busca da lista (`buscar_conversas`) é montada aqui como no escritório:
+//  pelos dois scripts colados à mão em agosto, a partir dos próprios arquivos,
+//  e o 015 por cima. A seção guarda:
+//    - antes do 040, o que foi dito num áudio não é achado (o defeito);
+//    - depois, é achado, com o motivo 'audio', o trecho falado e o id do áudio;
+//    - vale a mais recente da conversa, escrita ou falada, e o nome continua
+//      vencendo; o outro telefone continua de fora; o acento não importa;
+//    - a função muda por dentro e não por fora (as mesmas colunas, a mesma
+//      permissão), e responde para quem atende;
+//    - os dois índices existem e servem às duas perguntas;
+//    - rodar de novo não muda nada; sem a busca, ela não é criada; sem as
+//      tabelas, nada acontece.
+// ============================================================
+{
+  console.log("\n85. O que foi dito nos áudios entra na busca (040), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar a busca nos áudios (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (caminho) => fs.readFileSync(new URL(`../sql/${caminho}`, import.meta.url), "utf8");
+    const S040 = ler("automaticos/040-o-que-foi-dito-nos-audios-entra-na-busca.sql");
+    const S015 = ler("automaticos/015-a-transcricao-do-audio.sql");
+    const BUSCA = ler("2026-08-busca-de-verdade.sql");
+    const BUSCA_IR = ler("2026-08-busca-ir-para-a-mensagem.sql");
+    // AS TRÊS TABELAS, só com as colunas que a busca lê. O resto do Zorvin não
+    // faz diferença para ela, e inventá-lo aqui seria uma segunda definição
+    // das tabelas para divergir da de produção.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin; end if;
+end $$;
+create schema if not exists extensions;
+grant usage on schema public, extensions to anon, authenticated, service_role;
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique, nome text,
+                       vantoro_nome text, nome_zorvin text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid,
+                        contato_id uuid references contatos(id), ultima_atividade timestamptz default now());
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+                        origem text not null, tipo text not null default 'texto', texto text, midia_url text,
+                        criado_em timestamptz not null default now());
+grant select on contatos, conversas, mensagens to authenticated;
+`;
+    const TEL = "adadadad-0000-0000-0000-000000000001";
+    const OUTRO_TEL = "adadadad-0000-0000-0000-000000000002";
+    const conv = (n) => `aaaaaaaa-0000-0000-0000-00000000000${n}`;
+    const cont = (n) => `cccccccc-0000-0000-0000-00000000000${n}`;
+    const SEMENTE = `
+insert into contatos (id, numero, nome) values
+  ('${cont(1)}', '5511900000001', 'Maria'), ('${cont(2)}', '5511900000002', 'José'),
+  ('${cont(3)}', '5511900000003', 'Ana'),   ('${cont(4)}', '5511900000004', 'Paulo'),
+  ('${cont(5)}', '5511900000005', 'Conciliação Ltda');
+insert into conversas (id, advogado_id, contato_id, ultima_atividade) values
+  ('${conv(1)}', '${TEL}', '${cont(1)}', now()),
+  ('${conv(2)}', '${TEL}', '${cont(2)}', now() - interval '1 hour'),
+  ('${conv(3)}', '${OUTRO_TEL}', '${cont(3)}', now()),
+  ('${conv(4)}', '${TEL}', '${cont(4)}', now() - interval '2 hour'),
+  ('${conv(5)}', '${TEL}', '${cont(5)}', now() - interval '3 hour');
+insert into mensagens (id, conversa_id, origem, tipo, texto, criado_em) values
+  ('dddddddd-0000-0000-0000-000000000001', '${conv(1)}', 'contato', 'audio', null, now() - interval '5 min'),
+  ('dddddddd-0000-0000-0000-000000000002', '${conv(2)}', 'contato', 'texto', 'segue o comprovante', now() - interval '2 hour'),
+  ('dddddddd-0000-0000-0000-000000000003', '${conv(2)}', 'contato', 'audio', null, now() - interval '1 hour'),
+  ('dddddddd-0000-0000-0000-000000000004', '${conv(3)}', 'contato', 'audio', null, now()),
+  ('dddddddd-0000-0000-0000-000000000005', '${conv(4)}', 'contato', 'audio', null, now() - interval '3 hour'),
+  ('dddddddd-0000-0000-0000-000000000006', '${conv(4)}', 'contato', 'texto', 'o comprovante foi por email', now() - interval '2 hour'),
+  ('dddddddd-0000-0000-0000-000000000007', '${conv(5)}', 'contato', 'audio', null, now() - interval '4 hour');
+`;
+    // AS TRANSCRIÇÕES entram depois do 015, que é quem cria a coluna.
+    const TRANSCRICOES = `
+update mensagens set transcricao = 'Mandei o COMPROVANTE da conciliação agora', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000001';
+update mensagens set transcricao = 'o comprovante está no seu email', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000003';
+update mensagens set transcricao = 'comprovante de outro telefone', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000004';
+update mensagens set transcricao = 'já mandei o comprovante ontem', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000005';
+update mensagens set transcricao = 'a conciliação ficou para terça', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000007';
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const buscar = async (c, termo, tel = TEL) => lista(await guardado(async () => (await c.query(
+      "select id::text, motivo, trecho, mensagem_id from public.buscar_conversas($1::uuid, $2, 80)", [tel, termo])).rows));
+    const daConversa = (achadas, n) => achadas.find((a) => a.id === conv(n));
+    const usaOIndice = async (c, sql, indice) => {
+      await c.query("set enable_seqscan = off");
+      try {
+        const plano = (await c.query(`explain (costs off) ${sql}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+        return { usa: plano.includes(indice), plano };
+      } finally { await c.query("reset enable_seqscan"); }
+    };
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await aplicar(c, BUSCA);
+      await aplicar(c, BUSCA_IR);
+      await c.query(SEMENTE);
+      await aplicar(c, S015);
+      await c.query(TRANSCRICOES);
+
+      // ---- 85a. antes do 040, o que foi dito no áudio não é achado ----
+      const antes = await buscar(c, "conciliacao");
+      ok("antes do 040, o que foi dito só num áudio NÃO é achado (o defeito, reproduzido)",
+         !daConversa(antes, 1), JSON.stringify(antes));
+
+      // ---- 85b. o 040 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S040));
+      ok("o 040 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/índice da rodada/, /índice da busca/, /procura nas transcrições/, /pode usá-la/]) {
+        ok(`a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+      ok("e que a busca responde para quem atende", item(conf, /responde para quem atende/) === "sim",
+         JSON.stringify(item(conf, /responde para quem atende/)));
+
+      // ---- 85c. depois, o áudio é achado, sem acento ----
+      const depois = await buscar(c, "conciliacao");
+      const a1 = daConversa(depois, 1) || {};
+      ok("o que foi dito num áudio passa a ser achado — e sem acento", a1.motivo === "audio", JSON.stringify(depois));
+      ok("o trecho é o que foi dito", a1.trecho === "Mandei o COMPROVANTE da conciliação agora", JSON.stringify(a1));
+      ok("e o id é o do áudio, para o painel abrir a conversa nele",
+         a1.mensagem_id === "dddddddd-0000-0000-0000-000000000001", JSON.stringify(a1));
+
+      // ---- 85d. vale a mais recente da conversa, escrita ou falada ----
+      const comprovante = await buscar(c, "comprovante");
+      ok("com o áudio mais novo que a mensagem escrita, vale o áudio",
+         (daConversa(comprovante, 2) || {}).motivo === "audio"
+           && (daConversa(comprovante, 2) || {}).mensagem_id === "dddddddd-0000-0000-0000-000000000003",
+         JSON.stringify(daConversa(comprovante, 2)));
+      ok("com a mensagem escrita mais nova que o áudio, vale a escrita",
+         (daConversa(comprovante, 4) || {}).motivo === "mensagem"
+           && (daConversa(comprovante, 4) || {}).mensagem_id === "dddddddd-0000-0000-0000-000000000006",
+         JSON.stringify(daConversa(comprovante, 4)));
+
+      // ---- 85e. o nome continua vencendo, e o outro telefone continua de fora ----
+      ok("o nome do contato continua vencendo o trecho do áudio",
+         (daConversa(depois, 5) || {}).motivo === "nome", JSON.stringify(daConversa(depois, 5)));
+      ok("o áudio de uma conversa de outro telefone continua de fora", !daConversa(comprovante, 3), JSON.stringify(comprovante));
+      const doOutro = await buscar(c, "comprovante", OUTRO_TEL);
+      ok("e é achado por quem procura naquele telefone", (daConversa(doOutro, 3) || {}).motivo === "audio", JSON.stringify(doOutro));
+
+      // ---- 85f. por fora, a função é a mesma ----
+      const colunas = (await c.query("select * from public.buscar_conversas($1::uuid, 'maria', 1)", [TEL])).fields.map((f) => f.name);
+      ok("as colunas da resposta são as mesmas, na mesma ordem",
+         JSON.stringify(colunas) === JSON.stringify(["id", "motivo", "trecho", "ultima_atividade", "mensagem_id", "mensagem_em"]),
+         JSON.stringify(colunas));
+      const comoQuemAtende = await guardado(async () => {
+        await c.query("set role authenticated");
+        try { return (await c.query("select motivo from public.buscar_conversas($1::uuid, 'conciliacao', 80)", [TEL])).rows; }
+        finally { await c.query("reset role"); }
+      });
+      ok("quem atende chama a busca e acha o áudio",
+         lista(comoQuemAtende).some((r) => r.motivo === "audio"), JSON.stringify(comoQuemAtende));
+
+      // ---- 85g. os índices servem às duas perguntas ----
+      const daRodada = await usaOIndice(c, `select * from public.mensagens where tipo = 'audio' and transcricao is null
+        and transcrita_em is null and midia_url is not null and criado_em >= now() - interval '7 days'
+        order by criado_em desc limit 50`, "mensagens_audio_por_transcrever");
+      ok("a pergunta da rodada automática usa o índice dela", daRodada.usa, daRodada.plano);
+      const daBusca = await usaOIndice(c, `select id from public.mensagens m where m.transcricao is not null
+        and public.zorvin_sem_acento(m.transcricao) like '%comprovante%'`, "mensagens_transcricao_busca_idx");
+      ok("e a busca nas transcrições usa o dela", daBusca.usa, daBusca.plano);
+      // E POR DENTRO DA FUNÇÃO, que é onde a pergunta mora de verdade. O
+      // `explain` de fora só vê "Function Scan": a função tem `set
+      // search_path` e não é desdobrada. O `auto_explain` escreve o plano de
+      // cada consulta de dentro, e o aviso chega a este cliente como notícia.
+      // É ele que pega o `transcricao is not null` tirado da função — sem
+      // essa linha, o índice parcial deixa de servir e a busca volta a ler a
+      // tabela inteira, sem nada na tela dizendo isso.
+      const planoDeDentro = await guardado(async () => {
+        const avisos = [];
+        const ouvir = (n) => avisos.push(n.message);
+        c.on("notice", ouvir);
+        try {
+          await c.query("load 'auto_explain'");
+          await c.query("set auto_explain.log_min_duration = 0");
+          await c.query("set auto_explain.log_nested_statements = on");
+          await c.query("set client_min_messages = log");
+          await c.query("set jit = off");
+          await c.query("set enable_seqscan = off");
+          await c.query("select * from public.buscar_conversas($1::uuid, 'comprovante', 80)", [TEL]);
+          return avisos.join("\n");
+        } finally {
+          await c.query("set auto_explain.log_min_duration = -1");
+          await c.query("reset client_min_messages");
+          await c.query("reset enable_seqscan");
+          await c.query("reset jit");
+          c.off("notice", ouvir);
+        }
+      });
+      ok("e a busca da lista, por dentro, usa o índice das transcrições",
+         typeof planoDeDentro === "string" && planoDeDentro.includes("mensagens_transcricao_busca_idx"),
+         typeof planoDeDentro === "string" ? planoDeDentro.slice(-1500) : JSON.stringify(planoDeDentro));
+
+      // ---- 85h. rodar de novo não muda nada ----
+      const de2 = await guardado(() => aplicar(c, S040));
+      ok("rodar de novo aplica e não acusa nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      const deNovo = await buscar(c, "conciliacao");
+      ok("e a busca continua achando o áudio", (daConversa(deNovo, 1) || {}).motivo === "audio", JSON.stringify(deNovo));
+
+      // ---- 85i. sem a busca da lista, ela não é criada ----
+      const semBusca = await bancoNovo();
+      await semBusca.query(ESQUEMA);
+      await aplicar(semBusca, S015);
+      const confSem = await guardado(() => aplicar(semBusca, S040));
+      ok("num banco sem a busca, o 040 aplica sem acusar nada", Array.isArray(confSem) && !defeito(confSem), JSON.stringify(confSem));
+      ok("e diz que não havia busca para trocar", /ainda não existe/.test(String(item(confSem, /busca da lista/))),
+         JSON.stringify(confSem));
+      const criou = (await semBusca.query("select to_regprocedure('public.buscar_conversas(uuid,text,integer)') is not null as tem")).rows[0].tem;
+      ok("e não cria uma busca que o escritório nunca instalou", criou === false, String(criou));
+      ok("o índice da rodada automática nasce assim mesmo", item(confSem, /índice da rodada/) === "true", JSON.stringify(confSem));
+
+      // ---- 85j. sem o 015, o 040 não estoura ----
+      const sem015 = await bancoNovo();
+      await sem015.query(ESQUEMA);
+      const confSem015 = await guardado(() => aplicar(sem015, S040));
+      ok("num banco sem as colunas do 015, o 040 não estoura e manda rodar o 015",
+         Array.isArray(confSem015) && /rode o script 015/.test(String(item(confSem015, /colunas da transcrição/))),
+         JSON.stringify(confSem015));
+
+      // ---- 85k. sem as tabelas do Zorvin, nada acontece ----
+      const limpo = await bancoNovo();
+      const confLimpo = await guardado(() => aplicar(limpo, S040));
+      ok("num banco sem o Zorvin, o 040 não faz nada e diz isso",
+         Array.isArray(confLimpo) && /nada a fazer/.test(String(item(confLimpo, /sem as tabelas/))), JSON.stringify(confLimpo));
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome}`).catch(() => {});
+      await raiz.end();
+    }
   }
 }
 

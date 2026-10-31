@@ -8919,26 +8919,37 @@ app.post('/contato/foto', rotaVantoro(async (req) => {
 // ------------------------------------------------------------
 app.options('/permissoes/diagnostico', (req, res) => { liberarCors(res); res.sendStatus(204); });
 // ============================================================
-//  TRANSCREVER UM ÁUDIO (pedido da equipe, 02/10)
+//  TRANSCREVER UM ÁUDIO — ao clicar (02/10) e sozinho, assim que chega (31/10)
 //
-//  "Colocar transcrição de áudio no Zorvin." Decidido com o Rodrigo: pelo
-//  GROQ (Whisper, ~US$ 0,04 por hora de áudio), e AO CLICAR num botão — nada
-//  é transcrito sozinho. Transcrever todo áudio que chega pagaria pelos que
-//  ninguém precisou ler.
+//  "Colocar transcrição de áudio no Zorvin." Decidido com o Rodrigo em 02/10:
+//  pelo GROQ (Whisper, ~US$ 0,04 por hora de áudio), AO CLICAR num botão. O
+//  argumento era não pagar pelos áudios que ninguém precisou ler.
+//
+//  EM 31/10 PASSOU A SER SOZINHO, a pedido dele, e a medição desmentiu o
+//  argumento de 02/10. Nos 14 dias até 31/10 chegaram 388 áudios de clientes
+//  (2 h 12 min de fala, uns US$ 0,10), e 161 deles (41%) já tinham sido
+//  transcritos no clique. Transcrito sozinho, o áudio passa a ser lido em vez
+//  de ouvido; a busca acha o que foi dito nele (script 040); e o copiloto
+//  entende a conversa inteira, porque ele lê `transcricao`. O botão continua
+//  na bolha: para o áudio de antes da janela da rodada, e para quando a rodada
+//  não conseguiu.
 //
 //  O TEXTO FICA GUARDADO NA MENSAGEM (`mensagens.transcricao`, script 015):
 //  a segunda pessoa que clicar no mesmo áudio recebe o guardado, sem nova ida
-//  ao Groq. Sem a coluna, transcreve assim mesmo e só não guarda — a régua de
-//  sempre: o recurso funciona antes do script, e o script só o deixa barato.
+//  ao Groq. Sem a coluna, o clique transcreve assim mesmo e só não guarda — a
+//  régua de sempre: o recurso funciona antes do script, e o script só o deixa
+//  barato. A rodada automática, sem a coluna, NÃO roda: sem guardar, ela
+//  pagaria pelo mesmo áudio a cada volta.
 //
-//  QUEM PODE: quem ENXERGA a conversa. A mensagem é lida com a identidade de
-//  quem pediu (o bilhete dele, e não a chave da ponte), então a regra de
-//  acesso do banco decide — e uma pessoa não lê pela transcrição o áudio de um
-//  telefone que ela não atende. A chave da ponte só entra para GUARDAR o texto
-//  de uma mensagem que a pessoa já provou enxergar.
+//  QUEM PODE (o clique): quem ENXERGA a conversa. A mensagem é lida com a
+//  identidade de quem pediu (o bilhete dele, e não a chave da ponte), então a
+//  regra de acesso do banco decide — e uma pessoa não lê pela transcrição o
+//  áudio de um telefone que ela não atende. A chave da ponte só entra para
+//  GUARDAR o texto de uma mensagem que a pessoa já provou enxergar.
 //
 //  A CHAVE DO GROQ MORA SÓ AQUI (`GROQ_API_KEY`, na Render). O navegador nunca
-//  a vê. Sem ela, a rota diz o que falta, com o nome da variável.
+//  a vê. Sem ela, a rota diz o que falta, com o nome da variável, e a rodada
+//  automática não roda.
 // ============================================================
 const GROQ_URL = (process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
 const GROQ_MODELO = process.env.GROQ_MODELO || 'whisper-large-v3-turbo';
@@ -8947,7 +8958,9 @@ const GROQ_MODELO = process.env.GROQ_MODELO || 'whisper-large-v3-turbo';
 const TRANSCRICAO_TETO_BYTES = 25 * 1024 * 1024;
 let semColunaDaTranscricao = false;
 // O MESMO ÁUDIO PEDIDO DUAS VEZES AO MESMO TEMPO vai ao Groq uma vez só: duas
-// pessoas abrindo a mesma conversa e clicando juntas pagariam duas vezes.
+// pessoas abrindo a mesma conversa e clicando juntas pagariam duas vezes. E,
+// desde 31/10, o clique que chega enquanto a rodada automática transcreve o
+// mesmo áudio espera a resposta dela, em vez de fazer outra ida.
 const transcricoesEmVoo = new Map();
 
 /** O cliente do banco COM A IDENTIDADE DE QUEM PEDIU: a regra de acesso vale. */
@@ -8997,38 +9010,147 @@ function explicarFalhaDoGroq(status, corpo) {
   return `O Groq não transcreveu (código ${status})${detalhe ? `: ${detalhe}` : '.'}`;
 }
 
+/** O QUE A RODADA AUTOMÁTICA FAZ COM UMA RECUSA DO GROQ — o clique só mostra
+ *  a frase. A chave recusada e o limite atingido valem para TODO áudio, e por
+ *  isso param a rodada inteira em vez de marcar áudio por áudio.
+ *
+ *  NENHUMA RECUSA DO GROQ É GUARDADA NO BANCO como "desisti", e é decisão: um
+ *  400 tanto pode ser o arquivo que ele não lê quanto um modelo trocado na
+ *  Render, e guardar a desistência no segundo caso marcaria de uma vez todos
+ *  os áudios da semana — que ninguém transcreveria depois do conserto. Fica
+ *  na memória da ponte, que esquece ao reiniciar. Só o 413 é do arquivo. */
+function comoOGroqRecusou(r) {
+  if (r.status === 401 || r.status === 403) return { desfecho: 'chave' };
+  if (r.status === 429) {
+    const segundos = Number(r.headers.get('retry-after'));
+    const ms = Number.isFinite(segundos) && segundos > 0 ? segundos * 1000 : 60 * 1000;
+    return { desfecho: 'limite', esperarMs: Math.min(Math.max(ms, 30 * 1000), 10 * 60 * 1000) };
+  }
+  if (r.status === 413) return { desfecho: 'grande' };
+  return { desfecho: 'tentar' };
+}
+
+/** UM PEDIDO COM PRAZO ATÉ O FIM DO CORPO. `fetchComTimeout` solta o relógio
+ *  quando chegam os cabeçalhos, e um corpo que para no meio prenderia para
+ *  sempre quem espera. Com a rodada automática, isso seria a transcrição de
+ *  TODOS os áudios seguintes parada até a ponte reiniciar. Aqui o relógio só
+ *  para depois de `ler` terminar. */
+async function pedirComPrazo(url, opcoes, ms, ler) {
+  const limite = UAZAPI_TETO_MS ? Math.min(ms, UAZAPI_TETO_MS) : ms;
+  const ctrl = new AbortController();
+  const relogio = setTimeout(() => ctrl.abort(), limite);
+  try {
+    const r = await fetch(url, { ...opcoes, signal: ctrl.signal });
+    return { r, corpo: await ler(r) };
+  } finally {
+    clearTimeout(relogio);
+  }
+}
+
+/** O ÁUDIO MANDADO AO GROQ. Devolve a resposta da rota (`status` e `corpo`) e
+ *  o `desfecho`, que é o que a rodada automática lê:
+ *    texto     transcreveu
+ *    sem-fala  o Groq leu e não há fala (silêncio, barulho)
+ *    grande    passa do teto: não vai caber amanhã também
+ *    chave     o Groq recusou a chave (para a rodada inteira)
+ *    limite    o limite de uso do Groq (para a rodada por um tempo)
+ *    tentar    qualquer outra coisa: tenta de novo mais tarde */
 async function transcreverNoGroq(msg) {
-  const baixou = await fetchComTimeout(msg.midia_url, {}, 30000);
-  if (!baixou.ok) {
-    return { status: 502, corpo: { ok: false, erro: `Não consegui baixar o áudio (código ${baixou.status}).` } };
+  // O TAMANHO É CONFERIDO ANTES DE LER, quando o depósito o diz: um arquivo de
+  // 40 MB não precisa entrar na memória da ponte para ouvir "grande demais" (a
+  // memória da ponte já estourou uma vez com um anexo grande, em 22/10).
+  const baixado = await pedirComPrazo(msg.midia_url, {}, 30000, async (r) => {
+    if (!r.ok) return { codigo: r.status };
+    const anunciado = Number(r.headers.get('content-length')) || 0;
+    if (anunciado > TRANSCRICAO_TETO_BYTES) {
+      try { await r.body?.cancel(); } catch (_) { /* já fechado: segue */ }
+      return { grande: true };
+    }
+    return { bytes: Buffer.from(await r.arrayBuffer()), tipo: r.headers.get('content-type') };
+  });
+  const arquivo = baixado.corpo;
+  if (arquivo.codigo) {
+    // O ARQUIVO QUE NÃO VEIO NÃO É GUARDADO COMO "DESISTI", pelo mesmo motivo
+    // das recusas do Groq: um depósito trocado ou fechado devolveria 4xx para
+    // todos os áudios de uma vez.
+    return { status: 502, desfecho: 'tentar',
+             corpo: { ok: false, erro: `Não consegui baixar o áudio (código ${arquivo.codigo}).` } };
   }
-  const bytes = Buffer.from(await baixou.arrayBuffer());
-  if (!bytes.length) return { status: 502, corpo: { ok: false, erro: 'O arquivo do áudio veio vazio.' } };
-  if (bytes.length > TRANSCRICAO_TETO_BYTES) {
-    return { status: 413, corpo: { ok: false, erro: 'Este áudio é grande demais para transcrever (mais de 25 MB).' } };
+  if (arquivo.grande || arquivo.bytes.length > TRANSCRICAO_TETO_BYTES) {
+    return { status: 413, desfecho: 'grande',
+             corpo: { ok: false, erro: 'Este áudio é grande demais para transcrever (mais de 25 MB).' } };
   }
-  const mime = msg.midia_mime || baixou.headers.get('content-type') || 'audio/ogg';
+  if (!arquivo.bytes.length) {
+    return { status: 502, desfecho: 'tentar', corpo: { ok: false, erro: 'O arquivo do áudio veio vazio.' } };
+  }
+  const mime = msg.midia_mime || arquivo.tipo || 'audio/ogg';
   const form = new FormData();
-  form.append('file', new Blob([bytes], { type: mime }), `audio.${extensaoDoAudio(mime)}`);
+  form.append('file', new Blob([arquivo.bytes], { type: mime }), `audio.${extensaoDoAudio(mime)}`);
   form.append('model', GROQ_MODELO);
   // A LÍNGUA VAI DITA: sem ela o Whisper adivinha pelos primeiros segundos, e
   // um "alô" curto vira espanhol ou galego. O escritório atende em português.
   form.append('language', 'pt');
   form.append('response_format', 'json');
   form.append('temperature', '0');
-  const r = await fetchComTimeout(`${GROQ_URL}/audio/transcriptions`, {
+  const { r, corpo } = await pedirComPrazo(`${GROQ_URL}/audio/transcriptions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
     body: form,
-  }, 90000);
-  let corpo = null;
-  try { corpo = await r.json(); } catch (_) { /* resposta sem JSON: fica nulo */ }
+  }, 90000, async (resposta) => {
+    try { return await resposta.json(); } catch (_) { return null; } // resposta sem JSON: fica nulo
+  });
   if (!r.ok) {
     console.error(`transcrição: o Groq respondeu ${r.status}`, JSON.stringify(corpo || {}).slice(0, 300));
-    return { status: 502, corpo: { ok: false, erro: explicarFalhaDoGroq(r.status, corpo) } };
+    return { status: 502, ...comoOGroqRecusou(r), corpo: { ok: false, erro: explicarFalhaDoGroq(r.status, corpo) } };
   }
   const texto = String((corpo && corpo.text) || '').trim();
-  return { status: 200, corpo: { ok: true, texto, guardada: false } };
+  return { status: 200, desfecho: texto ? 'texto' : 'sem-fala', corpo: { ok: true, texto, guardada: false } };
+}
+
+/** GUARDA O QUE O GROQ DEVOLVEU. Com texto, a transcrição. Sem texto (o áudio
+ *  sem fala, o grande demais), só `transcrita_em`: é a marca de "a ponte já
+ *  tentou e não há o que mostrar", e é ela que impede a rodada automática de
+ *  pagar de novo pelo mesmo silêncio a cada volta. O botão da bolha continua
+ *  lá, porque o painel só olha `transcricao`. Devolve se GUARDOU UM TEXTO. */
+async function guardarTranscricao(id, texto) {
+  if (semColunaDaTranscricao) return false;
+  const agora = new Date().toISOString();
+  const campos = texto ? { transcricao: texto, transcrita_em: agora } : { transcrita_em: agora };
+  const { error } = await supabase.from('mensagens').update(campos).eq('id', id);
+  if (error && ['42703', 'PGRST204'].includes(String(error.code))) {
+    semColunaDaTranscricao = true;
+    console.warn('transcrição: a coluna "mensagens.transcricao" não existe — o texto vai '
+      + 'para a tela mas não fica guardado, e a transcrição automática fica desligada. '
+      + 'Rode sql/automaticos/015-a-transcricao-do-audio.sql.');
+    return false;
+  }
+  if (error) {
+    console.error('transcrição: não consegui guardar o texto', error.message);
+    return false;
+  }
+  return Boolean(texto);
+}
+
+/** O ÁUDIO TRANSCRITO E GUARDADO — uma escrita só, para o clique e para a
+ *  rodada automática. Duas escritas divergiriam no primeiro conserto, e
+ *  divergir aqui é um dos dois caminhos pagar duas vezes pelo mesmo áudio ou
+ *  esquecer de guardar. A promessa fica em `transcricoesEmVoo` até o texto
+ *  estar GUARDADO, e não só transcrito: quem chega no meio recebe a resposta
+ *  inteira, com `guardada` certo. */
+function transcreverEGuardar(msg) {
+  const id = String(msg.id);
+  let promessa = transcricoesEmVoo.get(id);
+  if (!promessa) {
+    promessa = (async () => {
+      const resposta = await transcreverNoGroq(msg);
+      if (resposta.desfecho === 'grande') await guardarTranscricao(id, '');
+      if (resposta.status !== 200) return resposta;
+      const guardada = await guardarTranscricao(id, resposta.corpo.texto);
+      return { ...resposta, corpo: { ...resposta.corpo, guardada } };
+    })().finally(() => transcricoesEmVoo.delete(id));
+    transcricoesEmVoo.set(id, promessa);
+  }
+  return promessa;
 }
 
 app.options('/transcrever', (req, res) => { liberarCors(res); res.sendStatus(204); });
@@ -9063,32 +9185,11 @@ app.post('/transcrever', async (req, res) => {
       return res.status(409).json({ ok: false, erro: 'O arquivo deste áudio ainda não chegou — não há o que transcrever.' });
     }
 
-    let promessa = transcricoesEmVoo.get(id);
-    if (!promessa) {
-      promessa = transcreverNoGroq(msg).finally(() => transcricoesEmVoo.delete(id));
-      transcricoesEmVoo.set(id, promessa);
-    }
-    const resposta = await promessa;
-    if (resposta.status !== 200) return res.status(resposta.status).json(resposta.corpo);
-
     // GUARDAR é um extra: falhando, a pessoa recebe o texto do mesmo jeito, e
     // a próxima vai ao Groq de novo — mais caro, e nada some.
-    let guardada = false;
-    if (!semColunaDaTranscricao && resposta.corpo.texto) {
-      const { error: erroGuardar } = await supabase.from('mensagens')
-        .update({ transcricao: resposta.corpo.texto, transcrita_em: new Date().toISOString() })
-        .eq('id', id);
-      if (erroGuardar && ['42703', 'PGRST204'].includes(String(erroGuardar.code))) {
-        semColunaDaTranscricao = true;
-        console.warn('transcrição: a coluna "mensagens.transcricao" não existe — o texto vai '
-          + 'para a tela mas não fica guardado. Rode sql/automaticos/015-a-transcricao-do-audio.sql.');
-      } else if (erroGuardar) {
-        console.error('transcrição: não consegui guardar o texto', erroGuardar.message);
-      } else {
-        guardada = true;
-      }
-    }
-    return res.json({ ok: true, texto: resposta.corpo.texto, guardada });
+    const resposta = await transcreverEGuardar(msg);
+    if (resposta.status !== 200) return res.status(resposta.status).json(resposta.corpo);
+    return res.json({ ok: true, texto: resposta.corpo.texto, guardada: resposta.corpo.guardada });
   } catch (e) {
     const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
       ? 'O Groq demorou demais para responder. Tente de novo.'
@@ -9097,6 +9198,179 @@ app.post('/transcrever', async (req, res) => {
     return res.status(502).json({ ok: false, erro: motivo });
   }
 });
+
+// ------------------------------------------------------------
+//  A RODADA AUTOMÁTICA (31/10)
+//
+//  De 20 em 20 segundos, a ponte procura os áudios que chegaram e ainda não
+//  foram transcritos, e transcreve até cinco por volta, um de cada vez. Vinte
+//  segundos é "assim que chega" para quem está com a conversa aberta: o
+//  arquivo do áudio leva alguns segundos para ser baixado da Uazapi, e o texto
+//  aparece na bolha logo depois, pelo tempo real do painel.
+//
+//  VINTE, E NÃO QUINZE, PARA SOBRAR VEZ AO CLIQUE. O Groq limita os pedidos
+//  por minuto, e o limite vale para a rodada e para o botão juntos. Cinco por
+//  volta de 15 em 15 segundos seriam 20 por minuto, que é o que o plano
+//  gratuito dele aceitava pela documentação que eu conhecia — a página de
+//  limites não abriu daqui em 31/10, e o plano da conta do escritório não se
+//  vê. De 20 em 20 são 15 por minuto. Passando do limite, a rodada para pelo
+//  tempo que o Groq pedir (o 429, mais abaixo); e só a fila da primeira subida
+//  chega perto dele.
+//
+//  OS DOS ÚLTIMOS SETE DIAS, e não o histórico inteiro. Sete dias cobrem a
+//  ponte que dormiu de madrugada, um Groq fora do ar por horas e a semana em
+//  que a conversa ainda está sendo atendida. O áudio mais velho continua com o
+//  botão "Transcrever". Na primeira subida são uns 170 (medido em 31/10), e a
+//  fila anda em uns doze minutos.
+//
+//  OS DE TODO MUNDO: do cliente e da equipe, de conversa e de grupo. A busca e
+//  o copiloto precisam também do que a equipe disse.
+//
+//  O QUE PARA A RODADA, e por quê:
+//    - sem `GROQ_API_KEY`, ou com `TRANSCRICAO_AUTOMATICA=desligada` (o jeito
+//      de voltar a ser só no clique sem mexer no código);
+//    - sem a coluna do 015: sem guardar, ela pagaria pelo mesmo áudio a cada
+//      volta;
+//    - a chave recusada pelo Groq: para por 30 minutos, com uma linha no log.
+//      Insistir, áudio por áudio, só encheria o log de recusas;
+//    - o limite de uso do Groq: para pelo tempo que ele pedir (de 30 segundos
+//      a 10 minutos). O clique da equipe usa a mesma cota, e é ele que importa
+//      nessa hora.
+//
+//  O ÁUDIO QUE FALHA é tentado de novo depois de 1, 5 e 30 minutos, e depois
+//  disso fica para o clique — até a ponte reiniciar, quando ela tenta de novo.
+//  Essa memória não vai para o banco (ver `comoOGroqRecusou`). Vão para o
+//  banco só o "sem fala" e o "grande demais" (`guardarTranscricao`), que não
+//  mudam se tentados de novo.
+//
+//  O APAGADO NÃO É TRANSCRITO: quem apagou não quis que ele ficasse, e o
+//  cliente que apagou o próprio áudio menos ainda.
+//
+//  NADA DO QUE FOI DITO VAI PARA O LOG: só quantos áudios e quantos segundos.
+// ------------------------------------------------------------
+const TRANSCRICAO_AUTOMATICA_DESLIGADA =
+  String(process.env.TRANSCRICAO_AUTOMATICA || '').trim().toLowerCase() === 'desligada';
+// `TRANSCRICAO_INTERVALO_MS` e `TRANSCRICAO_PRIMEIRA_MS` são OPCIONAIS e
+// existem para a bancada: uma prova não espera 20 segundos pela primeira volta,
+// e as provas que não são desta rotina a empurram para daqui a uma hora.
+const TRANSCRICAO_INTERVALO_MS = Number(process.env.TRANSCRICAO_INTERVALO_MS) || 20 * 1000;
+// A PRIMEIRA VOLTA ESPERA 20 SEGUNDOS: numa publicação, a ponte velha ainda
+// está terminando o que começou, e as duas não podem pegar o mesmo áudio.
+const TRANSCRICAO_PRIMEIRA_MS = Number(process.env.TRANSCRICAO_PRIMEIRA_MS) || 20 * 1000;
+const TRANSCRICAO_JANELA_MS = 7 * 24 * 60 * 60 * 1000;
+const TRANSCRICAO_POR_VOLTA = 5;
+const TRANSCRICAO_ESPERAS_MS = [60 * 1000, 5 * 60 * 1000, 30 * 60 * 1000];
+const TRANSCRICAO_PAUSA_DA_CHAVE_MS = 30 * 60 * 1000;
+let transcricaoRodando = false;
+let transcricaoPausadaAte = 0;
+let transcricaoAnunciada = false;
+// id → { vezes, proxima }. `proxima` 0 quer dizer "desisti nesta subida".
+const tentativasDaTranscricao = new Map();
+
+function pausarATranscricao(ms, motivo) {
+  transcricaoPausadaAte = Date.now() + ms;
+  const quanto = ms >= 60 * 1000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 1000)} s`;
+  console.warn(`transcrição automática: pausada por ${quanto} — ${motivo}.`);
+}
+
+/** O ÁUDIO QUE NÃO DEU CERTO AGORA: a próxima tentativa, ou a desistência. */
+function anotarTentativaDaTranscricao(id) {
+  const t = tentativasDaTranscricao.get(id) || { vezes: 0, proxima: 0 };
+  t.vezes += 1;
+  t.proxima = t.vezes <= TRANSCRICAO_ESPERAS_MS.length ? Date.now() + TRANSCRICAO_ESPERAS_MS[t.vezes - 1] : 0;
+  tentativasDaTranscricao.set(id, t);
+}
+
+async function transcreverOsQueChegaram() {
+  if (desligando || transcricaoRodando || TRANSCRICAO_AUTOMATICA_DESLIGADA) return;
+  if (!process.env.GROQ_API_KEY || semColunaDaTranscricao) return;
+  if (Date.now() < transcricaoPausadaAte) return;
+  transcricaoRodando = true;
+  try {
+    const desde = new Date(Date.now() - TRANSCRICAO_JANELA_MS).toISOString();
+    // OS MAIS NOVOS PRIMEIRO: é o que a equipe está olhando agora. E um áudio
+    // velho que sempre falha não segura os novos atrás dele.
+    const { data, error } = await supabase.from('mensagens').select('*')
+      .eq('tipo', 'audio').is('transcricao', null).is('transcrita_em', null)
+      .not('midia_url', 'is', null).gte('criado_em', desde)
+      .order('criado_em', { ascending: false }).limit(50);
+    if (error) {
+      if (['42703', 'PGRST204'].includes(String(error.code))) {
+        semColunaDaTranscricao = true;
+        console.warn('transcrição automática: a coluna "mensagens.transcricao" não existe — '
+          + 'ela fica desligada. Rode sql/automaticos/015-a-transcricao-do-audio.sql.');
+      } else {
+        console.error('transcrição automática: não consegui ler os áudios', error.message);
+      }
+      return;
+    }
+    if (!transcricaoAnunciada) {
+      transcricaoAnunciada = true;
+      console.log('transcrição automática: ligada — os áudios dos últimos 7 dias são transcritos '
+        + `sozinhos, de ${Math.round(TRANSCRICAO_INTERVALO_MS / 1000)} em ${Math.round(TRANSCRICAO_INTERVALO_MS / 1000)} segundos.`);
+    }
+    if (tentativasDaTranscricao.size > 5000) tentativasDaTranscricao.clear();
+    const agora = Date.now();
+    const daVez = (data || [])
+      .filter((m) => m.apagada !== true && m.apagada_pelo_contato !== true)
+      .filter((m) => {
+        const t = tentativasDaTranscricao.get(String(m.id));
+        return !t || (t.proxima > 0 && t.proxima <= agora);
+      })
+      .slice(0, TRANSCRICAO_POR_VOLTA);
+
+    let transcritos = 0, semFala = 0, grandes = 0, falharam = 0, segundos = 0;
+    for (const msg of daVez) {
+      if (desligando || semColunaDaTranscricao || Date.now() < transcricaoPausadaAte) break;
+      const id = String(msg.id);
+      let r;
+      try {
+        r = await transcreverEGuardar(msg);
+      } catch (e) {
+        r = { status: 502, desfecho: 'tentar', corpo: { ok: false, erro: String((e && e.message) || e).slice(0, 160) } };
+      }
+      if (r.desfecho === 'texto' && r.corpo.guardada) {
+        tentativasDaTranscricao.delete(id);
+        transcritos += 1;
+        segundos += Number(msg.midia_segundos) || 0;
+      } else if (r.desfecho === 'sem-fala' || r.desfecho === 'grande') {
+        // DESISTIR NESTA SUBIDA MESMO QUE A MARCA NÃO TENHA IDO PARA O BANCO:
+        // sem isso, uma gravação que falhasse faria a rodada pagar de novo pelo
+        // mesmo silêncio a cada volta.
+        tentativasDaTranscricao.set(id, { vezes: Infinity, proxima: 0 });
+        if (r.desfecho === 'grande') grandes += 1; else semFala += 1;
+      } else if (r.desfecho === 'chave') {
+        pausarATranscricao(TRANSCRICAO_PAUSA_DA_CHAVE_MS,
+          'o Groq recusou a chave. Confira a variável GROQ_API_KEY na Render');
+        break;
+      } else if (r.desfecho === 'limite') {
+        pausarATranscricao(r.esperarMs || 60 * 1000, 'o limite de uso do Groq foi atingido');
+        break;
+      } else {
+        // 'tentar', e o texto que veio e não foi guardado.
+        anotarTentativaDaTranscricao(id);
+        falharam += 1;
+      }
+    }
+    if (transcritos || semFala || grandes || falharam) {
+      const partes = [`${transcritos} áudio(s) transcrito(s)${segundos ? ` (${segundos} s de fala)` : ''}`];
+      if (semFala) partes.push(`${semFala} sem fala`);
+      if (grandes) partes.push(`${grandes} grande(s) demais`);
+      if (falharam) partes.push(`${falharam} para tentar de novo`);
+      console.log(`transcrição automática: ${partes.join(', ')}.`);
+    }
+  } catch (e) {
+    console.error('transcrição automática:', (e && e.message) || e);
+  } finally {
+    transcricaoRodando = false;
+  }
+}
+
+if (TRANSCRICAO_AUTOMATICA_DESLIGADA && process.env.GROQ_API_KEY) {
+  console.log('transcrição automática: desligada (TRANSCRICAO_AUTOMATICA=desligada) — só ao clicar.');
+}
+setTimeout(() => { transcreverOsQueChegaram().catch(() => {}); }, TRANSCRICAO_PRIMEIRA_MS).unref();
+setInterval(() => { transcreverOsQueChegaram().catch(() => {}); }, TRANSCRICAO_INTERVALO_MS).unref();
 
 // ============================================================
 //  O COPILOTO — "Sugerir resposta" (13/10)
