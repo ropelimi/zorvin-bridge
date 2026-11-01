@@ -16844,8 +16844,12 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     }
     const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
     const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
-    const defeito = (l) => (l || []).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
-    const item = (l, re) => ((l || []).find((x) => re.test(x.item)) || {}).resposta;
+    // A RESPOSTA PODE SER O ERRO, e não a lista: com uma sabotagem, a segunda
+    // rodada estoura, e o `.find` num objeto derrubaria a seção inteira antes
+    // de as conferências seguintes dizerem o nome delas.
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
     const ANA = "00000000-0000-0000-0000-00000000000a";
     const comoPessoa = async (c, uid, fn) => {
       await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
