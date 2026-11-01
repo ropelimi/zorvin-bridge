@@ -11314,9 +11314,15 @@ setTimeout(() => { repassarRespostasDosAvisos().catch(() => {}); }, 6000).unref?
 //
 //  A janela é configurável porque quem sabe o horário do escritório não é quem
 //  escreve isto.
+//
+//  O DOMINGO TAMBÉM (01/11), e desligado, como sempre foi. A variável existe
+//  porque a prova da janela escancarada reprovava TODO DOMINGO: o domingo era
+//  fechado por escrito, e "das 0h às 24h" não o abria. Ligá-la no escritório
+//  custa as horas da franquia acima.
 const VANTORO_ACORDADO_DE = Number(process.env.VANTORO_ACORDADO_DE || 7);
 const VANTORO_ACORDADO_ATE = Number(process.env.VANTORO_ACORDADO_ATE || 20);
 const VANTORO_ACORDADO_SABADO = String(process.env.VANTORO_ACORDADO_SABADO || '1') === '1';
+const VANTORO_ACORDADO_DOMINGO = String(process.env.VANTORO_ACORDADO_DOMINGO || '0') === '1';
 
 function dentroDoHorarioDeTrabalho(agora = new Date()) {
   // Em SÃO PAULO, não em UTC. A máquina da Render roda em UTC, e uma janela
@@ -11327,7 +11333,7 @@ function dentroDoHorarioDeTrabalho(agora = new Date()) {
   }).formatToParts(agora);
   const hora = Number(partes.find((p) => p.type === 'hour').value);
   const dia = partes.find((p) => p.type === 'weekday').value;
-  if (dia === 'Sun') return false;
+  if (dia === 'Sun' && !VANTORO_ACORDADO_DOMINGO) return false;
   if (dia === 'Sat' && !VANTORO_ACORDADO_SABADO) return false;
   return hora >= VANTORO_ACORDADO_DE && hora < VANTORO_ACORDADO_ATE;
 }

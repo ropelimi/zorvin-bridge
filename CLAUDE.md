@@ -46,6 +46,10 @@ Variáveis de ambiente (no Render):
   resposta da época mandava procurar erro de digitação num token que estava certo.
 - `VANTORO_LENTA_MS` — a partir de quantos milissegundos uma ida ao Vantoro merece
   uma linha no log. **Opcional**, padrão 3000. Ver "Quanto o Vantoro demora" abaixo.
+- `VANTORO_ACORDADO_DE`, `VANTORO_ACORDADO_ATE`, `VANTORO_ACORDADO_SABADO` e
+  `VANTORO_ACORDADO_DOMINGO` — a janela em que a ponte mantém o Vantoro
+  acordado (padrão: das 7h às 20h, sábado sim, domingo não). **Opcionais.** Ver
+  "A prova da janela do Vantoro reprovava todo domingo (01/11)".
 - `DATABASE_URL` — o endereço do **Session Pooler** do Supabase, para a ponte
   aplicar sozinha os scripts de `sql/automaticos/`. **Opcional: sem ela, tudo
   como antes** e as mudanças de banco continuam sendo coladas à mão. Ver "Os
@@ -799,6 +803,28 @@ ela não vem, a ponte dorme de madrugada, e é seguro — o que chega a acorda.
 **Uma suposição, dita como tal:** a conta supõe o Vantoro no mesmo workspace e
 no plano gratuito, como diz o comentário do `index.js`. Quem confirma é a
 página de cobrança da Render ("Free usage", com as horas do mês).
+
+### A prova da janela do Vantoro reprovava todo domingo (01/11)
+
+A batida que mantém o Vantoro acordado (`dentroDoHorarioDeTrabalho`) fecha o
+domingo **por escrito**, e as cenas da "janela escancarada" (das 0h às 24h)
+esperavam a batida em qualquer dia. Todo domingo, duas conferências
+reprovavam sem defeito nenhum: *"dentro da janela, a ponte bate"* e *"o ping
+não leva o token"*. Achado no domingo de 01/11, rodando a suíte inteira antes
+da entrega do "Resumir". Ninguém tinha visto porque a rodada semanal é na
+segunda e quase nenhuma PR é feita no domingo.
+
+Entrou `VANTORO_ACORDADO_DOMINGO`, **opcional e desligada** (o domingo continua
+fechado no escritório; ligá-la custa as horas da franquia acima). As duas cenas
+a ligam, e uma cena nova confere a regra do domingo **no domingo**: sem a
+variável, a janela das 0h às 24h não bate. Nos outros dias, a mesma cena
+confere que bate. Uma meia-noite no meio dela vale qualquer um dos dois.
+
+Prova: na seção 20. **3 sabotagens e 3 pegas**, rodadas num domingo, em
+cópias, e lidas uma a uma: a variável ignorada (é o código de antes, e
+reproduz as duas reprovações), o domingo ligado por padrão, e a regra do
+domingo tirada. **Ao escrever uma cena que depende do dia, pense no dia em que
+ela vai rodar sem você olhando.**
 
 ## Desativar um telefone — o que ele para de fazer, e o que continua
 

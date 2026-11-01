@@ -2294,9 +2294,14 @@ console.log("\n18. O anexo não fica vazio");
   console.log("\nA janela em que o Vantoro é mantido acordado");
 
   // Janela escancarada: o ping tem de sair assim que a ponte sobe.
+  //
+  // COM O DOMINGO ABERTO (01/11). O domingo é fechado por escrito, e esta cena
+  // reprovava TODO DOMINGO sem defeito nenhum: "das 0h às 24h" não o abria.
+  // Achado no domingo de 01/11, rodando a suíte inteira antes de uma entrega.
   {
     const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24",
-                                VANTORO_ACORDADO_SABADO: "1" }, { vantoro: {} });
+                                VANTORO_ACORDADO_SABADO: "1", VANTORO_ACORDADO_DOMINGO: "1" },
+                              { vantoro: {} });
     await espera(900);
     const pings = t.van.recebidas.filter((x) => x.caminho === "/ping");
     ok("dentro da janela, a ponte bate no /ping do Vantoro", pings.length >= 1,
@@ -2321,12 +2326,30 @@ console.log("\n18. O anexo não fica vazio");
   // banco e sem sessão. Mandar o token numa chamada que não pede é espalhá-lo
   // por mais um lugar sem ganhar nada.
   {
-    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24" },
-                              { vantoro: {} });
+    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24",
+                                VANTORO_ACORDADO_DOMINGO: "1" }, { vantoro: {} });
     await espera(900);
     const ping = t.van.recebidas.find((x) => x.caminho === "/ping");
     ok("e o ping não leva o token junto", !!ping && !ping.autorizacao,
        JSON.stringify(ping || null));
+    await t.parar();
+  }
+
+  // O DOMINGO FICA FORA, a não ser que se peça. Só dá para ver isso num
+  // domingo: nos outros dias a mesma janela bate, e é o que se confere neles.
+  // Uma meia-noite no meio da cena vale qualquer um dos dois.
+  {
+    const diaEmSaoPaulo = () => new Intl.DateTimeFormat("en-US",
+      { timeZone: "America/Sao_Paulo", weekday: "short" }).format(new Date());
+    const antes = diaEmSaoPaulo();
+    const t = await subirTudo({ VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "24",
+                                VANTORO_ACORDADO_SABADO: "1" }, { vantoro: {} });
+    await espera(900);
+    const virou = diaEmSaoPaulo() !== antes;
+    const pings = t.van.recebidas.filter((x) => x.caminho === "/ping").length;
+    const certo = antes === "Sun" ? pings === 0 : pings >= 1;
+    ok(`sem VANTORO_ACORDADO_DOMINGO, só o domingo fica fora (hoje, em São Paulo: ${antes})`,
+       virou || certo, `bateu ${pings} vez(es)`);
     await t.parar();
   }
 }
