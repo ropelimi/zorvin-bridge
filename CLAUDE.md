@@ -2491,6 +2491,159 @@ procurava um trecho do meio do texto da IA, e o `JSON.parse` só cita o começo
 — a sabotagem que põe a mensagem de erro no log passaria. E a do
 `</conversa>` só olhava a mensagem do cliente, e não a nota.
 
+### O assunto do Finalizar — a IA sugere (01/11)
+
+Pedido do Rodrigo, da lista de recomendações de 31/10: *"Siga para a
+recomendação 5"* — *"A IA sugere o assunto no Finalizar. A lista já abre com o
+assunto provável marcado, e a pessoa só confere. Finalizar fica mais rápido, e
+o relatório mais certo."*
+
+`POST /copiloto/assunto` (`{ conversa_id }`, com login) devolve
+`{ assuntos: [{ id, nome }], motivo, mensagens, notas, atendimento }`. A mesma
+chave, o mesmo modelo e a mesma ida à Anthropic do copiloto. **Nada é gravado
+aqui**: quem marca é o painel, e só se a pessoa ainda não mexeu na lista. O que
+vai ao banco é o clique da pessoa, com a sugestão junto (script 042, logo
+abaixo).
+
+**Medido em 01/11, só contando:** 346 cliques de "Já tratei" nos 14 dias
+anteriores (uns 25 por dia), com 1,05 assunto por clique; só 15 dos 346 (4%)
+marcaram mais de um. Por isso a regra diz *"quase sempre é um só"*, e o teto
+é dois.
+
+**O que muda em relação ao resumo, e por quê:**
+
+| | resumo | assunto |
+|---|---|---|
+| o que lê | até 300 mensagens | o atendimento de agora (até 60 mensagens), e as 10 de antes dele |
+| a resposta | três partes | os assuntos da lista, presos pelo formato, e um porquê |
+| esforço | médio | baixo: é uma escolha numa lista curta |
+| teto | 8000 | 2048 |
+
+- **O atendimento de agora.** O assunto de um Finalizar é o do protocolo que
+  está sendo fechado, e não o da conversa de dois anos. Com o 028, a marca é o
+  `aberto_em` do atendimento mais recente da conversa
+  (`comecoDoAtendimento`). Do que veio antes vão só as dez últimas, como
+  contexto. **A mensagem que abriu o protocolo é do atendimento de agora**
+  (`>=`): ela tem a mesma hora do `aberto_em`.
+- **A marca na conversa.** A IA lê *"--- Aqui começa o atendimento de agora
+  (protocolo X) ---"* antes do primeiro item dele, e só quando há o que ficou
+  antes. **O primeiro item do atendimento decide, haja marca ou não.** Na
+  primeira escrita, a marca caía depois da primeira mensagem do atendimento
+  que é a conversa inteira, e foi a prova que achou.
+- **Sem a marca, as quarenta últimas**, como no copiloto: sem o 028 (calado),
+  ou com a leitura do atendimento falhando (o log diz). A marca ajuda, e não é
+  condição.
+- **Os nomes presos à lista.** O formato da resposta leva os nomes dos
+  assuntos ativos num `enum`, na ordem da lista: a IA não tem como devolver um
+  assunto que não existe. A ordem estável é o que deixa a Anthropic
+  reaproveitar o formato já compilado (ele fica guardado 24 horas); trocar a
+  lista custa uma compilação a mais na primeira sugestão seguinte.
+- **Na volta, conferido de novo** (`sugestaoDeAssuntoDaResposta`): cada nome é
+  procurado na lista, **o nome exato primeiro**, e só depois a chave sem acento
+  (a régua do 025). Dois assuntos que só diferem no acento podem existir (o
+  índice do 005 é por `lower`, que guarda o acento), e a chave sozinha
+  escolheria um deles no chute. O que não casa sai, o repetido sai, e são no
+  máximo dois. O porquê vai numa linha, até 240 caracteres.
+- **Na dúvida, nenhum.** A regra manda devolver a lista vazia quando a conversa
+  não diz o assunto (só cumprimento, só agradecimento). É a régua da leitura
+  das douradas: marcar o assunto errado é pior do que não marcar, porque quem
+  confere com pressa confirma o que já veio marcado.
+- **As notas vão**, como no resumo, porque a sugestão não vai a cliente
+  nenhum. A apagada não vai, e a de antes da mensagem mais velha lida também
+  não.
+- **O nome do assunto não fecha a lista por escrito.** No texto que vai à IA,
+  `<`, `>` e quebra de linha viram espaço (quem escreve os nomes é quem
+  administra, pela tela); o formato leva o nome inteiro.
+- **Cada falha diz o que fazer**, e nenhuma vai à Anthropic: sem a lista (005),
+  409; a lista que falha, 502 com o código; nenhum assunto ativo, 409; a
+  conversa ou as mensagens que falham, 502 com o código. **As notas e o manual
+  que falham não impedem** a sugestão, e o log diz.
+- **Cada resposta estranha da IA vira uma frase**: a recusa (*"Marque à
+  mão"*), o corte no teto, o texto que não é o JSON. Do `JSON.parse` que falha,
+  o log leva só o nome do erro: a mensagem dele cita o começo do texto da IA.
+- **Dois pedidos juntos são uma ida** (`assuntosEmVoo`, por pessoa e
+  conversa): a janela aberta, fechada e aberta de novo antes de a resposta
+  chegar.
+- **`/copiloto/estado` ganhou `assunto: true`.** A ponte de antes não diz, e a
+  janela do Finalizar abre como sempre abriu, sem pedir à IA.
+- **O custo**, pela tabela do copiloto (US$ 0,10 por milhão de tokens de
+  entrada e US$ 0,50 de saída no Haiku 5.5): o pedido mais longo (30 mil
+  caracteres, uns 10 mil tokens) sai por uns US$ 0,001. Com 25 por dia, menos
+  de US$ 1 por mês.
+
+#### A sugestão fica gravada (script 042)
+
+`sql/automaticos/042-a-sugestao-do-assunto-fica-gravada.sql` acrescenta
+`zorvin_tratamentos.sugestao_ia` (jsonb, opcional): `{"assuntos": [ids],
+"marcou": true|false}`, igual em todas as linhas do clique e nula sem
+sugestão. `marcou` diz se a janela marcou sozinha ou se a sugestão chegou só
+como dica, com a pessoa já marcando. **É o que dá para medir o acerto
+depois**: sem isso, uma sugestão que erra muito, confirmada por quem conferiu
+com pressa, vira o assunto errado no relatório sem ninguém saber.
+
+- **Uma regra:** objeto, de no máximo 2000 caracteres. Quem grava é a tela de
+  quem atende, e a coluna não pode virar depósito de outra coisa.
+- **Nenhuma permissão nova.** Conferido no banco do escritório em 01/11: o
+  INSERT de `zorvin_tratamentos` é da tabela inteira para `authenticated`, e
+  vale para a coluna nova. A conferência pergunta isso ao banco no papel de
+  quem atende (`has_column_privilege`).
+- **A conferência conta cliques, e não linhas** (`count(distinct (conversa_id,
+  quem, quando))`): o clique de dois assuntos são duas linhas.
+- **Sem o 042, o painel grava o clique sem a coluna**: a sugestão some do
+  registro, e o registro não se perde.
+
+Provas: seção 88 (a rota, 66 conferências, com um Claude de mentira) e seção
+89 (o 042 num Postgres de verdade, 15, com o defeito conferido antes: gravar a
+coluna antes do 042 dá 42703, que é o caso que o painel contorna).
+
+**50 sabotagens e 50 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma:
+
+- **o estado e quem lê:** o estado sem `assunto: true`; as mensagens lidas com
+  a chave da ponte, e o atendimento também; a lista sem o filtro dos ativos, e
+  sem a ordem dela;
+- **o pedido:** o formato sem o `enum`; o esforço médio; a hora no cache; sem
+  o manual; o nome do assunto sem a limpeza; o grupo nunca dito;
+- **o atendimento de agora:** o atendimento mais antigo no lugar do mais
+  recente; sem as dez de antes, e com todas; a mensagem que abriu o protocolo
+  fora dele (`>` no lugar de `>=`); a marca sempre; o laço da primeira escrita
+  (a marca depois da primeira mensagem); sem as quarenta;
+- **as notas e o teto:** a nota apagada indo; a nota de antes das mensagens
+  lidas indo; o teto cortando o fim; as notas contadas como mensagens;
+- **a volta da IA:** só a chave sem acento, com o primeiro da lista vencendo e
+  com o último; sem conferir contra a lista; sem o teto de dois; sem tirar o
+  repetido; o porquê com quebra de linha, e sem teto; a recusa e o corte
+  ignorados; o log com o texto da IA;
+- **os pedidos juntos:** sem juntar; e sem tirar do mapa (12 reprovações: o
+  pedido seguinte recebe a resposta guardada do anterior);
+- **as falhas:** a falha da lista virando "não tem lista", e a tabela que
+  falta virando falha; a falha das notas impedindo a sugestão, e calada; a
+  falha do atendimento derrubando a sugestão; o manual que falha impedindo; a
+  falha das mensagens calada; a falha da conversa virando "não achei";
+- **o 042:** sem a regra da forma; sem o teto de 2000; a regra e a coluna sem
+  a guarda da segunda rodada; a conferência contando linhas; sem a guarda do
+  banco limpo; a tabela da conferência depois da guarda; a conferência sem
+  perguntar ao banco.
+
+**Duas pegavam com a seção estourando no meio, e a culpa era da prova.** Com a
+segunda rodada do 042 recusada, a resposta era o erro, e não a lista, e o
+`.find` num objeto derrubava a seção 89 antes de as conferências seguintes
+dizerem o nome delas. Hoje os ajudantes conferem que é uma lista (`lista`, a
+régua das seções vizinhas), e as duas são pegas por três conferências cada.
+
+**Duas lições desta rodada, as duas de processo:**
+
+- **A sessão foi reiniciada no meio, e o que não estava no GitHub sumiu**: a
+  rota inteira e o script, escritos e ainda sem commit. O reinício traz o
+  repositório de novo, limpo. **Trabalho em curso vai para o ramo remoto
+  cedo**, em commits de rascunho (a PR junta tudo num só ao mesclar).
+- **O caractere invisível tem uma causa, e agora se sabe qual.** A ferramenta
+  que grava o arquivo recebe o texto em JSON, e no JSON a escrita `\u0300` é o
+  próprio caractere de acento: escrito assim, ele chega ao arquivo convertido.
+  Foi o que aconteceu de novo aqui, e é a mesma armadilha que o painel já
+  registrou duas vezes. **Depois de escrever uma expressão com escapa de
+  acento, confira os bytes do arquivo.**
+
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
 Pedido do Rodrigo: o que o DataCrazy faz nas conversas, *"para facilitar a
