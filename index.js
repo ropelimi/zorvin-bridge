@@ -10284,12 +10284,16 @@ async function sugerirAssunto(jwt, conversaId) {
   const emOrdem = escolhidas.slice().reverse();
   // A MARCA DE ONDE O ATENDIMENTO DE AGORA COMEÇOU, antes do primeiro item
   // dele — e só quando há o que ficou antes: sem nada antes, a conversa
-  // inteira já é o atendimento de agora.
+  // inteira já é o atendimento de agora. O primeiro item dele decide, haja
+  // marca ou não: sem isso, a marca cairia depois da primeira mensagem do
+  // atendimento que é a conversa inteira.
   const linhas = [];
   let marcou = false;
   for (const item of emOrdem) {
-    if (comeco && !marcou && item.quando >= comeco.quando && linhas.length) {
-      linhas.push(`--- Aqui começa o atendimento de agora${comeco.protocolo ? ` (protocolo ${comeco.protocolo})` : ''} ---`);
+    if (comeco && !marcou && item.quando >= comeco.quando) {
+      if (linhas.length) {
+        linhas.push(`--- Aqui começa o atendimento de agora${comeco.protocolo ? ` (protocolo ${comeco.protocolo})` : ''} ---`);
+      }
       marcou = true;
     }
     linhas.push(item.linha);
