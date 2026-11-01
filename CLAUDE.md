@@ -2362,6 +2362,109 @@ Duas pegas trouxeram, além da conferência certa, falhas de assunto alheio
 conferência certa estava em todas; a suíte normal, uma prova de cada vez, não
 tem esse atropelo. Pega se lê, e não só se conta.
 
+### O resumo da conversa — "Resumir" (01/11)
+
+Pedido do Rodrigo, da lista de recomendações de 31/10: *"…em seguida pode
+continuar com a recomendação 4"* — *"Um botão 'Resumir' que diz em poucas linhas o que o
+cliente quer, o que já foi combinado e o que falta. Serve para quem pega a
+conversa de uma colega e para o cliente que volta depois de semanas. Usa a
+mesma chave do copiloto."*
+
+`POST /copiloto/resumir` (`{ conversa_id }`, com login) devolve
+`{ resumo: { quer, combinado, falta }, mensagens, notas, cortou, ate, avisos }`.
+A mesma chave, o mesmo modelo e a mesma ida à Anthropic do copiloto
+(`ANTHROPIC_API_KEY`, `COPILOTO_MODELO`, `pedirAoClaude`). **Nada é gravado**:
+o painel mostra o resumo só para quem pediu. **Nenhum SQL e nenhuma variável
+nova.**
+
+**O que muda em relação ao copiloto, e por quê:**
+
+| | copiloto | resumo |
+|---|---|---|
+| o que lê | as 40 últimas | até 300 mensagens e 60 mil caracteres |
+| as notas internas | **não vão** | **vão**, marcadas como da equipe |
+| a resposta | texto livre | JSON com três partes (`output_config.format`) |
+| o manual que falha | não sugere | resume assim mesmo |
+
+- **As notas vão porque o resumo não vai a cliente nenhum.** No copiloto elas
+  ficam de fora porque a sugestão entra na caixa de escrever, a um Enter do
+  cliente. O resumo é lido pela equipe, e é nas notas que ela escreve o que
+  combinou. Cada nota vai como *"Nota interna da equipe (Ana), o cliente não
+  viu: …"*, e a regra diz à IA para não escrever que algo foi dito ao cliente
+  se só está numa nota. **A nota apagada não vai** (`apagada_em`, filtrada na
+  ponte: pedir a coluna pelo nome num banco sem ela daria 42703).
+- **A conversa longa é cortada PELO COMEÇO.** Mensagens e notas viram uma
+  linha do tempo só, da mais nova para a mais velha, e o teto de caracteres é
+  gasto nessa ordem. A leitura pede **301** mensagens: é a de número 301 que
+  diz se a conversa é mais longa do que o que foi lido (lendo 300 cravadas,
+  uma conversa de 300 sairia como "cortada"). Cortada, a nota de antes da
+  janela também fica de fora, o pedido diz à IA que as mais antigas não
+  couberam, e o painel recebe `cortou: true`.
+- **O formato, e não texto livre**: o painel desenha as três partes sempre do
+  mesmo jeito. O formato da Anthropic não aceita teto de itens nem de tamanho
+  (`maxItems`, `maxLength`), e por isso o teto mora na volta
+  (`resumoDaResposta`): no máximo **8 itens** por lista, **400 caracteres**
+  por item (600 no "quer"), **cada item numa linha só**, e o que não é texto
+  sai.
+- **Esforço médio, escrito** (`output_config.effort: 'medium'`, que é o padrão
+  do Haiku 5.5 — mas o padrão muda de um modelo para outro, e o modelo se
+  troca por variável), e **`max_tokens` de 8000**: no Haiku 5.5 o "pensar
+  antes" vem ligado e conta dentro do teto.
+- **O manual vai junto** (para a IA entender "VENDA LN", "JG"), e a leitura dele
+  que falha **não impede o resumo**. No copiloto, o manual tem as regras do que
+  dizer ao cliente, e sugerir sem elas seria a ausência no lugar da falha;
+  aqui ele só ajuda a entender os nomes.
+- **As notas que não vieram são DITAS** (`avisos`), e não caladas: um resumo sem
+  o que a equipe combinou nas notas se leria como o caso inteiro. **A tabela
+  que falta não é aviso** — o recurso não existe ali.
+- **`ate`** é o `criado_em` da mensagem mais nova que entrou no resumo. É por
+  ela que o painel conta as mensagens que chegaram depois — pelo relógio do
+  banco, e não pelo do computador de quem pediu.
+- **Cada resposta estranha vira uma frase**, e nunca um resumo inventado: a
+  recusa da IA (`refusal`), a resposta cortada no teto (`max_tokens`), o texto
+  que não é o JSON, as três partes vazias. A frase da Anthropic que recusa é a
+  do copiloto (`explicarFalhaDaAnthropic`).
+- **Só números no log**, como no copiloto. O `JSON.parse` que falha cita o
+  começo do texto da IA na mensagem de erro, e por isso o log leva só o nome
+  do erro.
+
+**`GET /copiloto/estado` ganhou `resumo: true`.** O painel pode chegar ao ar
+antes da ponte — em 14/10 a Render passou um dia sem publicar a ponte —, e o
+botão de uma rota que ainda não existe daria 404 a cada clique. A ponte de
+antes não manda a chave, e o painel esconde só o "Resumir".
+
+**O custo**, pela tabela de preços da Anthropic (a mesma do copiloto: o Haiku
+5.5 sai a US$ 0,10 por milhão de tokens de entrada e US$ 0,50 de saída, até 100
+mil tokens por pedido): um resumo da
+conversa mais longa (60 mil caracteres, uns 20 mil tokens) sai por uns
+**US$ 0,003**. Os 60 mil caracteres também deixam o pedido longe dos 100 mil
+tokens, acima dos quais o preço do Haiku 5.5 sobe.
+
+Prova: seção 87, 52 conferências, com um Claude de mentira que devolve o JSON.
+**28 sabotagens e 28 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma:
+
+- **as notas:** sem as notas (8 reprovações); lidas com a chave da ponte; a
+  apagada indo; sem dizer que o cliente não viu; sem a limpeza da etiqueta
+  (`</conversa>` dentro da nota);
+- **o pedido:** sem o formato; sem o esforço; o teto padrão; a hora no cache;
+  sem o manual;
+- **a conversa longa:** sem a de número 301; as mais velhas no lugar das mais
+  novas; o teto de caracteres cortando o fim; sem dizer à IA que cortou; a nota
+  de antes da janela;
+- **a volta:** a recusa ignorada; o corte ignorado; os itens com quebra de
+  linha; sem o teto de itens; o resumo vazio virando resumo; o log com o texto
+  da IA;
+- **o resto:** a falha das notas calada; a tabela que falta avisando; o manual
+  que falha impedindo o resumo; o estado sem `resumo: true`; sem juntar os
+  cliques; as mensagens lidas com a chave da ponte; o `ate` na mensagem mais
+  velha.
+
+**Duas conferências foram apertadas antes das sabotagens**, relendo: a do log
+procurava um trecho do meio do texto da IA, e o `JSON.parse` só cita o começo
+— a sabotagem que põe a mensagem de erro no log passaria. E a do
+`</conversa>` só olhava a mensagem do cliente, e não a nota.
+
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
 Pedido do Rodrigo: o que o DataCrazy faz nas conversas, *"para facilitar a
@@ -3450,7 +3553,14 @@ scripts que se aplicam sozinhos". Daqui para a frente:
 
 **E o SQL pelo conector do Supabase roda sem pedir permissão a ele (26/10).**
 Nas palavras dele: *"Sempre que for para executar o SQL, não precisa me pedir
-permissão, pode sempre fazer."* O que a autorização não muda:
+permissão, pode sempre fazer."* **E de novo em 01/11, pedindo que ficasse
+guardado:** *"salva aí na sua memória: sempre que precisar rodar alguma
+consulta no banco de dados, não precisa ficar pedindo permissão. Só faz!"*
+Vale para consultar e para corrigir dados, e também para não avisar antes:
+roda-se, e conta-se depois o que foi feito, quando fizer diferença. Foi o que
+aconteceu no mesmo dia: o assunto "SEM RETORNO DO CLIENTE" foi criado direto
+em `zorvin_assuntos` (dado, e não estrutura — é o que a tela de assuntos
+faz), com a lista conferida antes e depois. O que a autorização não muda:
 
 - **mudança de estrutura** (tabela, coluna, regra) continua indo por
   `sql/automaticos/`. Não é por falta de permissão: é o que mantém o banco e o
