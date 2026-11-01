@@ -3927,8 +3927,19 @@ Trigger em `mensagens` atualiza `conversas` (prévia, ordem, não lidas). Realti
 ## Fluxo de trabalho — PRs (REGRA IMPORTANTE do Rodrigo)
 
 - **Cada entrega/pedido deve ir numa PR NOVA.** Nunca reutilizar nem estender uma PR já mesclada.
-- O Rodrigo faz o merge e, na rodada seguinte, quer **sempre uma PR nova** (não empilhar em cima da anterior).
+- **Mesclar não pede o OK dele** — dito em 01/11: *"Não fica me pedindo ok,
+  sempre que estiver tudo certo é só mesclar, não precisa de permissão para
+  isso."* "Tudo certo" quer dizer: as provas verdes no último commit da PR, sem
+  conflito com a `main`, e nenhum comentário ou revisão esperando resposta. Com
+  PR nos dois repositórios, **a da ponte entra primeiro**. Mesclou, conta-se a
+  ele o que entrou no ar.
+- **O que continua sendo dele é a decisão sobre o conteúdo**, e não o merge.
+  O merge publica sozinho e o script de `sql/automaticos/` roda na subida: um
+  script que reescreve dado de produção sem volta pede a pergunta ANTES (ver
+  "As senhas voltam ao histórico (script 039, 29/10)"). Com uma pergunta dessas
+  em aberto, não está "tudo certo".
+- Mesclada a PR, a rodada seguinte é **sempre uma PR nova** (não empilhar em cima da anterior).
 - Fluxo por rodada: recomeçar a branch a partir da `main` mais recente
   (`git fetch origin main && git checkout -B <branch> origin/main`), aplicar a mudança,
-  commit, push e **abrir uma PR nova**.
-- Passo a passo (SQL, merge, etc.) vai **no chat**, não na descrição da PR.
+  commit, push, **abrir uma PR nova**, esperar a prova ficar verde e mesclar.
+- Passo a passo (SQL, o que conferir depois de publicar, etc.) vai **no chat**, não na descrição da PR.
