@@ -93,6 +93,11 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            // dela, encurta.
            FUNIL_IA_PRIMEIRA_MS: "3600000",
            FUNIL_IA_INTERVALO_MS: "3600000",
+           // O ACOMPANHAMENTO POR ETAPA, pelo mesmo motivo: a rodada chama uma
+           // função do banco, e no meio de outra prova esse pedido mudaria a
+           // conta dela. A seção 94, que é a dela, encurta.
+           ACOMPANHAMENTO_PRIMEIRA_MS: "3600000",
+           ACOMPANHAMENTO_INTERVALO_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -17926,6 +17931,757 @@ console.log("\n92. A IA move o funil: a rodada da ponte");
        f.perguntas.length === 1 && /Rode sql\/automaticos\/044-a-ia-move-o-funil\.sql/.test(registro(t)),
        `${f.perguntas.length} perguntas — ${registro(t).slice(-300)}`);
     await t.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+//  93. O ACOMPANHAMENTO POR ETAPA (045), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 02/11: quando o cliente fica parado numa etapa sem
+//  responder, quem cuida dele recebe uma tarefa com a mensagem pronta. O
+//  banco desta seção é o da seção 86 (a regra de acesso de produção e a
+//  herança da Supabase), com o funil (017, 043, 044), as tarefas (018), o
+//  expediente (021) e a régua de quem vê um telefone (023), aplicados a
+//  partir dos próprios arquivos.
+//
+//  A seção guarda:
+//    - as regras: só quem administra escreve; quem criou e desde quando a
+//      regra vale são do gatilho; mudar os dias recomeça a conta;
+//    - o relógio: a primeira ação da equipe depois do cliente começa a conta,
+//      e as cobranças seguintes NÃO a recomeçam — é o que faz a cadência (2
+//      dias, depois 5) andar; o "ok" do cliente também conta;
+//    - o que não vira lembrete: a regra que nasceu depois do vencimento, a
+//      agendada esperando a hora, o lembrete ainda aberto, a etapa desativada,
+//      o grupo, a arquivada, a linha desativada, o funil do telefone
+//      desligado, o departamento fora do expediente;
+//    - quem recebe: o responsável, quem escreveu por último, e ninguém quando
+//      essa pessoa está desativada ou não vê o telefone;
+//    - o teto por pessoa e o limite por volta;
+//    - o lembrete que se fecha sozinho quando a conversa anda — e o que NÃO
+//      se fecha (a mensagem automática; a tarefa que uma pessoa criou);
+//    - só a ponte chama; rodar de novo não mexe em nada; banco limpo.
+//
+//  O TEMPO PASSA POR `envelhecer`: todo carimbo de hora do banco anda para
+//  trás junto, e o silêncio continua sendo o mesmo silêncio — a chave do que
+//  já foi lembrado não muda, como no relógio de verdade.
+// ============================================================
+{
+  console.log("\n93. O acompanhamento por etapa (045), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o acompanhamento (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const nomes = fs.readdirSync(new URL("../sql/automaticos/", import.meta.url));
+    const S = (n) => ler(nomes.find((x) => x.startsWith(`${n}-`)));
+    const S045 = S("045");
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, ordem int not null default 0);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, enviado_por_id uuid, enviado_por text,
+  criado_em timestamptz not null default now(), unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { rod: "00000000-0000-0000-0000-000000000011", ana: "00000000-0000-0000-0000-00000000000a",
+                bia: "00000000-0000-0000-0000-00000000000b", caio: "00000000-0000-0000-0000-00000000000c",
+                dani: "00000000-0000-0000-0000-00000000000d" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoPapel = async (c, papel, fn) => {
+      await c.query(`set role ${papel}`);
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    const SEMPRE = JSON.stringify(Object.fromEntries(["seg", "ter", "qua", "qui", "sex", "sab", "dom"].map((d) => [d, ["00:00", "23:59"]])));
+    const diasAtras = (d) => new Date(Date.now() - d * 86400e3).toISOString();
+
+    // O ZORVIN COM TUDO O QUE O 045 LÊ, na ordem da pasta.
+    async function zorvin() {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query("insert into departamentos (nome, ordem) values ('Sucesso do Cliente', 1), ('Acordos', 2)");
+      for (const n of ["004", "005", "006", "008", "013", "017", "018", "020", "021", "023", "028", "037", "043", "044"]) {
+        await c.query(S(n));
+      }
+      // O EXPEDIENTE NÃO PODE DEPENDER DO CALENDÁRIO: sem feriados, e o
+      // Sucesso do Cliente aberto todo dia, o dia inteiro. As cenas do
+      // expediente põem o feriado de hoje de propósito.
+      await c.query("delete from zorvin_feriados");
+      await c.query(`insert into zorvin_fora_do_horario (departamento_id, semana) values (1, $1::jsonb)
+                     on conflict (departamento_id) do update set semana = excluded.semana`, [SEMPRE]);
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U.rod}', 'Rodrigo', true), ('${U.ana}', 'Ana', false),
+                       ('${U.bia}', 'Bia', false), ('${U.caio}', 'Caio', false), ('${U.dani}', 'Dani', false)`);
+      const tel = async (nome, dep, ativo = true) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id, ativo) values ($1, $1, $2, $3) returning id", [nome, dep, ativo])).rows[0].id;
+      c.T = { sac: await tel("SAC", 1), aud: await tel("Audiências", 1), velho: await tel("SAC antigo", 1, false),
+              acordos: await tel("Acordos", 2) };
+      // Ana, Bia e Dani veem o Sucesso do Cliente inteiro; o Caio, só os Acordos.
+      await c.query("insert into permissoes (usuario_id, departamento_id) values ($1, 1), ($2, 1), ($3, 1), ($4, 2)",
+                    [U.ana, U.bia, U.dani, U.caio]);
+      c.n = 0;
+      c.cliente = async ({ tel = c.T.sac, grupo = false, nome } = {}) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+          [grupo ? `grupo:${900 + ++c.n}` : `55719${String(++c.n).padStart(8, "0")}`, nome || `Cliente ${c.n}`])).rows[0].id;
+        const conv = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [tel, ct])).rows[0].id;
+        return { ct, conv };
+      };
+      c.msg = (conv, origem, quando, extra = {}) => c.query(
+        `insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em, enviado_por_id, automatica)
+         values ($1, $2, 'x', $3, $4, $5, $6)`,
+        [conv, origem, crypto.randomBytes(6).toString("hex"), quando, extra.por || null, extra.automatica || false]);
+      c.etapa = async (nome, dep = 1, telId = null) => (await c.query(
+        `select id from zorvin_etapas where departamento_id = $1 and advogado_id is not distinct from $2::uuid and nome = $3`,
+        [dep, telId, nome])).rows[0]?.id;
+      // O cartão na etapa, desde N dias atrás (o 017 já pôs o cliente novo
+      // na primeira etapa; o carimbo de quando entrou é posto depois).
+      c.naEtapa = async (ct, nomeEtapa, desdeDias, { dep = 1, telId = null } = {}) => {
+        const et = await c.etapa(nomeEtapa, dep, telId);
+        const k = (await c.query(
+          `insert into zorvin_cartoes (contato_id, departamento_id, advogado_id, etapa_id) values ($1, $2, $3, $4)
+           on conflict (contato_id, departamento_id, advogado_id) do update set etapa_id = excluded.etapa_id
+           returning id`, [ct, dep, telId, et])).rows[0].id;
+        await c.query("update zorvin_cartoes set movido_em = $2, criado_em = least(criado_em, $2::timestamptz) where id = $1",
+                      [k, diasAtras(desdeDias)]);
+        return k;
+      };
+      // A REGRA, escrita por quem administra — e com o "desde quando vale"
+      // posto para trás, como se ela existisse há um mês.
+      c.regra = async (nomeEtapa, dias, texto = "Olá, {nome}! Conseguiu ver?", { dep = 1, telId = null, valeHa = 30 } = {}) => {
+        const et = await c.etapa(nomeEtapa, dep, telId);
+        const id = await comoPessoa(c, U.rod, async () => (await c.query(
+          "insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, $2, $3) returning id", [et, dias, texto])).rows[0].id);
+        if (valeHa !== null) {
+          await c.query("set session_replication_role = replica");
+          await c.query("update zorvin_acompanhamentos set vale_desde = $2 where id = $1", [id, diasAtras(valeHa)]);
+          await c.query("set session_replication_role = default");
+        }
+        return id;
+      };
+      c.rodada = async (limite = 50, teto = 100) => (await comoPapel(c, "service_role", () =>
+        c.query("select zorvin_acompanhar_funil($1, $2) as r", [limite, teto]))).rows[0].r;
+      c.tarefas = async (conv) => (await c.query(
+        "select * from zorvin_tarefas where conversa_id = $1 order by criada_em", [conv])).rows;
+      // O TEMPO PASSA: todo carimbo anda para trás N dias, junto.
+      c.envelhecer = async (dias) => {
+        const i = `${dias} days`;
+        await c.query("set session_replication_role = replica");
+        try {
+          await c.query(`update mensagens set criado_em = criado_em - $1::interval`, [i]);
+          await c.query(`update zorvin_cartoes set movido_em = movido_em - $1::interval, criado_em = criado_em - $1::interval`, [i]);
+          await c.query(`update zorvin_tarefas set criada_em = criada_em - $1::interval, vence_em = vence_em - $1::interval,
+                           feita_em = feita_em - $1::interval`, [i]);
+          await c.query(`update zorvin_acompanhamentos_feitos set desde = desde - $1::interval, criado_em = criado_em - $1::interval`, [i]);
+          await c.query(`update zorvin_acompanhamentos set vale_desde = vale_desde - $1::interval, criado_em = criado_em - $1::interval`, [i]);
+          await c.query(`update conversas set tratada_em = tratada_em - $1::interval, ultima_atividade = ultima_atividade - $1::interval`, [i]);
+          await c.query(`update fila_envio set agendada_para = agendada_para - $1::interval, criado_em = criado_em - $1::interval`, [i]);
+        } finally {
+          await c.query("set session_replication_role = default");
+        }
+      };
+      return c;
+    }
+
+    try {
+      const c = await zorvin();
+
+      // ---- 93a. aplicar ----
+      const conf = await guardado(() => aplicar(c, S045));
+      ok("93a o 045 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que só a ponte cria os lembretes e que quem entrou lê as regras",
+         item(conf, /só a ponte/) === "true" && item(conf, /registro dos lembretes/) === "true"
+         && item(conf, /quem entrou lê/) === "sim", JSON.stringify(conf));
+
+      // ---- 93b. as regras ----
+      const etAguardando = await c.etapa("Aguardando cliente");
+      const daAna = await guardado(() => comoPessoa(c, U.ana, () =>
+        c.query("insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, 3, 'oi')", [etAguardando])));
+      ok("93b quem não administra não escreve regra (42501)", daAna.codigo === "42501", JSON.stringify(daAna));
+      const r3 = await guardado(() => comoPessoa(c, U.rod, async () => (await c.query(
+        `insert into zorvin_acompanhamentos (etapa_id, dias, texto, criado_por, vale_desde, criado_em)
+         values ($1, 3, 'Olá, {nome}! Conseguiu separar os documentos?', $2, now() - interval '90 days', now() - interval '90 days')
+         returning *`, [etAguardando, U.ana])).rows[0]));
+      ok("quem administra escreve; quem criou e desde quando vale são do gatilho, e não da tela",
+         r3 && r3.criado_por === U.rod && Date.now() - new Date(r3.vale_desde).getTime() < 60e3
+         && Date.now() - new Date(r3.criado_em).getTime() < 60e3, JSON.stringify(r3));
+      const leAna = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select count(*)::int as n from zorvin_acompanhamentos")).rows[0].n));
+      ok("quem atende lê as regras", leAna === 1, JSON.stringify(leAna));
+      const dup = await guardado(() => comoPessoa(c, U.rod, () =>
+        c.query("insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, 3, 'outra')", [etAguardando])));
+      ok("duas regras com os mesmos dias na mesma etapa são recusadas (23505)", dup.codigo === "23505", JSON.stringify(dup));
+      const zero = await guardado(() => comoPessoa(c, U.rod, () =>
+        c.query("insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, 0, 'x')", [etAguardando])));
+      const vazio = await guardado(() => comoPessoa(c, U.rod, () =>
+        c.query("insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, 4, '   ')", [etAguardando])));
+      ok("zero dias e o texto em branco são recusados (23514)", zero.codigo === "23514" && vazio.codigo === "23514",
+         JSON.stringify({ zero, vazio }));
+      // O texto muda sem recomeçar a conta; os dias recomeçam.
+      await c.query("set session_replication_role = replica");
+      await c.query("update zorvin_acompanhamentos set vale_desde = now() - interval '10 days' where id = $1", [r3.id]);
+      await c.query("set session_replication_role = default");
+      // (guardados: com a regra de cima recusada, não há o que mudar — e a prova
+      // tem de dizer qual conferência viu o defeito, e não estourar)
+      const mudouTexto = (await guardado(() => comoPessoa(c, U.rod, async () => (await c.query(
+        "update zorvin_acompanhamentos set texto = 'Olá, {nome}! Tudo certo com os documentos?' where id = $1 returning *",
+        [r3 && r3.id])).rows[0]))) || {};
+      ok("mudar só o texto não recomeça a conta da regra, e diz quem mudou",
+         !!mudouTexto.vale_desde && Date.now() - new Date(mudouTexto.vale_desde).getTime() > 9 * 86400e3
+         && mudouTexto.mudado_por === U.rod && mudouTexto.criado_por === U.rod, JSON.stringify(mudouTexto));
+      const mudouDias = (await guardado(() => comoPessoa(c, U.rod, async () => (await c.query(
+        "update zorvin_acompanhamentos set dias = 4 where id = $1 returning *", [r3 && r3.id])).rows[0]))) || {};
+      ok("mudar os dias recomeça a conta (vale desde agora)",
+         !!mudouDias.vale_desde && Date.now() - new Date(mudouDias.vale_desde).getTime() < 60e3, JSON.stringify(mudouDias));
+      await comoPessoa(c, U.rod, () => c.query("delete from zorvin_acompanhamentos where etapa_id = $1", [etAguardando]));
+
+      // ---- 93c. só a ponte chama a rodada ----
+      const priv = async (papel, obj, tipo = "function") => (await c.query(
+        tipo === "function" ? "select has_function_privilege($1, $2, 'execute') as p" : "select has_table_privilege($1, $2, 'select') as p",
+        [papel, obj])).rows[0].p;
+      ok("93c quem entrou e quem não entrou não chamam a rodada; a ponte chama",
+         (await priv("authenticated", "public.zorvin_acompanhar_funil(integer, integer)")) === false
+         && (await priv("anon", "public.zorvin_acompanhar_funil(integer, integer)")) === false
+         && (await priv("service_role", "public.zorvin_acompanhar_funil(integer, integer)")) === true);
+      ok("e quem entrou não lê o registro do que foi lembrado",
+         (await priv("authenticated", "public.zorvin_acompanhamentos_feitos", "table")) === false
+         && (await priv("anon", "public.zorvin_acompanhamentos", "table")) === false);
+      // (perguntado ao banco, e não tentado: o truncate das regras esbarraria
+      // antes no registro do que foi lembrado, que tem uma chave para elas)
+      const truncar = (await c.query("select has_table_privilege('authenticated', 'public.zorvin_acompanhamentos', 'truncate') as p")).rows[0].p;
+      ok("nem quem administra esvazia as regras de uma vez (o truncate não passa pela regra de acesso)",
+         truncar === false, String(truncar));
+
+      // ---- 93d. o lembrete nasce ----
+      // O cliente pediu, a equipe respondeu há 4 dias, e ele não voltou.
+      const regraAg = await c.regra("Aguardando cliente", 3, "Olá, {nome}! Conseguiu separar os documentos?");
+      const d1 = await c.cliente();
+      await c.msg(d1.conv, "contato", diasAtras(5));
+      await c.msg(d1.conv, "advogado", diasAtras(4), { por: U.bia });
+      await c.query("update conversas set responsavel_id = $2 where id = $1", [d1.conv, U.ana]);
+      const k1 = await c.naEtapa(d1.ct, "Aguardando cliente", 10);
+      const ra = await c.rodada();
+      const t1 = await c.tarefas(d1.conv);
+      ok("93d a rodada cria um lembrete", ra && ra.criadas === 1, JSON.stringify(ra));
+      ok("para o responsável, com a etapa e os dias, a mensagem pronta e vencendo agora",
+         t1.length === 1 && t1[0].para_quem === U.ana
+         && t1[0].texto === "Acompanhar o cliente em “Aguardando cliente” (lembrete de 3 dias)."
+         && t1[0].mensagem === "Olá, {nome}! Conseguiu separar os documentos?"
+         && Math.abs(Date.now() - new Date(t1[0].vence_em).getTime()) < 120e3, JSON.stringify(t1));
+      ok("criado pelo Zorvin (sem pessoa em quem criou)", t1[0] && t1[0].criada_por === null, JSON.stringify(t1[0]));
+      const rb = await c.rodada();
+      ok("e a rodada seguinte não repete", rb && rb.criadas === 0 && (await c.tarefas(d1.conv)).length === 1, JSON.stringify(rb));
+      ok("quem atende vê o lembrete e a mensagem", (await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select mensagem from zorvin_tarefas where conversa_id = $1", [d1.conv])).rows[0]?.mensagem)))
+        === "Olá, {nome}! Conseguiu separar os documentos?");
+
+      // ---- 93e. a cadência ----
+      const etProp = "Proposta/acordo enviado";
+      await c.regra(etProp, 2, "Olá, {nome}! Conseguiu ver a proposta?");
+      await c.regra(etProp, 5, "Olá, {nome}! Ainda tem interesse no acordo?");
+      const e1 = await c.cliente();
+      await c.msg(e1.conv, "contato", diasAtras(10));
+      await c.msg(e1.conv, "advogado", diasAtras(3), { por: U.ana });      // a proposta
+      await c.query("update conversas set responsavel_id = $2 where id = $1", [e1.conv, U.ana]);
+      await c.naEtapa(e1.ct, etProp, 3);
+      const rc1 = await c.rodada();
+      let te = await c.tarefas(e1.conv);
+      ok("93e no dia 3, o lembrete de 2 dias", te.length === 1 && /lembrete de 2 dias/.test(te[0].texto), JSON.stringify({ rc1, te }));
+      // A equipe cobra agora: o lembrete se fecha, e o de 5 dias ainda não vence.
+      await c.msg(e1.conv, "advogado", new Date().toISOString(), { por: U.ana });
+      const rc2 = await c.rodada();
+      te = await c.tarefas(e1.conv);
+      ok("a cobrança da equipe fecha o lembrete sozinho", rc2.fechadas >= 1 && te[0].feita_em && te[0].feita_por === null,
+         JSON.stringify({ rc2, te }));
+      ok("e não recomeça a conta: o de 2 dias não volta", te.length === 1, JSON.stringify(te));
+      await c.envelhecer(3);
+      const rc3 = await c.rodada();
+      te = await c.tarefas(e1.conv);
+      ok("no dia 6 chega o de 5 dias — contado do dia 0, e não da cobrança",
+         te.length === 2 && /lembrete de 5 dias/.test(te[1].texto) && te[1].mensagem === "Olá, {nome}! Ainda tem interesse no acordo?",
+         JSON.stringify({ rc3, te: te.map((t) => t.texto) }));
+      await c.envelhecer(10);
+      const rc4 = await c.rodada();
+      ok("e a cadência termina: sem resposta, nada mais nasce", (await c.tarefas(e1.conv)).length === 2, JSON.stringify(rc4));
+
+      // ---- 93f. duas regras vencidas juntas: só a maior ----
+      const f1 = await c.cliente();
+      await c.msg(f1.conv, "advogado", diasAtras(6), { por: U.ana });
+      await c.naEtapa(f1.ct, etProp, 6);
+      const rf = await c.rodada();
+      const tf = await c.tarefas(f1.conv);
+      ok("93f com a de 2 e a de 5 vencidas, só a de 5 vira tarefa, e a de 2 é dada por feita",
+         tf.length === 1 && /lembrete de 5 dias/.test(tf[0].texto) && rf.puladas >= 1, JSON.stringify({ rf, tf }));
+      await c.envelhecer(1);
+      ok("e a de 2 não aparece depois", (await c.rodada()) && (await c.tarefas(f1.conv)).length === 1);
+
+      // ---- 93g. o "ok" do cliente também conta ----
+      const g1 = await c.cliente();
+      await c.msg(g1.conv, "advogado", diasAtras(5), { por: U.bia });
+      await c.msg(g1.conv, "contato", diasAtras(4));                       // "ok, mando amanhã"
+      await c.naEtapa(g1.ct, "Aguardando cliente", 8);
+      const rg = await c.rodada();
+      ok("93g o cliente que escreveu por último também recebe o lembrete (o “ok, mando amanhã”)",
+         (await c.tarefas(g1.conv)).length === 1, JSON.stringify(rg));
+
+      // O aviso automático (a audiência, 037) não é a equipe agindo: não começa
+      // a conta do cliente que escreveu antes dele.
+      const g2 = await c.cliente();
+      await c.msg(g2.conv, "contato", diasAtras(6));
+      await c.msg(g2.conv, "advogado", diasAtras(4), { automatica: true });
+      await c.naEtapa(g2.ct, "Aguardando cliente", 8);
+      await comoPessoa(c, U.rod, async () => c.query(
+        "insert into zorvin_acompanhamentos (etapa_id, dias, texto) values ($1, 5, 'Olá de novo!')", [await c.etapa("Aguardando cliente")]));
+      await c.query("set session_replication_role = replica");
+      await c.query("update zorvin_acompanhamentos set vale_desde = now() - interval '30 days' where dias = 5 and texto = 'Olá de novo!'");
+      await c.query("set session_replication_role = default");
+      await c.rodada();
+      const tg2 = await c.tarefas(g2.conv);
+      ok("o aviso automático não começa a conta: o de 5 dias vence pelo cliente, de 6 dias atrás",
+         tg2.length === 1 && /lembrete de 5 dias/.test(tg2[0].texto), JSON.stringify(tg2.map((t) => t.texto)));
+      await comoPessoa(c, U.rod, () => c.query("delete from zorvin_acompanhamentos where dias = 5 and texto = 'Olá de novo!'"));
+
+      // ---- 93h. a resposta atrasada da equipe começa a conta ----
+      const h1 = await c.cliente();
+      await c.msg(h1.conv, "contato", diasAtras(6));
+      await c.msg(h1.conv, "advogado", diasAtras(1), { por: U.bia });
+      await c.naEtapa(h1.ct, "Aguardando cliente", 8);
+      await c.rodada();
+      ok("93h a equipe que respondeu ontem não recebe lembrete hoje", (await c.tarefas(h1.conv)).length === 0);
+      // O "Já tratei" também é a primeira ação da equipe.
+      const h2 = await c.cliente();
+      await c.msg(h2.conv, "contato", diasAtras(6));
+      await c.query("update conversas set tratada_em = $2 where id = $1", [h2.conv, diasAtras(1)]);
+      await c.naEtapa(h2.ct, "Aguardando cliente", 8);
+      await c.rodada();
+      ok("nem a que deu “Já tratei” ontem", (await c.tarefas(h2.conv)).length === 0);
+      await c.envelhecer(3);
+      await c.rodada();
+      ok("e os dois recebem quando vence",
+         (await c.tarefas(h1.conv)).length === 1 && (await c.tarefas(h2.conv)).length === 1);
+
+      // ---- 93i. a regra vale para o que vence depois de ela existir ----
+      const etAt = "Em atendimento";
+      const regraNova = await c.regra(etAt, 3, "Olá, {nome}!", { valeHa: 1 });
+      const i1 = await c.cliente();                                         // quieto há 40 dias
+      await c.msg(i1.conv, "advogado", diasAtras(40), { por: U.ana });
+      await c.naEtapa(i1.ct, etAt, 40);
+      const i2 = await c.cliente();                                         // quieto há 2 dias
+      await c.msg(i2.conv, "advogado", diasAtras(2), { por: U.ana });
+      await c.naEtapa(i2.ct, etAt, 2);
+      const ri = await c.rodada();
+      ok("93i a regra nova não lembra de quem venceu antes de ela existir (a enxurrada)",
+         (await c.tarefas(i1.conv)).length === 0 && (await c.tarefas(i2.conv)).length === 0, JSON.stringify(ri));
+      await c.envelhecer(1);
+      await c.rodada();
+      ok("e lembra de quem vence depois",
+         (await c.tarefas(i2.conv)).length === 1 && (await c.tarefas(i1.conv)).length === 0);
+      // Mudar os dias de uma regra antiga recomeça a conta dela.
+      // O i3 está quieto há 5 dias: com 4 dias, ele venceria ontem — depois do
+      // "vale desde" de antes (anteontem), e antes do de agora.
+      const i3 = await c.cliente();
+      await c.msg(i3.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(i3.ct, etAt, 5);
+      await comoPessoa(c, U.rod, () => c.query("update zorvin_acompanhamentos set dias = 4 where id = $1", [regraNova]));
+      await c.rodada();
+      ok("mudar os dias não lembra de uma vez quem já passou da conta nova", (await c.tarefas(i3.conv)).length === 0);
+
+      // ---- 93j. o que não vira lembrete ----
+      const j = {};
+      // a agendada esperando a hora
+      j.agendada = await c.cliente();
+      await c.msg(j.agendada.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(j.agendada.ct, "Aguardando cliente", 5);
+      await c.query("insert into fila_envio (conversa_id, texto, status, agendada_para) values ($1, 'amanhã', 'pendente', now() + interval '1 day')",
+                    [j.agendada.conv]);
+      // o grupo
+      j.grupo = await c.cliente({ grupo: true });
+      await c.msg(j.grupo.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(j.grupo.ct, "Aguardando cliente", 5);
+      // a arquivada
+      j.arquivada = await c.cliente();
+      await c.msg(j.arquivada.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.query("update conversas set arquivada = true where id = $1", [j.arquivada.conv]);
+      await c.naEtapa(j.arquivada.ct, "Aguardando cliente", 5);
+      // a linha desativada
+      j.velho = await c.cliente({ tel: c.T.velho });
+      await c.msg(j.velho.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(j.velho.ct, "Aguardando cliente", 5);
+      // a etapa desativada
+      const etDesat = await c.etapa("Encerrado");
+      await c.regra("Encerrado", 1, "Olá!");
+      j.desativada = await c.cliente();
+      await c.msg(j.desativada.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(j.desativada.ct, "Encerrado", 5);
+      await c.query("update zorvin_etapas set ativo = false where id = $1", [etDesat]);
+      const rj = await c.rodada();
+      for (const [nome, x] of Object.entries(j)) {
+        ok(`93j não vira lembrete: ${nome}`, (await c.tarefas(x.conv)).length === 0, JSON.stringify(rj));
+      }
+      // Cancelada a agendada, o lembrete nasce.
+      await c.query("update fila_envio set status = 'cancelada' where conversa_id = $1", [j.agendada.conv]);
+      await c.rodada();
+      ok("cancelada a agendada, o lembrete nasce", (await c.tarefas(j.agendada.conv)).length === 1);
+
+      // ---- 93k. o lembrete aberto segura o seguinte ----
+      const k2c = await c.cliente();
+      await c.msg(k2c.conv, "advogado", diasAtras(3), { por: U.ana });
+      await c.naEtapa(k2c.ct, etProp, 3);
+      await c.rodada();
+      ok("93k o de 2 dias nasce", (await c.tarefas(k2c.conv)).length === 1);
+      await c.envelhecer(3);                                                // ninguém fez nada
+      const rk = await c.rodada();
+      const tk = await c.tarefas(k2c.conv);
+      ok("com ele ainda aberto, o de 5 dias é dado por feito, sem tarefa nova",
+         tk.length === 1 && !tk[0].feita_em && rk.puladas >= 1, JSON.stringify({ rk, tk }));
+
+      // ---- 93l. quem recebe ----
+      const l = {};
+      l.semDono = await c.cliente();                                        // sem responsável: quem escreveu por último
+      await c.msg(l.semDono.conv, "advogado", diasAtras(6), { por: U.ana });
+      await c.msg(l.semDono.conv, "advogado", diasAtras(5), { por: U.bia });
+      await c.msg(l.semDono.conv, "advogado", diasAtras(4.9), { por: null });  // pelo celular, sem quem
+      await c.naEtapa(l.semDono.ct, "Aguardando cliente", 6);
+      l.desativado = await c.cliente();                                     // o responsável desativado
+      await c.msg(l.desativado.conv, "advogado", diasAtras(5), { por: U.dani });
+      await c.query("update conversas set responsavel_id = $2 where id = $1", [l.desativado.conv, U.dani]);
+      await c.naEtapa(l.desativado.ct, "Aguardando cliente", 6);
+      l.naoVe = await c.cliente();                                          // o responsável não vê o telefone
+      await c.msg(l.naoVe.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.query("update conversas set responsavel_id = $2 where id = $1", [l.naoVe.conv, U.caio]);
+      await c.naEtapa(l.naoVe.ct, "Aguardando cliente", 6);
+      l.ninguem = await c.cliente();                                        // ninguém da equipe escreveu com quem
+      await c.msg(l.ninguem.conv, "advogado", diasAtras(5), { por: null });
+      await c.naEtapa(l.ninguem.ct, "Aguardando cliente", 6);
+      await c.query("update usuarios set ativo = false where id = $1", [U.dani]);
+      await c.rodada();
+      const para = async (x) => ((await c.tarefas(x.conv))[0] || {}).para_quem;
+      ok("93l sem responsável, quem da equipe escreveu por último (o celular não tem quem)",
+         (await para(l.semDono)) === U.bia, String(await para(l.semDono)));
+      ok("o responsável desativado: a tarefa nasce sem dono",
+         (await c.tarefas(l.desativado.conv)).length === 1 && (await para(l.desativado)) === null);
+      ok("o responsável que não vê o telefone: sem dono (uma tarefa que ele não veria)",
+         (await c.tarefas(l.naoVe.conv)).length === 1 && (await para(l.naoVe)) === null);
+      ok("e sem ninguém: sem dono", (await c.tarefas(l.ninguem.conv)).length === 1 && (await para(l.ninguem)) === null);
+      await c.query("update usuarios set ativo = true where id = $1", [U.dani]);
+
+      // ---- 93m. qual conversa: o funil do telefone ----
+      // O cliente que já falava pelas Audiências antes de elas ganharem funil
+      // próprio: o cartão dele no funil do departamento fica guardado — e o
+      // funil do departamento não lembra pela conversa de um telefone que tem
+      // o seu.
+      const m0 = await c.cliente({ tel: c.T.aud });
+      await c.msg(m0.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(m0.ct, "Aguardando cliente", 5);
+      // As Audiências ganham funil próprio; a regra é da etapa DELE.
+      await comoPessoa(c, U.rod, () => c.query("select zorvin_funil_do_telefone($1)", [c.T.aud]));
+      await c.regra("Aguardando cliente", 2, "Olá! Sobre a audiência…", { telId: c.T.aud });
+      const m1 = await c.cliente({ tel: c.T.aud });
+      await c.msg(m1.conv, "advogado", diasAtras(4), { por: U.ana });
+      await c.naEtapa(m1.ct, "Aguardando cliente", 4, { telId: c.T.aud });
+      await c.rodada();
+      const tm = await c.tarefas(m1.conv);
+      ok("93m o cartão do funil do telefone lembra pela conversa com ele, com a regra do funil dele",
+         tm.length === 1 && tm[0].mensagem === "Olá! Sobre a audiência…", JSON.stringify(tm));
+      // (o m0 ganhou cartão no funil das Audiências agora, na etapa de mesmo
+      // nome — e o relógio dele começa agora; o do departamento fica guardado)
+      const tm0 = await c.tarefas(m0.conv);
+      ok("e o cartão guardado do departamento não lembra pela conversa das Audiências",
+         tm0.length === 0, JSON.stringify(tm0.map((t) => t.texto)));
+      // Desligado o funil do telefone, o cartão dele fica guardado — e não lembra.
+      await comoPessoa(c, U.rod, () => c.query("select zorvin_funil_do_telefone($1, false)", [c.T.aud]));
+      const m2 = await c.cliente({ tel: c.T.aud });
+      await c.msg(m2.conv, "advogado", diasAtras(4), { por: U.ana });
+      await c.naEtapa(m2.ct, "Aguardando cliente", 4, { telId: c.T.aud });
+      await c.query("delete from zorvin_cartoes where contato_id = $1 and advogado_id is null", [m2.ct]);
+      await c.rodada();
+      ok("e o funil do telefone desligado não lembra", (await c.tarefas(m2.conv)).length === 0);
+
+      // ---- 93n. o expediente ----
+      const n1 = await c.cliente();
+      await c.msg(n1.conv, "advogado", diasAtras(5), { por: U.ana });
+      await c.naEtapa(n1.ct, "Aguardando cliente", 5);
+      await c.query("insert into zorvin_feriados (dia, nome) values ((now() at time zone 'America/Sao_Paulo')::date, 'Prova')");
+      await c.rodada();
+      ok("93n no feriado do departamento, o lembrete espera", (await c.tarefas(n1.conv)).length === 0);
+      await c.query("delete from zorvin_feriados");
+      await c.rodada();
+      ok("e nasce quando o departamento abre", (await c.tarefas(n1.conv)).length === 1);
+      // Sem a semana escrita, a qualquer hora (os Acordos não têm linha).
+      await c.regra("Aguardando cliente", 3, "Olá dos Acordos!", { dep: 2 });
+      const n2 = await c.cliente({ tel: c.T.acordos });
+      await c.msg(n2.conv, "advogado", diasAtras(5), { por: U.caio });
+      await c.naEtapa(n2.ct, "Aguardando cliente", 5, { dep: 2 });
+      await c.query("insert into zorvin_feriados (dia, nome) values ((now() at time zone 'America/Sao_Paulo')::date, 'Prova')");
+      await c.rodada();
+      ok("sem a semana escrita, o departamento não espera expediente", (await c.tarefas(n2.conv)).length === 1);
+      await c.query("delete from zorvin_feriados");
+      // A semana sem nenhum dia aberto também não segura: "nunca lembrar" não é
+      // uma escolha que alguém faça na tela da resposta fora do horário.
+      const NUNCA = JSON.stringify(Object.fromEntries(["seg", "ter", "qua", "qui", "sex", "sab", "dom"].map((d) => [d, null])));
+      await c.query("insert into zorvin_fora_do_horario (departamento_id, semana) values (2, $1::jsonb)", [NUNCA]);
+      const n3 = await c.cliente({ tel: c.T.acordos });
+      await c.msg(n3.conv, "advogado", diasAtras(5), { por: U.caio });
+      await c.naEtapa(n3.ct, "Aguardando cliente", 5, { dep: 2 });
+      await c.rodada();
+      ok("e a semana sem nenhum dia aberto também não", (await c.tarefas(n3.conv)).length === 1);
+
+      // ---- 93o. o teto por pessoa e o limite por volta ----
+      const o = [];
+      for (let x = 0; x < 3; x++) {
+        const cl = await c.cliente();
+        await c.msg(cl.conv, "advogado", diasAtras(5), { por: U.bia });
+        await c.query("update conversas set responsavel_id = $2 where id = $1", [cl.conv, U.dani]);
+        await c.naEtapa(cl.ct, "Aguardando cliente", 5);
+        o.push(cl);
+      }
+      const ro = await c.rodada(50, 2);
+      const daDani = async () => (await c.query(
+        "select count(*)::int as n from zorvin_tarefas where para_quem = $1 and mensagem is not null", [U.dani])).rows[0].n;
+      ok("93o o teto por pessoa segura o terceiro lembrete do dia", (await daDani()) === 2 && ro.adiadas >= 1, JSON.stringify(ro));
+      const ro2 = await c.rodada(50, 2);
+      ok("e continua segurando na volta seguinte", (await daDani()) === 2 && ro2.adiadas >= 1, JSON.stringify(ro2));
+      const ro3 = await c.rodada(50, 20);
+      ok("com o teto maior, ele nasce", (await daDani()) === 3, JSON.stringify(ro3));
+      const p1 = await c.cliente(), p2 = await c.cliente();
+      for (const cl of [p1, p2]) {
+        await c.msg(cl.conv, "advogado", diasAtras(5), { por: U.ana });
+        await c.naEtapa(cl.ct, "Aguardando cliente", 5);
+      }
+      const rp = await c.rodada(1, 20);
+      ok("o limite por volta: um lembrete só", rp.criadas === 1, JSON.stringify(rp));
+      const rp2 = await c.rodada(1, 20);
+      ok("e o outro na volta seguinte", rp2.criadas === 1
+         && (await c.tarefas(p1.conv)).length === 1 && (await c.tarefas(p2.conv)).length === 1, JSON.stringify(rp2));
+
+      // ---- 93p. o lembrete que se fecha sozinho ----
+      const q = {};
+      for (const nome of ["cliente", "equipe", "tratei", "etapa", "automatica", "dePessoa"]) {
+        q[nome] = await c.cliente();
+        await c.msg(q[nome].conv, "advogado", diasAtras(5), { por: U.ana });
+        q[nome].k = await c.naEtapa(q[nome].ct, "Aguardando cliente", 5);
+      }
+      await c.rodada();
+      // A tarefa que uma PESSOA criou, sem mensagem pronta, nunca se fecha sozinha.
+      await comoPessoa(c, U.ana, () => c.query(
+        "insert into zorvin_tarefas (conversa_id, texto, vence_em, para_quem) values ($1, 'Ligar na quinta', now(), $2)",
+        [q.dePessoa.conv, U.ana]));
+      const agora = new Date(Date.now() + 1000).toISOString();
+      await c.msg(q.cliente.conv, "contato", agora);
+      await c.msg(q.equipe.conv, "advogado", agora, { por: U.ana });
+      await c.query("update conversas set tratada_em = $2 where id = $1", [q.tratei.conv, agora]);
+      await comoPessoa(c, U.ana, async () => c.query("update zorvin_cartoes set etapa_id = $2 where id = $1",
+        [q.etapa.k, await c.etapa(etProp)]));
+      await c.msg(q.automatica.conv, "advogado", agora, { automatica: true });
+      await c.msg(q.dePessoa.conv, "contato", agora);
+      const rq = await c.rodada();
+      const aberta = async (x, filtro = (t) => t.mensagem !== null) =>
+        (await c.tarefas(x.conv)).filter(filtro).some((t) => !t.feita_em);
+      ok("93p fecha sozinho quando o cliente escreve", !(await aberta(q.cliente)), JSON.stringify(rq));
+      ok("quando a equipe escreve", !(await aberta(q.equipe)));
+      ok("quando alguém dá “Já tratei”", !(await aberta(q.tratei)));
+      ok("quando o cartão muda de etapa", !(await aberta(q.etapa)));
+      ok("mas não com a mensagem automática (ninguém escreveu)", await aberta(q.automatica));
+      ok("e a tarefa que uma pessoa criou continua aberta",
+         await aberta(q.dePessoa, (t) => t.mensagem === null) && !(await aberta(q.dePessoa)));
+      const fechadas = (await c.query(
+        "select count(*)::int as n from zorvin_tarefas where mensagem is not null and feita_em is not null and feita_por is not null")).rows[0].n;
+      ok("quem fechou foi o Zorvin: nenhuma ganhou pessoa em quem fez", fechadas === 0, String(fechadas));
+
+      // ---- 93q. rodar de novo ----
+      const antes = (await c.query("select count(*)::int as n, min(vale_desde) as v from zorvin_acompanhamentos")).rows[0];
+      const de2 = await guardado(() => aplicar(c, S045));
+      const depois = (await c.query("select count(*)::int as n, min(vale_desde) as v from zorvin_acompanhamentos")).rows[0];
+      ok("93q rodar de novo aplica sem acusar nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      ok("e não mexe nas regras nem no desde quando valem",
+         antes.n === depois.n && String(antes.v) === String(depois.v) && antes.n >= 6, JSON.stringify({ antes, depois }));
+      const rr = await c.rodada();
+      ok("nem lembra de novo o que já foi lembrado", rr.criadas === 0, JSON.stringify(rr));
+
+      // ---- 93r. a conferência pega quem entrou e não lê as regras ----
+      // (o 045 devolve a leitura das regras a quem entrou; a das tarefas é do 018)
+      await c.query("revoke select on zorvin_tarefas from authenticated");
+      const quebrada = await guardado(() => aplicar(c, S045));
+      ok("93r a conferência diz NÃO quando quem atende não lê a mensagem pronta",
+         /^NÃO/.test(String(item(quebrada, /quem entrou lê/))), JSON.stringify(quebrada));
+      await c.query("grant select on zorvin_tarefas to authenticated");
+
+      // ---- 93s. banco limpo ----
+      const limpo = await bancoNovo();
+      const confLimpo = await guardado(() => aplicar(limpo, S045));
+      ok("93s num banco sem o Zorvin, o 045 não faz nada e diz isso",
+         Array.isArray(confLimpo) && /nada a fazer/.test(String(item(confLimpo, /sem o funil/))), JSON.stringify(confLimpo));
+    } catch (e) {
+      ok("a seção 93 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
+// ============================================================
+//  94. O ACOMPANHAMENTO POR ETAPA — a rodada da ponte (02/11)
+//
+//  Quem decide é o banco (seção 93); a ponte só chama. O que esta seção
+//  guarda:
+//    - a rodada chama a função de 10 em 10 minutos (aqui, encurtado), com o
+//      limite por volta e o teto por pessoa;
+//    - o log diz QUANTOS, e só quando algo aconteceu: o adiado pelo teto,
+//      sozinho, não é notícia — ele volta a ser adiado a cada volta;
+//    - sem o 045, pergunta uma vez, diz qual script falta e para; um tropeço
+//      qualquer do banco não para;
+//    - uma volta de cada vez, mesmo com o banco lento;
+//    - `ACOMPANHAMENTO=desligado` não chama nada, e diz.
+// ============================================================
+console.log("\n94. O acompanhamento por etapa: a rodada da ponte");
+{
+  const ate = async (cond, ms = 8000) => {
+    const fim = Date.now() + ms;
+    while (Date.now() < fim) { if (await cond()) return true; await espera(80); }
+    return false;
+  };
+  const registro = (t) => t.registro.join("");
+  const rapido = (extra = {}) => ({ ACOMPANHAMENTO_PRIMEIRA_MS: "200", ACOMPANHAMENTO_INTERVALO_MS: "400", ...extra });
+  // O BANCO DA CENA: cada volta chama, e a cena decide o que ele devolve.
+  const comBanco = (responder) => {
+    const chamadas = [];
+    let noAr = 0, maxNoAr = 0;
+    return { chamadas, maxNoAr: () => maxNoAr, rpcs: { zorvin_acompanhar_funil: async (args) => {
+      chamadas.push(args);
+      noAr++; maxNoAr = Math.max(maxNoAr, noAr);
+      try {
+        const r = await responder(chamadas.length);
+        return r && r.status ? r : { corpo: r };
+      } finally { noAr--; }
+    } } };
+  };
+  const linhas = (t) => registro(t).split("\n").filter((l) => /acompanhamento por etapa:/.test(l));
+
+  // ---- 94a. a rodada chama, com o limite e o teto ----
+  {
+    const b = comBanco(() => ({ criadas: 0, fechadas: 0, adiadas: 0, puladas: 0 }));
+    const t = await subirTudo(rapido(), { rpcs: b.rpcs });
+    await ate(() => b.chamadas.length >= 3, 6000);
+    ok("94a a rodada chama o banco de volta em volta", b.chamadas.length >= 3, `${b.chamadas.length} chamadas`);
+    ok("com o limite de 50 por volta e o teto de 20 por pessoa",
+       b.chamadas.every((a) => a.p_limite === 50 && a.p_por_pessoa === 20) && b.chamadas.length >= 1, JSON.stringify(b.chamadas[0]));
+    ok("e sem nada acontecendo, o log fica calado", linhas(t).length === 0, linhas(t).join(" | "));
+    await t.parar();
+  }
+
+  // ---- 94b. o log diz quantos, e só quando algo aconteceu ----
+  {
+    const b = comBanco((n) => (n === 1 ? { criadas: 2, fechadas: 1, adiadas: 3, puladas: 1 }
+                                         : { criadas: 0, fechadas: 0, adiadas: 3, puladas: 0 }));
+    const t = await subirTudo(rapido(), { rpcs: b.rpcs });
+    await ate(() => b.chamadas.length >= 4, 6000);
+    const l = linhas(t);
+    ok("94b o log diz os números da volta que fez algo",
+       l.length === 1 && /2 lembrete\(s\) criado\(s\)/.test(l[0]) && /1 fechado\(s\) porque a conversa andou/.test(l[0])
+       && /1 dado\(s\) por feito\(s\) sem tarefa/.test(l[0]) && /3 para amanhã \(o teto de 20 por pessoa\)/.test(l[0]), l.join(" | "));
+    ok("e o adiado pelo teto, sozinho, não enche o log", b.chamadas.length >= 4 && l.length === 1, `${b.chamadas.length} voltas, ${l.length} linhas`);
+    await t.parar();
+  }
+
+  // ---- 94c. sem o 045 ----
+  {
+    const b = comBanco(() => ({ status: 404, corpo: { code: "PGRST202", message: "Could not find the function public.zorvin_acompanhar_funil" } }));
+    const t = await subirTudo(rapido(), { rpcs: b.rpcs });
+    await ate(() => b.chamadas.length >= 1);
+    await espera(1500);
+    ok("94c sem o 045, a rodada chama uma vez, diz qual script falta e para",
+       b.chamadas.length === 1 && /Rode sql\/automaticos\/045-o-acompanhamento-por-etapa\.sql/.test(registro(t)),
+       `${b.chamadas.length} chamadas — ${registro(t).slice(-300)}`);
+    await t.parar();
+  }
+
+  // ---- 94d. um tropeço do banco não para a rodada ----
+  {
+    const b = comBanco((n) => (n === 1 ? { status: 500, corpo: { code: "57014", message: "canceling statement due to statement timeout" } }
+                                         : { criadas: 1, fechadas: 0, adiadas: 0, puladas: 0 }));
+    const t = await subirTudo(rapido(), { rpcs: b.rpcs });
+    await ate(() => b.chamadas.length >= 3, 6000);
+    ok("94d o tropeço é dito com o código", /acompanhamento por etapa: o banco recusou a rodada \(57014\)/.test(registro(t)),
+       registro(t).slice(-400));
+    ok("e a volta seguinte tenta de novo — e cria", b.chamadas.length >= 3 && /1 lembrete\(s\) criado\(s\)/.test(registro(t)),
+       `${b.chamadas.length} chamadas`);
+    await t.parar();
+  }
+
+  // ---- 94e. uma volta de cada vez, com o banco lento ----
+  {
+    const b = comBanco(async () => { await espera(1100); return { criadas: 0, fechadas: 0, adiadas: 0, puladas: 0 }; });
+    const t = await subirTudo(rapido({ ACOMPANHAMENTO_INTERVALO_MS: "150" }), { rpcs: b.rpcs });
+    await ate(() => b.chamadas.length >= 2, 6000);
+    ok("94e com o banco lento, uma volta não começa por cima da outra", b.chamadas.length >= 2 && b.maxNoAr() === 1,
+       `${b.chamadas.length} chamadas, ${b.maxNoAr()} no ar ao mesmo tempo`);
+    await t.parar();
+  }
+
+  // ---- 94f. desligado ----
+  {
+    const b = comBanco(() => ({ criadas: 1, fechadas: 0, adiadas: 0, puladas: 0 }));
+    const t = await subirTudo(rapido({ ACOMPANHAMENTO: "desligado" }), { rpcs: b.rpcs });
+    await espera(1500);
+    ok("94f ACOMPANHAMENTO=desligado não chama nada, e diz",
+       b.chamadas.length === 0 && /acompanhamento por etapa: desligado \(ACOMPANHAMENTO=desligado\)/.test(registro(t)),
+       `${b.chamadas.length} chamadas — ${registro(t).slice(-300)}`);
+    await t.parar();
   }
 }
 

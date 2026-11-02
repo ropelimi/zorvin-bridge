@@ -10785,6 +10785,80 @@ if (FUNIL_IA_DESLIGADA && process.env.ANTHROPIC_API_KEY) {
 setTimeout(() => { moverOFunilComAIA().catch(() => {}); }, FUNIL_IA_PRIMEIRA_MS).unref();
 setInterval(() => { moverOFunilComAIA().catch(() => {}); }, FUNIL_IA_INTERVALO_MS).unref();
 
+// ============================================================
+//  O ACOMPANHAMENTO POR ETAPA — a rodada (02/11)
+//
+//  Pedido do Rodrigo: quando o cliente fica parado numa etapa sem responder,
+//  quem cuida dele recebe uma tarefa com a mensagem pronta. A pessoa abre,
+//  confere e manda: NADA SAI PARA O CLIENTE DAQUI.
+//
+//  QUEM DECIDE É O BANCO (`zorvin_acompanhar_funil`, script 045): quem venceu,
+//  quem recebe, o expediente, o teto por pessoa e o lembrete que se fecha
+//  sozinho quando a conversa anda. A ponte só chama de 10 em 10 minutos — o
+//  Postgres não tem relógio próprio sem uma extensão a mais.
+//
+//  - SEM O 045, a função que falta desliga a rodada até a ponte reiniciar,
+//    com uma linha no log; um tropeço qualquer do banco NÃO desliga: a volta
+//    seguinte tenta de novo.
+//  - `ACOMPANHAMENTO=desligado` desliga sem mexer no código.
+//  - NO LOG, SÓ NÚMEROS, e só quando algo aconteceu: o lembrete adiado pelo
+//    teto do dia volta a ser adiado a cada volta, e sozinho ele não é notícia.
+//
+//  `ACOMPANHAMENTO_INTERVALO_MS` e `ACOMPANHAMENTO_PRIMEIRA_MS` são opcionais,
+//  para a bancada.
+// ============================================================
+const ACOMPANHAMENTO_DESLIGADO = String(process.env.ACOMPANHAMENTO || '').trim().toLowerCase() === 'desligado';
+const ACOMPANHAMENTO_INTERVALO_MS = Number(process.env.ACOMPANHAMENTO_INTERVALO_MS) || 10 * 60 * 1000;
+// A PRIMEIRA VOLTA ESPERA DOIS MINUTOS: numa publicação, a ponte velha ainda
+// termina o que começou, e os scripts do banco rodam na subida.
+const ACOMPANHAMENTO_PRIMEIRA_MS = Number(process.env.ACOMPANHAMENTO_PRIMEIRA_MS) || 2 * 60 * 1000;
+// QUANTOS LEMBRETES POR VOLTA, e por pessoa por dia (o teto mora no banco).
+const ACOMPANHAMENTO_POR_VOLTA = 50;
+const ACOMPANHAMENTO_POR_PESSOA = 20;
+let acompanhamentoSemOScript = false;
+let acompanhamentoRodando = false;
+
+async function acompanharOFunil() {
+  if (desligando || acompanhamentoRodando || ACOMPANHAMENTO_DESLIGADO || acompanhamentoSemOScript) return;
+  acompanhamentoRodando = true;
+  const inicio = Date.now();
+  try {
+    const { data, error } = await supabase.rpc('zorvin_acompanhar_funil',
+      { p_limite: ACOMPANHAMENTO_POR_VOLTA, p_por_pessoa: ACOMPANHAMENTO_POR_PESSOA });
+    if (error) {
+      if (semAFuncao(error)) {
+        acompanhamentoSemOScript = true;
+        console.warn('acompanhamento por etapa: a função "zorvin_acompanhar_funil" não existe — nenhum lembrete '
+          + 'nasce até a ponte reiniciar. Rode sql/automaticos/045-o-acompanhamento-por-etapa.sql.');
+      } else {
+        console.error(`acompanhamento por etapa: o banco recusou a rodada (${error.code || 'sem código'})`, error.message);
+      }
+      return;
+    }
+    const d = data || {};
+    const n = (x) => Math.max(0, Number(x) || 0);
+    const criadas = n(d.criadas), fechadas = n(d.fechadas), puladas = n(d.puladas), adiadas = n(d.adiadas);
+    if (criadas || fechadas || puladas) {
+      const partes = [];
+      if (criadas) partes.push(`${criadas} lembrete(s) criado(s)`);
+      if (fechadas) partes.push(`${fechadas} fechado(s) porque a conversa andou`);
+      if (puladas) partes.push(`${puladas} dado(s) por feito(s) sem tarefa`);
+      if (adiadas) partes.push(`${adiadas} para amanhã (o teto de ${ACOMPANHAMENTO_POR_PESSOA} por pessoa)`);
+      console.log(`acompanhamento por etapa: em ${Date.now() - inicio} ms — ${partes.join(', ')}.`);
+    }
+  } catch (e) {
+    console.error('acompanhamento por etapa:', (e && e.message) || e);
+  } finally {
+    acompanhamentoRodando = false;
+  }
+}
+
+if (ACOMPANHAMENTO_DESLIGADO) {
+  console.log('acompanhamento por etapa: desligado (ACOMPANHAMENTO=desligado) — nenhum lembrete nasce sozinho.');
+}
+setTimeout(() => { acompanharOFunil().catch(() => {}); }, ACOMPANHAMENTO_PRIMEIRA_MS).unref();
+setInterval(() => { acompanharOFunil().catch(() => {}); }, ACOMPANHAMENTO_INTERVALO_MS).unref();
+
 app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {
   // `admin` E `ativo`, a régua de `soAdmin` e de `zorvin_admin()` (auditoria
   // de 07/10): uma administradora desativada continuava lendo quem vê o quê.

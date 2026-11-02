@@ -81,6 +81,16 @@ Variáveis de ambiente (no Render):
   clique, sem mexer no código. **Opcional: sem ela, os áudios são
   transcritos sozinhos.** `TRANSCRICAO_INTERVALO_MS` e
   `TRANSCRICAO_PRIMEIRA_MS` (os dois com padrão de 20 s) são para a bancada.
+- `FUNIL_IA` — `desligada` faz a IA não mover o funil, mesmo nos funis com a
+  chave ligada. **Opcional: sem ela, a IA move os funis em que quem
+  administra ligou a chave** (e só com `ANTHROPIC_API_KEY`).
+  `FUNIL_IA_INTERVALO_MS`, `FUNIL_IA_PRIMEIRA_MS` e `FUNIL_IA_QUIETO_MIN` são
+  para a bancada. Ver "A IA move o funil (script 044, 02/11)".
+- `ACOMPANHAMENTO` — `desligado` faz nenhum lembrete de acompanhamento nascer
+  sozinho. **Opcional: sem ela, os lembretes nascem pelas regras que quem
+  administra escreveu em cada etapa.** `ACOMPANHAMENTO_INTERVALO_MS` (padrão
+  10 min) e `ACOMPANHAMENTO_PRIMEIRA_MS` (2 min) são para a bancada. Ver "O
+  acompanhamento por etapa (script 045, 02/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -2227,6 +2237,173 @@ segurando o script. A do telefone sem funil próprio era da prova: ela
 conferia só o código do erro (22023), e a trava das duas etapas devolve o
 mesmo código. Hoje a prova confere a frase, e ganhou a cena do telefone com o
 funil próprio desligado, onde o defeito ligaria a IA no funil errado.
+
+### O acompanhamento por etapa (script 045, 02/11)
+
+Pedido do Rodrigo, junto com a IA no funil: *"acompanhamento por etapa do
+funil"*. Decidido com ele: **lembrar a equipe**. Quando um cliente fica parado
+numa etapa sem responder (por exemplo, 3 dias em "Aguardando cliente"), quem
+cuida dele recebe uma **tarefa com a mensagem de cobrança já escrita**. A
+pessoa abre, confere e manda. **Nada sai para o cliente sem uma pessoa.**
+
+`sql/automaticos/045-o-acompanhamento-por-etapa.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_acompanhamentos` | as regras: em qual etapa, depois de quantos dias (1 a 60) e o texto pronto (até 1000). Mais de uma por etapa é a cadência (2 dias, depois 5) |
+| `zorvin_acompanhamentos_feitos` | o que já foi lembrado: uma vez por regra, por cliente, por silêncio — só a ponte alcança |
+| `zorvin_tarefas.mensagem` | a mensagem pronta da tarefa (até 2000) |
+| `zorvin_acompanhar_funil(limite, por_pessoa)` | a rodada — só a ponte chama |
+
+**Quem decide é o banco**, e a ponte só chama de 10 em 10 minutos
+(`acompanharOFunil`, no `index.js`): o Postgres não tem relógio próprio sem
+uma extensão a mais. A rodada devolve `{criadas, fechadas, adiadas, puladas}`,
+e o log leva só esses números.
+
+#### O relógio, e por que as cobranças não o zeram
+
+O relógio de cada regra começa no que vier por último:
+
+- a entrada do cartão na etapa (`movido_em`);
+- a última mensagem do cliente;
+- a **primeira** ação da equipe depois dela: a resposta, ou o "Já tratei" /
+  Finalizar (`tratada_em`). É aí que a vez passa a ser do cliente.
+
+**As cobranças seguintes da equipe não recomeçam a conta, e é isso que faz a
+cadência andar.** A proposta sai no dia 0, o lembrete de 2 dias chega, a
+equipe cobra, e o de 5 dias chega no dia 5, contado do dia 0. Se cada
+cobrança recomeçasse a conta, o lembrete de 2 dias voltaria a cada 2 dias para
+sempre, e o de 5 nunca chegaria. A conta recomeça quando o cliente escreve (e
+a equipe responde) ou quando o cartão muda de etapa.
+
+**O cliente que escreveu por último também conta.** O "ok, mando amanhã" é
+justamente o caso de "Aguardando cliente", e a fila de espera não separa esse
+"ok" de uma pergunta sem resposta: é para isso que existe o "Já tratei". O
+lembrete leva a pessoa à conversa, e ela vê ali o que o cliente escreveu (o
+painel avisa quando foi ele quem escreveu por último). **A mensagem
+automática não conta** (o aviso de audiência, 037): ninguém escreveu.
+
+#### A enxurrada que isto não faz
+
+Em 02/11, 984 dos 1.081 cartões do Sucesso do Cliente estavam parados havia
+semanas em "Novo contato". Contada só pelo silêncio, uma regra de 3 dias ali
+criaria centenas de tarefas no minuto seguinte; contada a partir da regra,
+centenas três dias depois.
+
+**A regra vale para o que vence depois de ela existir** (`vale_desde`). O
+cliente quieto há 2 dias quando a regra de 3 dias nasce recebe o lembrete
+amanhã. O quieto há 40 dias, não: o momento dele passou antes de a regra
+existir. **Mudar os dias de uma regra recomeça a conta dela**, pela mesma
+razão (a de 30 dias que vira de 3 não pode lembrar de uma vez todo mundo
+quieto há mais de 3). Mudar só o texto, não. `vale_desde`, quem criou e quem
+mudou são do gatilho, e não da tela.
+
+**E ainda há um teto:** 20 lembretes de acompanhamento por dia para cada
+pessoa, e 20 para os sem dono, no dia de São Paulo. O que passar disso espera
+o dia seguinte.
+
+#### Quem recebe, qual conversa, e quando
+
+- **Quem recebe:** o responsável pela conversa; sem ele, quem da equipe
+  escreveu por último (a automática e a mandada pelo celular não têm quem).
+  Se essa pessoa está desativada, ou não vê o telefone da conversa
+  (`zorvin_ve_o_telefone`, do 023, quando existe), a tarefa nasce **sem
+  dono** e aparece em "Da equipe" para quem atende o telefone. Uma tarefa
+  para quem não a vê seria um lembrete que ninguém recebe.
+- **Qual conversa:** no funil de um telefone, a do cliente com ele; no do
+  departamento, a mais recente do cliente com um telefone do departamento
+  sem funil próprio. Arquivada, grupo e linha desativada não recebem. O
+  funil de telefone desligado (o cartão guardado) também não.
+- **Quando:** só no **expediente** do departamento, pela semana da resposta
+  fora do horário (021), que já sabe dos feriados. Sem a semana escrita, a
+  qualquer hora. A semana sem nenhum dia aberto não segura nada: "nunca
+  lembrar" não é uma escolha que alguém faça naquela tela. A conta do
+  silêncio é em dias corridos, como a da fila.
+
+**Não nasce quando:**
+
+- há uma **mensagem agendada** esperando a hora na conversa: a equipe já
+  planejou o próximo contato;
+- já há um **lembrete de acompanhamento aberto** na conversa: o seguinte é
+  dado por feito, porque quem não fez o primeiro não precisa de dois;
+- **duas regras vencem juntas** para o mesmo cliente: só a maior vira tarefa.
+
+#### O lembrete se fecha sozinho
+
+Quando a conversa anda (o cliente escreveu, a equipe respondeu, alguém deu
+"Já tratei" ou o cartão mudou de etapa), o silêncio que gerou o lembrete
+acabou. **A tarefa se fecha sozinha**, sem `feita_por` (quem fechou foi o
+Zorvin), e continua no histórico. Um número de tarefas que nunca zera se
+aprende a não ler. **Só se fecham as que o Zorvin criou** (com mensagem
+pronta e sem `criada_por`): a tarefa que uma pessoa criou nunca se fecha
+sozinha. A mensagem automática não fecha nada.
+
+#### O que fica de fora, e é decisão
+
+- O lembrete **não manda nada ao cliente**. Mandar sozinho foi a outra opção
+  oferecida, e o Rodrigo escolheu lembrar a equipe.
+- O texto da tarefa diz a etapa e a regra (`Acompanhar o cliente em
+  “Aguardando cliente” (lembrete de 3 dias).`), e não quantos dias
+  exatamente: o relógio pode ter começado na entrada da etapa, na última
+  mensagem do cliente ou na resposta da equipe, e uma conta exata ali seria
+  uma segunda escrita da mesma regra.
+- As variáveis da mensagem (`{nome}`, `{saudacao}`…) **não são preenchidas
+  aqui**: o painel as preenche quando a pessoa abre a conversa pelo
+  lembrete, com a conta das mensagens rápidas. A tarefa guarda o texto cru.
+
+Provas: seção 93 (o 045 num Postgres de verdade, sobre o 004, 005, 006,
+008, 013, 017, 018, 020, 021, 023, 028, 037, 043 e 044 aplicados a partir
+dos próprios arquivos, 68 conferências) e seção 94 (a rodada, 10). O tempo
+da seção 93 passa por `envelhecer`: todo carimbo de hora do banco anda para
+trás junto, e o silêncio continua sendo o mesmo silêncio, como no relógio de
+verdade.
+
+**50 sabotagens e 50 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma:
+
+- **as regras:** o "vale desde" da tela; quem criou, da tela; mudar os dias
+  sem recomeçar a conta; mudar o texto recomeçando a conta; a regra escrita
+  por quem não administra; a herança das regras com o `truncate`;
+- **o relógio:** as cobranças zerando o relógio (o de 5 dias nunca chega); o
+  cliente que escreveu por último não contando; a resposta da equipe e o "Já
+  tratei" sem começar a conta; o aviso automático começando a conta; sem o
+  "vale desde" (a enxurrada, 3 reprovações);
+- **o que não vira lembrete:** sem a agendada; o grupo, a arquivada, a linha
+  desativada e a etapa desativada entrando; o funil do telefone desligado
+  lembrando; o funil do departamento lembrando pela conversa de um telefone
+  com funil próprio; sem o expediente; a semana sem dia aberto segurando;
+  das duas regras vencidas, a menor; o lembrete aberto sem segurar o
+  seguinte;
+- **quem recebe:** sem o "quem escreveu por último"; o celular contando como
+  quem escreveu; o desativado recebendo; quem não vê o telefone recebendo;
+- **o teto e o limite:** sem o teto por pessoa; sem o limite por volta;
+- **o lembrete que se fecha:** não fechando sozinho (8); fechando com a
+  mensagem automática; fechando a tarefa que uma pessoa criou; sem fechar
+  pelo "Já tratei"; sem fechar pela etapa;
+- **a tarefa:** sem a mensagem pronta (13); o texto sem a etapa e os dias;
+- **quem chama e o banco limpo:** a rodada para quem entrou; o registro lido
+  por quem entrou; a conferência sem o papel de quem atende; sem a guarda do
+  banco limpo; a tabela da conferência depois da guarda;
+- **a rodada da ponte:** que nunca começa (8); sem o limite e o teto nos
+  argumentos; o log calado; o adiado sozinho enchendo o log; sem a guarda da
+  função que falta; qualquer erro desligando; o tropeço sem o código; uma
+  volta por cima da outra; `ACOMPANHAMENTO=desligado` que não desliga.
+
+**Duas vazaram na primeira rodada, e as duas ensinaram:**
+
+- **o `truncate` da prova esbarrava no lugar errado.** A conferência tentava
+  esvaziar as regras como quem administra, e a recusa vinha do registro do
+  que foi lembrado, que tem uma chave para as regras e é fechado para quem
+  entrou: o `cascade` levava o `truncate` até ele. Sem tirar a herança das
+  regras, a prova passava assim mesmo. Hoje ela pergunta ao banco quem pode
+  (`has_table_privilege`), a régua da seção 86;
+- **"uma regra por silêncio" estava escrita duas vezes.** As regras menores
+  do mesmo cliente eram dadas por feitas num bloco próprio, e o "lembrete
+  aberto por conversa" já fazia isso: a maior vem primeiro e abre o lembrete,
+  e as menores o encontram aberto. Tirar o bloco não mudava nada, e ele saiu
+  — a régua de 25/09, *sabotagem que o resto do sistema conserta sozinho não
+  prova nada*. O defeito de verdade é a ordem (a menor primeiro), e esse é
+  pego.
 
 ## Tarefas e lembretes (script 018, 06/10)
 
