@@ -2093,6 +2093,141 @@ rodadas em cópias e lidas uma a uma:
 metade das condições, e a outra metade continuava segurando o script. Refeita
 desligando a guarda inteira, ela é pega.
 
+### A IA move o funil (script 044, 02/11)
+
+Pedido do Rodrigo, junto com o funil de cada telefone: *"funil movido pela
+IA"*. Decidido com ele: a IA muda a etapa **sozinha** (e não só sugere), o
+cartão diz que foi ela e por quê, e qualquer pessoa desfaz arrastando de
+volta. **Por enquanto, só no Sucesso do Cliente.**
+
+**Medido em 02/11, só contando:** dos 1.081 cartões do Sucesso do Cliente, 984
+entraram pelo "Trazer conversas" e continuam na etapa em que nasceram; só 8
+foram movidos por uma pessoa depois.
+
+`sql/automaticos/044-a-ia-move-o-funil.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_funis.ia_ligada` | a chave, **por funil** (o de um departamento ou o de um telefone). Nasce desligada |
+| `zorvin_etapas.descricao` | o que a etapa quer dizer, para a IA e para quem olha (até 500 caracteres) |
+| `zorvin_cartoes.ia_leu_ate` | a última atividade da conversa que a IA viu |
+| `zorvin_cartoes.ia_motivo` | o porquê, quando foi a IA que pôs o cartão onde ele está |
+| `zorvin_movimentos.pela_ia`, `motivo` | no histórico: o passo foi da IA, e por quê |
+| `zorvin_ia_do_funil(dep, tel, ligar, de_novo)` | ligar, desligar e "passar de novo" — só quem administra |
+| `zorvin_funil_para_a_ia(limite, quieto)` | quem a IA tem para ler — **só a ponte** |
+
+**Quem a IA lê** (as regras são do banco):
+
+- só os funis com a chave ligada (o de um telefone, só com o funil em uso);
+- quem ela ainda não leu, ou cuja conversa mudou desde a leitura;
+- só depois de a conversa sossegar (10 minutos): no meio de uma troca de
+  mensagens a etapa ainda está mudando;
+- **o que uma pessoa decidiu depois da última mensagem fica**. "Decidir" é
+  **mudar** a etapa (`movido_em` depois de `criado_em`): o cartão que nasceu
+  pelo "Trazer conversas" tem quem clicou em `movido_por`, e isso não é uma
+  decisão sobre a etapa dele. Sem essa diferença, os 984 cartões acima nunca
+  seriam lidos;
+- sem grupo; a conversa mais recente primeiro.
+
+**Quem escreve o que a IA fez é só a ponte.** O painel grava como
+`authenticated`, e a regra de mover deixa quem vê o cartão mexer nele inteiro.
+Então o gatilho do cartão desfaz o que o painel escrever em `ia_motivo` e
+`ia_leu_ate`, e a pessoa que muda a etapa apaga o motivo da IA. A conferência
+é por `current_user`, e não por `auth.uid()`: as funções `security definer`
+(como a que liga a IA) passam, e é por elas que "passar de novo" zera a
+leitura.
+
+**Quem moveu, no histórico:** a ponte grava com a chave de serviço, e ali
+`auth.uid()` é nulo — o mesmo nulo do cliente que entrou sozinho no funil. O
+que separa os dois é o motivo: a IA **sempre** grava o porquê junto com a
+etapa (`pela_ia`).
+
+**Ligar** faz a IA ler, uma vez, todos os clientes do funil, e devolve quantos
+(sem os grupos e sem quem não tem conversa por um telefone do funil). O funil
+do departamento ganha a sua linha em `zorvin_funis` na primeira vez. O de um
+telefone tem de existir e estar em uso — num telefone com o funil próprio
+desligado, a resposta diz que ele usa o do departamento, e nenhuma linha
+nasce. **Com menos de duas etapas em uso, não liga.** **Desligar não desfaz
+nada** do que a IA fez.
+
+#### A rodada (`moverOFunilComAIA`, no `index.js`)
+
+De 30 em 30 segundos (a primeira, um minuto depois de subir), a ponte
+pergunta ao banco quem ler e lê **até cinco clientes por volta**, um de cada
+vez. A mesma chave e o mesmo modelo do copiloto.
+
+- **O que vai à IA:** as conversas do cliente nos telefones do funil (até 60
+  mensagens e 30 mil caracteres), as notas internas (a apagada não), as
+  etapas **em uso**, na ordem, com a descrição, a etapa de agora e quem a pôs
+  lá (uma pessoa, a própria IA, ou ninguém), e o manual do copiloto. Com
+  conversas por mais de um telefone do funil, cada linha diz por qual.
+- **A etapa vem presa à lista** (`enum`), com esforço baixo. A IA devolve a
+  etapa em que o cliente está agora — a de agora, se nada mudou — e uma frase.
+  **Na dúvida, fica**: as regras mandam manter, e respeitar o que uma pessoa
+  decidiu.
+- **Mover confere o que foi lido**: a gravação exige a mesma etapa e o mesmo
+  `movido_em`. Zero linhas é uma pessoa (ou a outra ponte, numa publicação)
+  ter chegado antes, e nada é gravado. **Ficar** grava só `ia_leu_ate`.
+- **`ia_leu_ate` é a última atividade que a IA viu**, e não a hora da leitura:
+  a mensagem que chegar enquanto ela lê faz a rodada ler de novo.
+- **A recusa da IA fica como está**, com a leitura marcada. O formato estranho
+  e a etapa fora da lista são tentados de novo depois de 1, 5 e 30 minutos, e
+  depois só quando a conversa mudar (a memória é da ponte).
+- **O limite de uso pausa a rodada** pelo `retry-after` da Anthropic (de 30 s
+  a 10 min) — o copiloto da equipe usa a mesma cota. A chave, o crédito ou o
+  modelo recusados pausam 30 minutos. `pedirAoClaude` passou a devolver o
+  `retry-after`.
+- **Sem o 044**, a função que falta desliga a rodada até reiniciar, com uma
+  linha no log. **`FUNIL_IA=desligada`** desliga sem mexer no código, e
+  `/copiloto/estado` passou a dizer `funil` (falso assim). A ponte de antes
+  não manda a chave, e a tela de quem administra diz isso.
+- **Só números no log.**
+
+Variáveis **opcionais**, para a bancada: `FUNIL_IA_INTERVALO_MS`,
+`FUNIL_IA_PRIMEIRA_MS` e `FUNIL_IA_QUIETO_MIN`. As outras seções da prova
+empurram a rodada para daqui a uma hora (em `subirTudo`).
+
+**O custo**, pela tabela do copiloto (US$ 0,10 por milhão de tokens de entrada
+no Haiku 5.5): um cliente custa uns 3 a 10 mil tokens. A primeira passada
+pelos ~1.000 clientes do Sucesso do Cliente sai por menos de US$ 1, em umas
+três horas; depois, só quem teve conversa nova.
+
+Provas: seção 91 (o 044 num Postgres de verdade, sobre o 017, o 019 e o 043
+aplicados a partir dos próprios arquivos, 43 conferências) e seção 92 (a
+rodada, com um Claude de mentira, 34). **43 sabotagens e 43 pegas**, rodadas
+em cópias e lidas uma a uma:
+
+- **quem a IA lê:** "decidir" como ter `movido_por` (o "Trazer conversas"
+  vira decisão, e os 984 cartões nunca seriam lidos); sem a espera de
+  sossego; o grupo entrando; o funil do departamento lendo os telefones de
+  funil próprio; lido e continuando na lista;
+- **o que é da IA:** o painel escrevendo o motivo e a leitura; qualquer
+  gravação de gente apagando o motivo; o histórico sem dizer que foi a IA;
+- **ligar:** sem conferir quem administra; sem fazer ler de novo; ligar o que
+  já está ligado fazendo ler de novo; com uma etapa só; a conta com o grupo;
+  no telefone sem funil próprio; o funil do departamento sem a sua linha;
+  quem entrou perguntando o que a IA tem para ler; sem a guarda do banco
+  limpo; a tabela da conferência depois da guarda;
+- **a rodada:** sem a chave perguntando assim mesmo; `FUNIL_IA=desligada` que
+  não desliga; a espera de sossego fixa; o formato com a etapa fora de uso;
+  esforço médio; a hora no sistema (o cache não serve); a descrição sem a
+  limpeza; a nota apagada indo; a decisão de uma pessoa não dita; sem dizer
+  por qual telefone; dez por volta; o funil com uma etapa só indo à IA; a
+  etapa fora de uso dita como a de agora;
+- **a gravação:** mover sem conferir o `movido_em`; deixando a pessoa de
+  antes; sem o motivo; `ia_leu_ate` com a hora da leitura; ficar gravando
+  também o motivo;
+- **as falhas:** a recusa tentando de novo; sem a espera depois de falhar; o
+  limite sem pausa, e sem o `retry-after`; a chave recusada sem pausa; sem o
+  044, perguntando sempre; o log com o porquê da IA.
+
+**Duas vazaram primeiro.** A da guarda do banco limpo era minha: ela trocava
+só metade da condição, e as outras metades, ligadas por `or`, continuavam
+segurando o script. A do telefone sem funil próprio era da prova: ela
+conferia só o código do erro (22023), e a trava das duas etapas devolve o
+mesmo código. Hoje a prova confere a frase, e ganhou a cena do telefone com o
+funil próprio desligado, onde o defeito ligaria a IA no funil errado.
+
 ## Tarefas e lembretes (script 018, 06/10)
 
 Terceiro passo para CRM, depois do responsável e do funil: o "quando agir de
