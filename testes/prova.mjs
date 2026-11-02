@@ -16937,5 +16937,357 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
   }
 }
 
+// ============================================================
+//  90. O FUNIL DE CADA TELEFONE (043), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 02/11: a opção de um funil para cada telefone. O que
+//  esta seção guarda, sobre o 017 e o 019 aplicados a partir dos próprios
+//  arquivos:
+//    - os cartões de antes continuam onde estavam (são do funil do
+//      departamento), e a regra "um por departamento" vira "um por funil";
+//    - só quem administra dá um funil próprio a um telefone; as etapas nascem
+//      copiadas, e os clientes do funil do departamento que conversam por
+//      ele ganham cartão NA ETAPA DE MESMO NOME — e quem foi tirado, não;
+//    - quem vê o quê: o funil do telefone, quem vê aquele telefone; o do
+//      departamento, quem vê um telefone dele SEM funil próprio;
+//    - o cliente novo entra no funil do telefone; a etapa de outro funil é
+//      recusada; o movimento diz de qual funil é;
+//    - trazer: o do departamento não traz os clientes do telefone de funil
+//      próprio, e o do telefone traz; a chamada de antes (dois argumentos)
+//      continua valendo;
+//    - o relatório tem um bloco por funil, e quem só atende as Audiências vê
+//      só o delas;
+//    - desligar devolve ao funil do departamento quem só estava no do
+//      telefone, sem apagar nada; ligar de novo não duplica as etapas;
+//    - rodar de novo não mexe em nada; a conferência pega quem entrou e não
+//      lê o funil; num banco sem o Zorvin, não faz nada.
+// ============================================================
+{
+  console.log("\n90. O funil de cada telefone (043), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 043 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S017 = ler("017-o-funil-de-etapas.sql"), S019 = ler("019-o-relatorio-do-funil.sql"),
+          S043 = ler("043-o-funil-de-cada-telefone.sql");
+    // O ZORVIN MÍNIMO, com a herança da Supabase e a regra de leitura das
+    // conversas por permissão (departamento inteiro ou um telefone só), que é
+    // por onde o funil decide quem vê o quê.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, ordem int not null default 0);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const ADMIN = "00000000-0000-0000-0000-0000000000a1";
+    const ANA = "00000000-0000-0000-0000-0000000000a2";   // o departamento inteiro
+    const BIA = "00000000-0000-0000-0000-0000000000a3";   // só as Audiências
+    const CAIO = "00000000-0000-0000-0000-0000000000a4";  // só o SAC
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      // OS DEPARTAMENTOS NASCEM ANTES DO 017, que semeia as sete etapas em cada um.
+      await c.query("insert into departamentos (nome, ordem) values ('Sucesso do Cliente', 1), ('Acordos', 2)");
+      await aplicar(c, S017);
+      await aplicar(c, S019);
+      await c.query(`insert into usuarios (id, nome, admin) values ('${ADMIN}', 'Admin', true), ('${ANA}', 'Ana', false),
+                       ('${BIA}', 'Bia', false), ('${CAIO}', 'Caio', false)`);
+      const tel = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $1, $2) returning id", [nome, dep])).rows[0].id;
+      const SAC = await tel("SAC", 1), AUD = await tel("Audiências", 1), ADV = await tel("Dr. Fulano", 2);
+      await c.query("insert into permissoes (usuario_id, departamento_id) values ($1, 1)", [ANA]);
+      await c.query("insert into permissoes (usuario_id, telefone_id) values ($1, $2)", [BIA, AUD]);
+      await c.query("insert into permissoes (usuario_id, telefone_id) values ($1, $2)", [CAIO, SAC]);
+      let nNum = 0;
+      const contato = async (nome, grupo = false) => (await c.query(
+        "insert into contatos (numero, nome) values ($1, $2) returning id",
+        [grupo ? `grupo:${100 + ++nNum}` : `55710000000${String(++nNum).padStart(2, "0")}`, nome])).rows[0].id;
+      const conversa = async (telId, ctId, diasAtras = 0) => (await c.query(
+        "insert into conversas (advogado_id, contato_id, ultima_atividade) values ($1, $2, now() - make_interval(days => $3)) returning id",
+        [telId, ctId, diasAtras])).rows[0].id;
+      const etapa = async (nome, dep, telId = null) => (await c.query(
+        `select id from zorvin_etapas where departamento_id = $1 and advogado_id is not distinct from $2::uuid
+            and nome = $3 and ativo`, [dep, telId, nome])).rows[0]?.id;
+      const cartoes = async (ctId) => (await c.query(
+        `select k.*, e.nome as etapa from zorvin_cartoes k join zorvin_etapas e on e.id = k.etapa_id
+          where k.contato_id = $1 order by k.advogado_id nulls first`, [ctId])).rows;
+
+      // A ETAPA DO 017 AINDA NÃO SABE DO TELEFONE: os cartões nascem no
+      // funil do departamento, um por cliente.
+      const c1 = await contato("Só SAC"), c2 = await contato("SAC e Audiências"), c3 = await contato("Só Audiências"),
+            c4 = await contato("Acordos"), cg = await contato("Mutirão", true), cTirado = await contato("Tirado");
+      await conversa(SAC, c1); await conversa(SAC, c2); await conversa(AUD, c2); await conversa(AUD, c3);
+      await conversa(ADV, c4); await conversa(AUD, cg); await conversa(AUD, cTirado);
+      // O cliente que alguém TIROU do funil (o cartão foi apagado).
+      await c.query("delete from zorvin_cartoes where contato_id = $1", [cTirado]);
+      // O c2 está em "Proposta/acordo enviado" no funil do departamento.
+      // (antes do 043 a coluna do telefone ainda não existe: a etapa é lida sem ela)
+      await c.query(`update zorvin_cartoes set etapa_id = (select id from zorvin_etapas
+                       where departamento_id = 1 and nome = 'Proposta/acordo enviado') where contato_id = $1`, [c2]);
+
+      // ---- 90a. aplicar ----
+      const antesDe = (await c.query("select count(*)::int as n from zorvin_cartoes")).rows[0].n;
+      const conf = await guardado(() => aplicar(c, S043));
+      ok("o 043 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que o cartão é um por funil e que a regra antiga saiu",
+         item(conf, /um por cliente em cada funil/) === "true" && item(conf, /regra antiga/) === "true"
+         && item(conf, /quem entrou lê/) === "sim", JSON.stringify(conf));
+      const depois = (await c.query("select count(*)::int as n, count(*) filter (where advogado_id is null)::int as dep from zorvin_cartoes")).rows[0];
+      ok("os cartões de antes continuam onde estavam, todos no funil do departamento",
+         depois.n === antesDe && depois.dep === antesDe && antesDe === 4, JSON.stringify({ antesDe, depois }));
+      ok("e o c2 continua em “Proposta/acordo enviado”",
+         (await cartoes(c2)).map((k) => k.etapa).join() === "Proposta/acordo enviado");
+
+      // ---- 90b. só quem administra dá um funil próprio ----
+      const daAna = await guardado(() => comoPessoa(c, ANA, () => c.query("select zorvin_funil_do_telefone($1)", [AUD])));
+      ok("quem não administra não dá funil próprio a um telefone (42501)", daAna.codigo === "42501", JSON.stringify(daAna));
+      const ligou = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_do_telefone($1) as r", [AUD])).rows[0].r));
+      ok("quem administra dá: nascem as sete etapas, copiadas do departamento",
+         ligou && ligou.ativo === true && ligou.etapas === 7, JSON.stringify(ligou));
+      ok("e os dois clientes do departamento que falam pelas Audiências ganham cartão (o tirado e o grupo, não)",
+         ligou && ligou.cartoes === 2, JSON.stringify(ligou));
+      const copiadas = (await c.query(
+        `select string_agg(nome || ':' || ordem || ':' || coalesce(cor, ''), ',' order by ordem) as s
+           from zorvin_etapas where advogado_id = $1`, [AUD])).rows[0].s;
+      const doDep = (await c.query(
+        `select string_agg(nome || ':' || ordem || ':' || coalesce(cor, ''), ',' order by ordem) as s
+           from zorvin_etapas where departamento_id = 1 and advogado_id is null and ativo`)).rows[0].s;
+      ok("as etapas copiadas têm os mesmos nomes, ordem e cores — mesmo nome dentro do mesmo departamento",
+         copiadas === doDep && !!copiadas, `${copiadas} | ${doDep}`);
+      const k2 = await cartoes(c2);
+      ok("o c2 fica nos DOIS funis, e no das Audiências na etapa de MESMO NOME",
+         k2.length === 2 && k2[0].advogado_id === null && k2[1].advogado_id === AUD
+         && k2[1].etapa === "Proposta/acordo enviado", JSON.stringify(k2.map((k) => [k.advogado_id, k.etapa])));
+      ok("o c3 ganha o cartão das Audiências, e o do departamento NÃO é apagado",
+         (await cartoes(c3)).length === 2);
+      ok("quem foi tirado do funil não volta pelo funil novo", (await cartoes(cTirado)).length === 0);
+      const movAud = (await c.query("select * from zorvin_movimentos where advogado_id = $1", [AUD])).rows;
+      ok("as entradas no funil das Audiências ficam no histórico, com o telefone e quem administrou",
+         movAud.length === 2 && movAud.every((m) => m.de_etapa === null && m.quem === ADMIN), JSON.stringify(movAud.length));
+      const deNovo = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_do_telefone($1) as r", [AUD])).rows[0].r));
+      ok("ligar o que já está ligado não duplica nada", deNovo && deNovo.etapas === 0 && deNovo.cartoes === 0,
+         JSON.stringify(deNovo));
+
+      // ---- 90c. quem vê o quê ----
+      const vistos = async (uid) => comoPessoa(c, uid, async () => (await c.query(
+        `select contato_id, advogado_id from zorvin_cartoes order by contato_id, advogado_id nulls first`)).rows
+        .map((k) => `${k.contato_id === c1 ? "c1" : k.contato_id === c2 ? "c2" : k.contato_id === c3 ? "c3" : k.contato_id === c4 ? "c4" : "?"}`
+                    + `${k.advogado_id ? "@AUD" : "@dep"}`).sort().join(","));
+      const vBia = await vistos(BIA), vCaio = await vistos(CAIO), vAna = await vistos(ANA);
+      ok("quem só atende as Audiências vê os cartões do funil delas, e não os do departamento",
+         vBia === "c2@AUD,c3@AUD", vBia);
+      ok("quem só atende o SAC vê o funil do departamento, sem o cliente que só fala com as Audiências",
+         vCaio === "c1@dep,c2@dep", vCaio);
+      ok("quem atende o departamento inteiro vê os dois funis", vAna === "c1@dep,c2@AUD,c2@dep,c3@AUD", vAna);
+      // O HISTÓRICO NÃO SOME COM O CARTÃO: o passo do funil do departamento
+      // continua com a regra do 017.
+      const passosDep = async (uid, ctId) => comoPessoa(c, uid, async () => (await c.query(
+        "select count(*)::int as n from zorvin_movimentos where contato_id = $1 and advogado_id is null", [ctId])).rows[0].n);
+      ok("o passo do funil do departamento continua no histórico de quem atende as Audiências (o cartão some, o caminho não)",
+         (await passosDep(BIA, c3)) === 1, String(await passosDep(BIA, c3)));
+      ok("e quem só atende o SAC continua sem ver o histórico de quem só fala com as Audiências",
+         (await passosDep(CAIO, c3)) === 0, String(await passosDep(CAIO, c3)));
+
+      // ---- 90d. o cliente novo, a etapa de outro funil, o movimento ----
+      const c6 = await contato("Novo nas Audiências");
+      await conversa(AUD, c6);
+      const k6 = await cartoes(c6);
+      ok("o cliente novo das Audiências entra no funil DELAS, na primeira etapa",
+         k6.length === 1 && k6[0].advogado_id === AUD && k6[0].etapa === "Novo contato", JSON.stringify(k6));
+      await conversa(SAC, c6);
+      ok("e, escrevendo também ao SAC, ganha o cartão do departamento", (await cartoes(c6)).length === 2);
+      const eDepAtend = await etapa("Em atendimento", 1), eAudNovo = await etapa("Novo contato", 1, AUD),
+            eAudAtend = await etapa("Em atendimento", 1, AUD);
+      const outro = await guardado(() => c.query("update zorvin_cartoes set etapa_id = $1 where contato_id = $2 and advogado_id = $3",
+                                                 [eDepAtend, c6, AUD]));
+      ok("a etapa do funil do departamento é recusada num cartão das Audiências (23514)",
+         outro.codigo === "23514" && /não é deste funil/.test(outro.erro), JSON.stringify(outro));
+      const dup = await guardado(() => c.query(
+        "insert into zorvin_cartoes (contato_id, departamento_id, advogado_id, etapa_id) values ($1, 1, $2, $3)",
+        [c6, AUD, eAudNovo]));
+      ok("um segundo cartão do mesmo cliente no mesmo funil é recusado (23505)", dup.codigo === "23505", JSON.stringify(dup));
+      const moveu = await guardado(() => comoPessoa(c, BIA, () => c.query(
+        "update zorvin_cartoes set etapa_id = $1 where contato_id = $2 and advogado_id = $3 returning id",
+        [eAudAtend, c6, AUD])));
+      ok("quem atende as Audiências move o cartão de lá", !moveu.erro && moveu.rowCount === 1, JSON.stringify(moveu.erro || moveu.rowCount));
+      const ultimo = (await c.query(
+        "select * from zorvin_movimentos where contato_id = $1 and de_etapa is not null order by quando desc limit 1", [c6])).rows[0] || {};
+      ok("o movimento diz de qual funil é, e quem moveu", ultimo.advogado_id === AUD && ultimo.quem === BIA, JSON.stringify(ultimo));
+
+      // ---- 90e. trazer ----
+      const cAntigoSac = await contato("Antigo do SAC"), cAntigoAud = await contato("Antigo das Audiências");
+      await conversa(SAC, cAntigoSac, 5); await conversa(AUD, cAntigoAud, 5);
+      await c.query("delete from zorvin_cartoes where contato_id in ($1, $2)", [cAntigoSac, cAntigoAud]);
+      const trazDep = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_trazer(p_departamento => 1, p_dias => 30) as n")).rows[0].n));
+      ok("a chamada de antes (só departamento e dias) continua valendo", typeof trazDep === "number", JSON.stringify(trazDep));
+      ok("e o funil do departamento traz o cliente do SAC, e não o das Audiências (nem quem foi tirado)",
+         (await cartoes(cAntigoSac)).length === 1 && (await cartoes(cAntigoAud)).length === 0
+         && (await cartoes(cAntigoSac))[0].advogado_id === null, JSON.stringify({ trazDep }));
+      const trazAud = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_trazer(1, 30, $1) as n", [AUD])).rows[0].n));
+      const kAud = await cartoes(cAntigoAud);
+      ok("o funil das Audiências traz os clientes dele (o antigo e o tirado, que conversaram nos últimos dias)",
+         trazAud === 2 && kAud.length === 1 && kAud[0].advogado_id === AUD && kAud[0].etapa === "Novo contato",
+         JSON.stringify({ trazAud, kAud }));
+      const trazSemFunil = await guardado(() => comoPessoa(c, ADMIN, () => c.query("select zorvin_funil_trazer(1, 30, $1)", [SAC])));
+      ok("trazer pelo telefone que usa o funil do departamento é recusado, dizendo por quê (22023)",
+         trazSemFunil.codigo === "22023" && /funil do departamento/.test(trazSemFunil.erro), JSON.stringify(trazSemFunil));
+
+      // ---- 90f. o relatório, um bloco por funil ----
+      const rel = async (uid, telId = null) => guardado(() => comoPessoa(c, uid, async () =>
+        (await c.query("select zorvin_relatorio_funil(null, null, null, $1::uuid) as r", [telId])).rows[0].r));
+      const rAdmin = await rel(ADMIN);
+      const blocos = lista(rAdmin && rAdmin.departamentos);
+      const bAud = blocos.find((b) => b.telefone_id === AUD) || {};
+      const bDep = blocos.find((b) => b.id === 1 && b.telefone_id === null) || {};
+      ok("o relatório tem o bloco do funil do departamento, o das Audiências e o dos Acordos",
+         blocos.length === 3 && bAud.telefone === "Audiências" && bDep.nome === "Sucesso do Cliente",
+         JSON.stringify(blocos.map((b) => [b.nome, b.telefone])));
+      const nAud = (await c.query("select count(*)::int as n from zorvin_cartoes where advogado_id = $1", [AUD])).rows[0].n;
+      // O DO DEPARTAMENTO CONTA SÓ O QUE SE VÊ: o cartão de quem só fala com as
+      // Audiências continua guardado lá, e não aparece nem para quem administra.
+      const nDep = (await c.query(
+        `select count(*)::int as n from zorvin_cartoes k where k.departamento_id = 1 and k.advogado_id is null
+            and exists (select 1 from conversas v where v.contato_id = k.contato_id and v.advogado_id = $1)`, [SAC])).rows[0].n;
+      ok("cada bloco conta os cartões do SEU funil — e o guardado do departamento não conta", bAud.agora === nAud && bDep.agora === nDep && nDep === 4,
+         JSON.stringify({ aud: [bAud.agora, nAud], dep: [bDep.agora, nDep] }));
+      ok("as etapas de cada bloco são as do funil dele (sete, sem misturar)",
+         lista(bAud.etapas).length === 7 && lista(bDep.etapas).length === 7
+         && lista(bAud.etapas).every((e) => !lista(bDep.etapas).some((d) => d.id === e.id)));
+      const emAtend = lista(bAud.etapas).find((e) => e.nome === "Em atendimento") || {};
+      ok("o movimento das Audiências conta no bloco delas, e não no do departamento",
+         emAtend.entraram === 1 && (lista(bDep.etapas).find((e) => e.nome === "Em atendimento") || {}).entraram === 0,
+         JSON.stringify(emAtend));
+      const rBia = await rel(BIA);
+      ok("quem só atende as Audiências vê só o bloco delas",
+         lista(rBia && rBia.departamentos).length === 1 && rBia.departamentos[0].telefone_id === AUD,
+         JSON.stringify(rBia && rBia.departamentos && rBia.departamentos.map((b) => b.telefone)));
+      const rFiltroAud = await rel(ADMIN, AUD), rFiltroSac = await rel(ADMIN, SAC);
+      ok("filtrado pelas Audiências, só o funil delas",
+         lista(rFiltroAud && rFiltroAud.departamentos).length === 1 && rFiltroAud.departamentos[0].telefone_id === AUD);
+      const bSac = lista(rFiltroSac && rFiltroSac.departamentos)[0] || {};
+      ok("filtrado pelo SAC, o funil do departamento só com os clientes do SAC",
+         lista(rFiltroSac && rFiltroSac.departamentos).length === 1 && bSac.telefone_id === null
+         && bSac.agora === (await c.query(
+           `select count(*)::int as n from zorvin_cartoes k where k.departamento_id = 1 and k.advogado_id is null
+               and exists (select 1 from conversas v where v.contato_id = k.contato_id and v.advogado_id = $1)`, [SAC])).rows[0].n,
+         JSON.stringify(bSac.agora));
+
+      // ---- 90g. desligar e ligar de novo ----
+      const semDep = (await c.query(
+        `select count(*)::int as n from zorvin_cartoes k where k.advogado_id = $1
+            and not exists (select 1 from zorvin_cartoes d where d.contato_id = k.contato_id
+                             and d.departamento_id = 1 and d.advogado_id is null)`, [AUD])).rows[0].n;
+      const desligou = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_do_telefone($1, false) as r", [AUD])).rows[0].r));
+      ok("desligar devolve ao funil do departamento quem só estava no das Audiências (o antigo e o tirado, trazidos por lá)",
+         desligou && desligou.ativo === false && desligou.cartoes === semDep && semDep === 2, JSON.stringify({ desligou, semDep }));
+      const kAntigo = await cartoes(cAntigoAud);
+      ok("na etapa de mesmo nome, e o cartão das Audiências fica guardado",
+         kAntigo.length === 2 && kAntigo[0].advogado_id === null && kAntigo[0].etapa === "Novo contato"
+         && kAntigo[1].advogado_id === AUD, JSON.stringify(kAntigo.map((k) => [k.advogado_id, k.etapa])));
+      const vBia2 = await comoPessoa(c, BIA, async () => (await c.query(
+        "select count(*)::int as n from zorvin_cartoes where advogado_id is null")).rows[0].n);
+      ok("desligado, quem atende as Audiências volta a ver os clientes delas no funil do departamento",
+         vBia2 >= 3, String(vBia2));
+      const c7 = await contato("Chegou com o funil desligado");
+      await conversa(AUD, c7);
+      ok("o cliente novo, com o funil desligado, entra no do departamento",
+         (await cartoes(c7)).length === 1 && (await cartoes(c7))[0].advogado_id === null);
+      const religou = await guardado(() => comoPessoa(c, ADMIN, async () =>
+        (await c.query("select zorvin_funil_do_telefone($1) as r", [AUD])).rows[0].r));
+      ok("ligar de novo não recria as etapas, e traz quem chegou enquanto estava desligado",
+         religou && religou.etapas === 0 && religou.cartoes === 1 && (await cartoes(c7)).length === 2, JSON.stringify(religou));
+      ok("e continua uma linha só para o telefone",
+         (await c.query("select count(*)::int as n from zorvin_funis where advogado_id = $1", [AUD])).rows[0].n === 1);
+
+      // ---- 90h. rodar de novo ----
+      const totalAntes = (await c.query("select count(*)::int as n from zorvin_cartoes")).rows[0].n;
+      const de2 = await guardado(() => aplicar(c, S043));
+      ok("rodar de novo aplica sem acusar nada, e conta o telefone com funil próprio",
+         Array.isArray(de2) && !defeito(de2) && item(de2, /telefones com funil próprio/) === "1", JSON.stringify(de2));
+      ok("e não mexe em cartão nenhum", (await c.query("select count(*)::int as n from zorvin_cartoes")).rows[0].n === totalAntes);
+
+      // ---- 90i. a conferência que pega o que quem atende não alcança ----
+      // A permissão de `zorvin_funis` o próprio 043 devolve ao rodar; a de
+      // `advogados`, não — é o caso do 011, que passou na conferência como
+      // dona e morreu na tela.
+      await c.query("revoke select on advogados from authenticated");
+      const quebrada = await guardado(() => aplicar(c, S043));
+      ok("sem quem entrou alcançar o que o relatório lê, a conferência diz NÃO",
+         Array.isArray(quebrada) && /^NÃO/.test(String(item(quebrada, /quem entrou lê/))), JSON.stringify(quebrada));
+      await c.query("grant select on advogados to authenticated");
+
+      // ---- 90j. banco limpo ----
+      const limpo = await bancoNovo();
+      const confLimpo = await guardado(() => aplicar(limpo, S043));
+      ok("num banco sem o Zorvin, o 043 não faz nada e diz isso",
+         Array.isArray(confLimpo) && /nada a fazer/.test(String(item(confLimpo, /sem o funil/))), JSON.stringify(confLimpo));
+    } catch (e) {
+      ok("a seção 90 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
