@@ -1991,6 +1991,108 @@ uma etapa; o período curto; o filtro de telefone; quem não administra só no
 departamento que atende; etapa desativada vazia some e com cartão fica;
 banco limpo; reaplicação) e **5 sabotagens com 5 pegas**.
 
+### O funil de cada telefone (script 043, 02/11)
+
+Pedido do Rodrigo, junto com o funil movido pela IA: *"Haverão etapas
+diferentes no funil de cada departamento, ideal também ter a opção de funil
+para cada telefone."* Medido em 02/11: o Sucesso do Cliente tem cinco
+telefones com trabalhos diferentes (SAC 871 clientes, SDC CCR 280, Subsídio
+Emenda 241, Audiências 232, Sucesso do Cliente 31). E o funil estava parado:
+1.619 dos 1.629 cartões em "Novo contato", e 11 movidos por gente em quatro
+semanas.
+
+`sql/automaticos/043-o-funil-de-cada-telefone.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_funis` | quais telefones têm funil próprio, e se está em uso (`ativo`) |
+| `advogado_id` em `zorvin_etapas`, `zorvin_cartoes` e `zorvin_movimentos` | o telefone do funil; **nulo é o funil do departamento** |
+| `zorvin_ve_no_funil(contato, departamento, telefone)` | quem vê o cartão |
+| `zorvin_funil_do_telefone(telefone, ligar)` | dar ou tirar o funil próprio — só quem administra |
+| `zorvin_funil_trazer(departamento, dias, telefone)` | trazer, agora também para o funil de um telefone |
+| `zorvin_relatorio_funil` | um bloco por funil |
+
+**Os 1.629 cartões de hoje não precisam de conta nenhuma**: `advogado_id` nulo
+já é o funil do departamento.
+
+**Um cartão por cliente EM CADA FUNIL** (era um por departamento). A regra do
+017 sai e entra `(contato_id, departamento_id, advogado_id) nulls not distinct`,
+na mesma transação, sem instante sem regra. O `on conflict` acha esse índice
+(conferido num Postgres 16). O nome da etapa passa a ser único dentro do funil:
+o do SAC e o das Audiências são do mesmo departamento e nascem com os mesmos
+nomes.
+
+**Quem vê:** o cartão do funil de um telefone, quem vê as conversas daquele
+telefone com o cliente; o do departamento, quem vê uma conversa do cliente num
+telefone do departamento **sem** funil próprio. **O histórico é a exceção**: o
+passo do funil do departamento continua com a regra do 017 (quem vê o cliente
+em qualquer telefone do departamento). O cartão guardado some da tela; o
+caminho por onde o cliente já passou, não. Foi a prova do painel que pegou: o
+caminho do histórico mostrava só o funil novo.
+
+**Dar o funil próprio:**
+
+- as etapas nascem copiadas das ativas do departamento (as sete sugeridas, se
+  ele não tiver nenhuma);
+- os clientes do funil do departamento que conversam pelo telefone ganham
+  cartão **na etapa de mesmo nome**;
+- quem foi tirado do funil (não tem cartão) não volta;
+- o cartão do departamento não é apagado: o de quem só fala com aquele
+  telefone fica guardado, sem aparecer;
+- ligar de novo não duplica as etapas, e traz quem chegou enquanto estava
+  desligado.
+
+**Desligar** devolve ao funil do departamento quem só estava no do telefone, na
+etapa de mesmo nome, e não apaga nada. A função devolve
+`{ funil, ativo, etapas, cartoes }`, e é daí que sai a frase da tela.
+
+**`security definer`, com a conferência de quem administra na primeira linha**,
+e não `security invoker` como o "trazer". Medido na prova: ligado o funil do
+telefone, a regra de leitura passa a esconder o cartão do departamento de quem
+só fala com aquele telefone — até de quem administra, porque a regra é sobre o
+funil, e não sobre a pessoa. Lendo pela regra, justamente esses clientes
+ficavam fora do funil novo.
+
+**Trazer:** o do departamento traz só as conversas dos telefones que usam o
+funil dele; o do telefone recusa (22023) o telefone que usa o do departamento.
+As versões de antes saem primeiro, e o argumento novo tem padrão: a chamada do
+painel de antes (só departamento e dias) continua valendo.
+
+**O relatório** continua respondendo `departamentos`, e cada bloco ganhou
+`telefone_id` e `telefone` (nulos no funil do departamento). O tempo numa etapa
+continua sendo o de quem saiu, e a chegada é procurada pela própria etapa, que
+é de um funil só.
+
+**A versão de referência** (regra 5 do LEIA-ME) de `zorvin_cartao_confere`,
+`zorvin_cartao_historico`, `zorvin_funil_cliente_novo`, `zorvin_funil_trazer` e
+`zorvin_relatorio_funil` passa a ser a do 043.
+
+**A ponte não faz nada com isso**: é banco e painel.
+
+Prova: seção 90, num Postgres de verdade, sobre o 017 e o 019 aplicados a partir
+dos próprios arquivos: 45 conferências, **20 sabotagens e 20 pegas**, todas
+rodadas em cópias e lidas uma a uma:
+
+- **a estrutura:** a regra antiga do cartão ficando; a etapa conferida só pelo
+  departamento; o movimento sem o telefone;
+- **quem vê:** o funil do departamento sem tirar os telefones de funil
+  próprio; o funil do telefone visto por quem vê o departamento; o histórico do
+  departamento escondido com o cartão;
+- **dar o funil:** como invoker (a primeira escrita); sem a etapa de mesmo
+  nome; trazendo quem foi tirado; as etapas copiadas de novo a cada ligar; quem
+  não administra dando;
+- **o cliente novo** sempre no funil do departamento;
+- **trazer:** o do departamento sem tirar os telefones de funil próprio; pelo
+  telefone sem conferir o funil dele;
+- **o relatório:** contando o funil do telefone no do departamento; sem os
+  blocos dos telefones; sem a permissão de quem atende;
+- **desligar:** sem trazer de volta; apagando o funil do telefone;
+- **o banco limpo** sem a guarda.
+
+**Uma vazou primeiro, e a culpa era minha:** a sabotagem da guarda desligava só
+metade das condições, e a outra metade continuava segurando o script. Refeita
+desligando a guarda inteira, ela é pega.
+
 ## Tarefas e lembretes (script 018, 06/10)
 
 Terceiro passo para CRM, depois do responsável e do funil: o "quando agir de
