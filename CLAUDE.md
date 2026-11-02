@@ -4047,8 +4047,9 @@ na ordem, esconde de novo as senhas que existirem.
 do merge**, e trocou por "••••••" o valor de **62 linhas**. A mensagem do
 Rodrigo chegou depois disso, e uma cópia de `alteracoes` tirada às 01:04
 (`zorvin_copia_alteracoes_2810`, com RLS e sem acesso de quem entra) já veio
-com o "••••••". Ela não serve para nada, e sai na próxima conversa com o
-conector do Supabase.
+com o "••••••". ~~Ela não serve para nada, e sai na próxima conversa com o
+conector do Supabase.~~ **Saiu**: em 02/11 ela já não existia no banco
+(conferido em todos os esquemas).
 
 **O valor de antes não está em lugar nenhum deste banco.** O `UPDATE` grava por
 cima. A versão velha da linha continua no disco até o próximo `VACUUM`
@@ -4064,6 +4065,14 @@ backup físico): "Restore to a New Project" com o backup de 28/10 cria um
 projeto separado, de onde as linhas podem voltar sem que o valor passe aberto
 por ninguém (cifrado com `pgcrypto` na ida e decifrado no banco do escritório).
 O projeto novo custa enquanto existir, então é decisão do Rodrigo.
+
+**Decidido em 02/11: não recuperar.** Nas palavras dele: *"O importante são
+as senhas atuais, não as anteriores."* Medido no mesmo dia, só contando: as 62
+linhas são de 46 clientes, de 26/08 a 28/10 (42 da senha GOV e 20 da SERASA);
+41 são a primeira vez que a senha foi preenchida e 21 são trocas de senha; e
+quem mudou e quando continuam anotados. O backup de 28/10 sai sozinho do
+Supabase em 03 ou 04/11, sem custo nenhum. **O assunto está fechado**: não há
+mais o que oferecer, e ele não precisa ser trazido de novo.
 
 **A lição que fica:** o merge publica sozinho, e o script roda na subida. **Um
 script que reescreve dado de produção sem volta pede a pergunta ANTES do
