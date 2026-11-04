@@ -2905,7 +2905,28 @@ procurava um trecho do meio do texto da IA, e o `JSON.parse` só cita o começo
 — a sabotagem que põe a mensagem de erro no log passaria. E a do
 `</conversa>` só olhava a mensagem do cliente, e não a nota.
 
-### O assunto do Finalizar — a IA sugere (01/11)
+### O assunto do Finalizar — a IA sugere (01/11) — SAIU EM 04/11
+
+**Saiu em 04/11, a pedido do Rodrigo:** *"A sugestão da IA no Finalizar, pode
+remover. Não gostamos do uso dela, está mais atrapalhando do que ajudando."*
+
+- **a rota `POST /copiloto/assunto` saiu**, e com ela o `assunto: true` de
+  `/copiloto/estado`. É a falta dessa chave que faz o painel publicado antes da
+  remoção deixar de pedir a sugestão (`assuntoAparece`, no painel, lê "esta
+  ponte não sugere"): a janela do Finalizar volta a abrir como antes de 01/11,
+  sem a caixa e sem nada marcado sozinho, assim que esta ponte sobe. O código
+  que sobrou no painel sai numa PR dele;
+- **fica** a comparação de nomes sem acento (`chaveDoNomeDoAssunto`), que a IA
+  do funil usa para achar a etapa que ela devolveu;
+- **fica o script 042 e o que ele guardou** (`zorvin_tratamentos.sugestao_ia`):
+  script aplicado não sai da pasta, e os registros com a sugestão continuam no
+  banco. Nada é apagado;
+- **a seção 88 da prova foi INVERTIDA, e não apagada**: o estado sem
+  `assunto`, o resto do estado de pé, a rota que não existe e nenhum pedido à
+  Anthropic. Duas sabotagens, duas pegas (o `assunto: true` de volta; a ponte
+  de antes inteira, com três reprovações). A seção 89 (o 042) continua.
+
+O que está escrito abaixo é a história de como ela funcionava.
 
 Pedido do Rodrigo, da lista de recomendações de 31/10: *"Siga para a
 recomendação 5"* — *"A IA sugere o assunto no Finalizar. A lista já abre com o
