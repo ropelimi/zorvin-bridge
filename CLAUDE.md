@@ -3206,6 +3206,72 @@ e 5 pegas**.
 segundo atendimento que a sabotagem não deixava existir. Prova que estoura
 não diz qual conferência viu o defeito: os acessos passaram a ser guardados.
 
+### O número de cada aba, por responsável (script 046, 04/11)
+
+Pedido do Rodrigo, com a foto do alto da lista: *"Excluir a mensagem
+'ATENDENDO COMO' e ao lado no número de telefone colocar uma opção de
+selecionar o responsável pela conversa. Ao selecionar o responsável, aparecer
+apenas as conversas do responsável, mostrando em 'Novos', 'Em atendimento',
+'Finalizados' e 'Não lidas' apenas as conversas correspondentes ao responsável
+selecionado. Precisa ter a possibilidade de selecionar mais de um
+responsável."*
+
+A lista o painel recorta sozinho, pela coluna `responsavel_id` (008). O número
+de cada aba vem de `zorvin_contar_situacoes`, e ela contava o telefone
+inteiro. `sql/automaticos/046-o-numero-das-abas-por-responsavel.sql` troca a
+função pela de três argumentos:
+
+| a chamada | conta |
+|---|---|
+| só `p_telefone` (a do painel de antes) | tudo, como antes |
+| `p_responsaveis` | só as conversas dessas pessoas |
+| `p_sem_responsavel` | também as sem responsável (ou só elas) |
+
+- **As mesmas regras do 028**: sem as arquivadas e sem a conversa que nunca
+  teve mensagem, e as não lidas de cada aba na mesma resposta.
+- **A lista vazia vale como "sem filtro"**, e não como "ninguém": zero em
+  tudo por causa de um `[]` seria a aba dizendo que não há nada.
+- **A de um argumento SAI**, na mesma transação, e não fica ao lado: duas
+  funções com o mesmo nome fariam a chamada só com o telefone morrer com
+  "is not unique" (a lição do 010). **A versão de referência da função passa a
+  ser a do 046** (regra 5): rodar o 028 sozinho depois dele poria a de um
+  argumento de volta ao lado desta.
+- **Guarda do 008 e do 028**: o corpo de uma função `sql` é conferido ao
+  criá-la, e sem `responsavel_id` o script morreria ali e pararia os
+  seguintes.
+- **`security invoker`**, como antes: conta o que quem pergunta enxerga.
+  Quem não entrou não chama.
+
+**A conferência soma as partes, nos dados de verdade**: em cada telefone, as
+conversas de cada responsável mais as sem responsável têm de dar o número de
+sempre — o recorte não perde nem repete ninguém. E chama a conta no papel de
+quem atende, com e sem os responsáveis (a régua 4).
+
+**A ponte não faz nada com isso**: é banco e painel. O painel só manda os
+argumentos novos com um responsável escolhido; antes do 046, essa chamada não
+acha a função (42883 no banco, PGRST202 no PostgREST), e a aba fica sem
+número — e não com o do telefone inteiro.
+
+Prova: seção 95, num Postgres de verdade, sobre o 004, 005, 006, 008, 020 e
+028 aplicados a partir dos próprios arquivos — 21 conferências. **12
+sabotagens e 12 pegas**, todas limpas, rodadas em cópias e lidas uma a uma:
+
+- a de um argumento ao lado da nova (14 reprovações);
+- a lista vazia valendo como ninguém;
+- a arquivada, e a conversa sem mensagem, entrando na conta;
+- `security definer`;
+- sem tirar de `anon`;
+- as sem responsável ignoradas, e as pessoas E as sem responsável (o "e" no
+  lugar do "ou");
+- a conferência criada depois da guarda;
+- sem a guarda do 008 (pega pela cena das abas sem o responsável);
+- a conferência das partes sem as sem responsável;
+- a conferência de quem atende sem trocar de papel.
+
+**A da guarda do 008 vazou primeiro**: no banco limpo, a guarda das tabelas já
+segurava o script. Entrou a cena do banco com as abas e sem o responsável, e
+ela pega.
+
 ## A contabilização dos atendimentos (script 029, 20/10)
 
 Pedido do Rodrigo, depois das abas do 028: a "contabilização" do DataCrazy —
