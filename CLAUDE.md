@@ -496,6 +496,70 @@ limpas, rodadas em cópias e lidas uma a uma:
 Groq para o clique, a rodada pegaria sozinha os áudios da cena e a conta de
 idas ao Groq mudaria de assunto.
 
+## A busca procura em todos os telefones (script 049, 04/11)
+
+Pedido do Rodrigo, com duas fotos: um lead sem ficha no Vantoro tem conversa
+só no telefone do SAC. Procurando o nome dele no SAC, a conversa aparecia;
+no telefone de Audiências, a lista dizia "Nada encontrado para essa busca".
+*"Não importa em qual telefone o usuário esteja, a busca deve encontrar todas
+as conversas, com ou sem ficha do Vantoro."*
+
+`buscar_conversas` recortava no telefone aberto (`c.advogado_id =
+p_advogado`) nas quatro perguntas que faz: o nome, o número, o que foi
+escrito e o que foi dito nos áudios.
+`sql/automaticos/049-a-busca-procura-em-todos-os-telefones.sql`:
+
+| | |
+|---|---|
+| `p_todos_os_telefones` (padrão falso) | verdadeiro, a busca não recorta no telefone. Cada pessoa continua achando só o que a regra de acesso de `conversas` deixa ver: a função é `security invoker` |
+| a coluna `advogado_id` na resposta | de qual telefone é cada conversa achada, para a tela dizer e abrir nele |
+| o telefone aberto primeiro | a resposta tem teto (80 no painel), e com os telefones todos uma palavra comum o enche: ele corta primeiro as conversas dos outros telefones |
+
+- **Um argumento, e não `p_advogado` nulo.** Com a função de antes, um
+  telefone nulo não acha nada e não dá erro: a tela leria "nada encontrado".
+  Com o argumento novo, a função de antes não é achada (PGRST202), e o painel
+  sabe que tem de procurar só no telefone aberto.
+- **A função é apagada e criada de novo**, porque a resposta muda de forma.
+  A ponte aplica cada script numa transação só, e ninguém vê o instante sem a
+  função. **A chamada do painel de antes continua valendo**: o argumento novo
+  tem padrão, e a coluna a mais ele não lê.
+- **Uma função só.** Duas buscas divergiriam no primeiro conserto, e duas com
+  o mesmo nome fariam a chamada de três argumentos morrer com "is not unique".
+  O 040, rodado de novo depois (a pasta inteira, na ordem), não acha a de três
+  argumentos e não a recria. **O 049 é a versão de referência da busca** (a
+  regra 5 do LEIA-ME).
+- **Quem não entrou não chama a busca**, e quem atende chama: ditos no
+  script, e não supostos pela herança (a armadilha nº 5).
+- **Só troca a busca que existe**, como o 040. Sem as colunas do 015, não
+  mexe e diz qual script falta.
+
+**A ponte não faz nada com isso**: é banco e painel. A tela está no CLAUDE.md
+do painel ("A busca procura em todos os telefones").
+
+Prova: seção 99, num Postgres de verdade, com a busca montada como na seção 85
+(os dois scripts de agosto, o 015 e o 040, a partir dos próprios arquivos) e a
+regra de acesso de `conversas` por telefone. 40 conferências, **16
+sabotagens e 16 pegas**, todas limpas, rodadas em cópias e lidas uma a uma:
+
+- **o recorte:** o de antes nas quatro perguntas; e em cada uma sozinha (o
+  nome, o número, o que foi escrito, o que foi dito);
+- **a resposta:** com o telefone aberto no lugar do da conversa; sem o
+  telefone aberto primeiro;
+- **a função:** sem apagar a de antes (duas com o mesmo nome: "is not
+  unique"); a chamada de antes deixando de valer (sem os padrões); com o poder
+  de dono (a regra de acesso deixa de valer); sem tirar de quem não entrou; sem
+  dar a quem atende;
+- **as guardas:** sem a do 015; sem a da busca que existe; a tabela da
+  conferência depois da guarda;
+- **e a conferência** chamando a busca como dona do banco, pega pela cena em
+  que a busca falha só para quem atende.
+
+**Uma sabotagem da primeira escrita não era um defeito possível**: tirar o
+padrão só do quarto argumento é recusado pelo próprio Postgres ("input
+parameters after one with a default value must also have defaults"). Ela foi
+trocada pelo defeito real (a chamada de antes deixando de valer), e a rodada,
+refeita inteira.
+
 ## O anexo que não vem mais — "não consegui agora" e "não existe" são diferentes
 
 MEDIDO em 11/09, resgatando os anexos vazios do escritório. A rota que serve
