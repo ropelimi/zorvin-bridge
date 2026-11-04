@@ -19139,5 +19139,308 @@ create policy conversas_tudo on conversas for all to authenticated using (true) 
   }
 }
 
+// ============================================================
+//  99. A BUSCA PROCURA EM TODOS OS TELEFONES (049), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 04/11: um lead com conversa só no SAC não era achado
+//  por quem procurava estando no telefone de Audiências. A busca da lista é
+//  montada aqui como na seção 85 (os dois scripts de agosto, o 015 e o 040,
+//  todos a partir dos próprios arquivos), com a regra de acesso de
+//  `conversas` por telefone. A seção guarda:
+//    - antes do 049, a conversa de outro telefone não é achada (o pedido);
+//    - com `p_todos_os_telefones`, é achada, com o telefone dela, por nome,
+//      por número, pelo que foi escrito e pelo que foi dito num áudio;
+//    - a chamada de antes (três argumentos, e com os nomes) continua valendo,
+//      e continua só no telefone aberto;
+//    - o teto corta antes os outros telefones;
+//    - cada pessoa só acha o que a regra de acesso deixa ver;
+//    - quem não entrou não chama;
+//    - rodar de novo, e o 040 rodado depois, não deixam duas funções;
+//    - sem a busca, sem o 015 ou sem o Zorvin, nada estoura;
+//    - e a conferência vê a busca que falha só para quem atende.
+// ============================================================
+{
+  console.log("\n99. A busca procura em todos os telefones (049), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 049 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (caminho) => fs.readFileSync(new URL(`../sql/${caminho}`, import.meta.url), "utf8");
+    const S049 = ler("automaticos/049-a-busca-procura-em-todos-os-telefones.sql");
+    const S040 = ler("automaticos/040-o-que-foi-dito-nos-audios-entra-na-busca.sql");
+    const S015 = ler("automaticos/015-a-transcricao-do-audio.sql");
+    const BUSCA = ler("2026-08-busca-de-verdade.sql");
+    const BUSCA_IR = ler("2026-08-busca-ir-para-a-mensagem.sql");
+    // AS TRÊS TABELAS DA SEÇÃO 85, mais a regra de acesso de `conversas` por
+    // telefone (`permissoes`) e o `auth.uid()` da Supabase. A regra é a
+    // pergunta desta seção: em todos os telefones, cada pessoa continua vendo
+    // só os que atende.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+create schema if not exists extensions;
+grant usage on schema public, extensions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique, nome text,
+                       vantoro_nome text, nome_zorvin text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid,
+                        contato_id uuid references contatos(id), ultima_atividade timestamptz default now());
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+                        origem text not null, tipo text not null default 'texto', texto text, midia_url text,
+                        criado_em timestamptz not null default now());
+create table permissoes (usuario_id uuid not null, advogado_id uuid not null);
+grant select on contatos, conversas, mensagens, permissoes to authenticated;
+alter table conversas enable row level security;
+create policy conversas_por_telefone on conversas for select to authenticated
+  using (exists (select 1 from permissoes p where p.usuario_id = auth.uid() and p.advogado_id = conversas.advogado_id));
+`;
+    const TEL = "adadadad-0000-0000-0000-000000000001";        // o telefone aberto (Audiências)
+    const OUTRO_TEL = "adadadad-0000-0000-0000-000000000002";  // o SAC
+    const TERCEIRO = "adadadad-0000-0000-0000-000000000003";   // um telefone que só uma pessoa atende
+    const SO_AQUI = "eeeeeeee-0000-0000-0000-000000000001";    // atende só o telefone aberto
+    const TODOS = "eeeeeeee-0000-0000-0000-000000000002";      // atende os três
+    const conv = (n) => `aaaaaaaa-0000-0000-0000-00000000000${n}`;
+    const cont = (n) => `cccccccc-0000-0000-0000-00000000000${n}`;
+    // O LEAD DO PEDIDO tem conversa só no outro telefone, e nome e número
+    // próprios. Os nomes são de mentira (o repositório é público).
+    const SEMENTE = `
+insert into contatos (id, numero, nome) values
+  ('${cont(1)}', '5511900000001', 'Maria'), ('${cont(2)}', '5511900000002', 'José'),
+  ('${cont(3)}', '5571987650003', 'Joana Lead da Silva'), ('${cont(4)}', '5511900000004', 'Paulo'),
+  ('${cont(5)}', '5511900000005', 'Carla do Terceiro');
+insert into conversas (id, advogado_id, contato_id, ultima_atividade) values
+  ('${conv(1)}', '${TEL}', '${cont(1)}', now() - interval '3 hour'),
+  ('${conv(2)}', '${TEL}', '${cont(2)}', now() - interval '4 hour'),
+  ('${conv(3)}', '${OUTRO_TEL}', '${cont(3)}', now()),
+  ('${conv(4)}', '${TEL}', '${cont(4)}', now() - interval '5 hour'),
+  ('${conv(5)}', '${TERCEIRO}', '${cont(5)}', now() - interval '1 hour');
+insert into mensagens (id, conversa_id, origem, tipo, texto, criado_em) values
+  ('dddddddd-0000-0000-0000-000000000001', '${conv(1)}', 'contato', 'texto', 'segue o comprovante', now() - interval '3 hour'),
+  ('dddddddd-0000-0000-0000-000000000002', '${conv(2)}', 'contato', 'texto', 'o comprovante foi por email', now() - interval '4 hour'),
+  ('dddddddd-0000-0000-0000-000000000003', '${conv(3)}', 'contato', 'audio', null, now()),
+  ('dddddddd-0000-0000-0000-000000000004', '${conv(3)}', 'contato', 'texto', 'Recebemos a certidão', now() - interval '10 min'),
+  ('dddddddd-0000-0000-0000-000000000005', '${conv(5)}', 'contato', 'texto', 'mandei o comprovante', now() - interval '1 hour');
+insert into permissoes (usuario_id, advogado_id) values
+  ('${SO_AQUI}', '${TEL}'),
+  ('${TODOS}', '${TEL}'), ('${TODOS}', '${OUTRO_TEL}'), ('${TODOS}', '${TERCEIRO}');
+`;
+    const TRANSCRICOES = `
+update mensagens set transcricao = 'o COMPROVANTE da conciliação vai hoje', transcrita_em = now() where id = 'dddddddd-0000-0000-0000-000000000003';
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    // A busca de antes (três argumentos) e a de agora (com o quarto).
+    const buscar3 = async (c, termo, tel = TEL) => lista(await guardado(async () => (await c.query(
+      "select id::text, motivo, trecho, mensagem_id from public.buscar_conversas($1::uuid, $2, 80)", [tel, termo])).rows));
+    const buscarTodos = async (c, termo, tel = TEL, limite = 80) => lista(await guardado(async () => (await c.query(
+      "select id::text, motivo, trecho, mensagem_id, advogado_id::text from public.buscar_conversas($1::uuid, $2, $3, true)",
+      [tel, termo, limite])).rows));
+    const daConversa = (achadas, n) => achadas.find((a) => a.id === conv(n));
+    const quantasBuscas = async (c) => Number((await c.query(
+      "select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'buscar_conversas'")).rows[0].count);
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await aplicar(c, BUSCA);
+      await aplicar(c, BUSCA_IR);
+      await c.query(SEMENTE);
+      await aplicar(c, S015);
+      await c.query(TRANSCRICOES);
+      await aplicar(c, S040);
+
+      // ---- 99a. antes do 049, a conversa de outro telefone não é achada ----
+      const antes = await buscar3(c, "joana lead");
+      ok("99a antes do 049, o lead com conversa só noutro telefone NÃO é achado (o pedido, reproduzido)",
+         !daConversa(antes, 3), JSON.stringify(antes));
+      const quatroAntes = await guardado(() => c.query("select * from public.buscar_conversas($1::uuid, 'joana', 80, true)", [TEL]));
+      ok("e a busca de antes não conhece o quarto argumento", quatroAntes && quatroAntes.codigo === "42883", JSON.stringify(quatroAntes));
+
+      // ---- 99b. o 049 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S049));
+      ok("99b o 049 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/procura em todos os telefones/, /de qual telefone/, /de antes saiu/, /quem entrou pode/, /quem não entrou não pode/]) {
+        ok(`a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+      ok("e que a busca responde para quem atende, num telefone e em todos",
+         item(conf, /responde para quem atende/) === "sim", JSON.stringify(item(conf, /responde para quem atende/)));
+
+      // ---- 99c. em todos os telefones, o lead é achado, com o telefone dele ----
+      const porNome = await buscarTodos(c, "joana lead");
+      ok("99c em todos os telefones, o lead é achado pelo nome",
+         (daConversa(porNome, 3) || {}).motivo === "nome", JSON.stringify(porNome));
+      ok("e a resposta diz de qual telefone é a conversa", (daConversa(porNome, 3) || {}).advogado_id === OUTRO_TEL,
+         JSON.stringify(daConversa(porNome, 3)));
+      const porNumero = await buscarTodos(c, "98765-0003");
+      ok("pelo número também", (daConversa(porNumero, 3) || {}).motivo === "numero", JSON.stringify(porNumero));
+      const porTexto = await buscarTodos(c, "certidao");
+      ok("pelo que foi escrito, sem acento", (daConversa(porTexto, 3) || {}).motivo === "mensagem"
+         && (daConversa(porTexto, 3) || {}).mensagem_id === "dddddddd-0000-0000-0000-000000000004", JSON.stringify(porTexto));
+      const porAudio = await buscarTodos(c, "conciliacao");
+      ok("e pelo que foi dito num áudio", (daConversa(porAudio, 3) || {}).motivo === "audio"
+         && (daConversa(porAudio, 3) || {}).mensagem_id === "dddddddd-0000-0000-0000-000000000003", JSON.stringify(porAudio));
+      const daqui = await buscarTodos(c, "maria");
+      ok("a conversa do telefone aberto continua sendo achada, com o telefone dele",
+         (daConversa(daqui, 1) || {}).advogado_id === TEL, JSON.stringify(daqui));
+
+      // ---- 99d. a chamada de antes continua valendo, e só no telefone aberto ----
+      const tres = await buscar3(c, "joana lead");
+      ok("99d a chamada de antes (três argumentos) continua valendo", Array.isArray(tres), JSON.stringify(tres));
+      ok("e continua só no telefone aberto", !daConversa(tres, 3) && !!daConversa(await buscar3(c, "maria"), 1),
+         JSON.stringify(tres));
+      const comNomes = await guardado(async () => (await c.query(
+        "select id::text from public.buscar_conversas(p_advogado => $1::uuid, p_termo => 'maria', p_limite => 80)", [TEL])).rows);
+      ok("com os argumentos pelo nome também (é como o painel chama)", lista(comNomes).some((r) => r.id === conv(1)),
+         JSON.stringify(comNomes));
+      const falso = await guardado(async () => (await c.query(
+        "select id::text from public.buscar_conversas($1::uuid, 'joana lead', 80, false)", [TEL])).rows);
+      ok("e com o quarto argumento falso, é a de antes", Array.isArray(falso) && !falso.some((r) => r.id === conv(3)),
+         JSON.stringify(falso));
+      // GUARDADA: a função que não aceita o quarto argumento é uma reprovação
+      // com nome, e não um estouro que esconde as conferências seguintes.
+      const colunasR = await guardado(async () => (await c.query(
+        "select * from public.buscar_conversas($1::uuid, 'maria', 1, true)", [TEL])).fields.map((f) => f.name));
+      const colunas = lista(colunasR);
+      ok("as colunas de antes, na mesma ordem, mais o telefone no fim",
+         JSON.stringify(colunas) === JSON.stringify(["id", "motivo", "trecho", "ultima_atividade", "mensagem_id", "mensagem_em", "advogado_id"]),
+         JSON.stringify(colunas));
+
+      // ---- 99e. o teto corta antes os outros telefones ----
+      // "comprovante": o 1 e o 2 (deste telefone, há 3 e 4 horas), o 3 (o outro,
+      // agora, pelo áudio) e o 5 (o terceiro, há 1 hora). Pela hora, os de
+      // outros telefones viriam primeiro.
+      const tudo = await buscarTodos(c, "comprovante");
+      ok("99e em todos os telefones, as quatro conversas", [1, 2, 3, 5].every((n) => !!daConversa(tudo, n)) && tudo.length === 4,
+         JSON.stringify(tudo.map((a) => a.id)));
+      ok("as do telefone aberto vêm primeiro, mesmo mais antigas",
+         JSON.stringify(tudo.slice(0, 2).map((a) => a.id)) === JSON.stringify([conv(1), conv(2)]), JSON.stringify(tudo.map((a) => a.id)));
+      ok("e as dos outros, depois, pela hora", JSON.stringify(tudo.slice(2).map((a) => a.id)) === JSON.stringify([conv(3), conv(5)]),
+         JSON.stringify(tudo.map((a) => a.id)));
+      const comTeto = await buscarTodos(c, "comprovante", TEL, 2);
+      ok("com o teto em dois, ficam as duas do telefone aberto",
+         JSON.stringify(comTeto.map((a) => a.id)) === JSON.stringify([conv(1), conv(2)]), JSON.stringify(comTeto.map((a) => a.id)));
+      const doOutro = await buscarTodos(c, "comprovante", OUTRO_TEL, 1);
+      ok("e quem está no outro telefone vê a dele primeiro", (doOutro[0] || {}).id === conv(3), JSON.stringify(doOutro));
+
+      // ---- 99f. cada pessoa só acha o que a regra de acesso deixa ver ----
+      const soAqui = await guardado(() => comoPessoa(c, SO_AQUI, async () => (await c.query(
+        "select id::text, advogado_id::text from public.buscar_conversas($1::uuid, 'comprovante', 80, true)", [TEL])).rows));
+      ok("99f quem atende só o telefone aberto acha só as dele", Array.isArray(soAqui)
+         && soAqui.length === 2 && soAqui.every((r) => r.advogado_id === TEL), JSON.stringify(soAqui));
+      const deTodos = await guardado(() => comoPessoa(c, TODOS, async () => (await c.query(
+        "select id::text, advogado_id::text from public.buscar_conversas($1::uuid, 'joana lead', 80, true)", [TEL])).rows));
+      ok("e quem atende os outros telefones acha o lead do pedido", lista(deTodos).some((r) => r.id === conv(3) && r.advogado_id === OUTRO_TEL),
+         JSON.stringify(deTodos));
+      const terceiroSoAqui = await guardado(() => comoPessoa(c, SO_AQUI, async () => (await c.query(
+        "select id::text from public.buscar_conversas($1::uuid, 'carla', 80, true)", [TEL])).rows));
+      ok("o telefone que a pessoa não atende continua de fora", Array.isArray(terceiroSoAqui) && terceiroSoAqui.length === 0,
+         JSON.stringify(terceiroSoAqui));
+
+      // ---- 99g. quem não entrou não chama ----
+      const anon = await guardado(async () => {
+        await c.query("set role anon");
+        try { return (await c.query("select * from public.buscar_conversas($1::uuid, 'maria', 80, true)", [TEL])).rows; }
+        finally { await c.query("reset role"); }
+      });
+      ok("99g quem não entrou não chama a busca", anon && anon.codigo === "42501" && /permission denied for function/.test(anon.erro),
+         JSON.stringify(anon));
+
+      // ---- 99h. rodar de novo, e o 040 depois dele, não deixam duas funções ----
+      const de2 = await guardado(() => aplicar(c, S049));
+      ok("99h rodar de novo aplica e não acusa nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      ok("com uma função de busca só", (await quantasBuscas(c)) === 1, String(await quantasBuscas(c)));
+      const de040 = await guardado(() => aplicar(c, S040));
+      ok("o 040 rodado de novo depois (a pasta inteira, na ordem) não estoura", Array.isArray(de040), JSON.stringify(de040));
+      ok("e não recria a busca de três argumentos ao lado desta", (await quantasBuscas(c)) === 1
+         && (await c.query("select to_regprocedure('public.buscar_conversas(uuid,text,integer)') is null as saiu")).rows[0].saiu === true,
+         String(await quantasBuscas(c)));
+      const aindaAcha = await buscarTodos(c, "joana lead");
+      ok("e a busca continua achando o lead", !!daConversa(aindaAcha, 3), JSON.stringify(aindaAcha));
+
+      // ---- 99i. sem a busca, ela não é criada ----
+      const semBusca = await bancoNovo();
+      await semBusca.query(ESQUEMA);
+      await aplicar(semBusca, S015);
+      const confSem = await guardado(() => aplicar(semBusca, S049));
+      ok("99i num banco sem a busca, o 049 aplica e diz que não havia o que trocar",
+         Array.isArray(confSem) && /ainda não existe/.test(String(item(confSem, /busca da lista/))), JSON.stringify(confSem));
+      ok("e não cria uma busca que o escritório nunca instalou", (await quantasBuscas(semBusca)) === 0, String(await quantasBuscas(semBusca)));
+
+      // ---- 99j. sem o 015, o 049 não estoura, e a busca de antes fica ----
+      const sem015 = await bancoNovo();
+      await sem015.query(ESQUEMA);
+      await aplicar(sem015, BUSCA);
+      await aplicar(sem015, BUSCA_IR);
+      const confSem015 = await guardado(() => aplicar(sem015, S049));
+      ok("99j num banco sem as colunas do 015, o 049 não estoura e manda rodar o 015",
+         Array.isArray(confSem015) && /rode o script 015/.test(String(item(confSem015, /colunas da transcrição/))),
+         JSON.stringify(confSem015));
+      ok("e a busca de antes continua lá, inteira",
+         (await sem015.query("select to_regprocedure('public.buscar_conversas(uuid,text,integer)') is not null as tem")).rows[0].tem === true);
+
+      // ---- 99k. sem as tabelas do Zorvin, nada acontece ----
+      const limpo = await bancoNovo();
+      const confLimpo = await guardado(() => aplicar(limpo, S049));
+      ok("99k num banco sem o Zorvin, o 049 não faz nada e diz isso",
+         Array.isArray(confLimpo) && /nada a fazer/.test(String(item(confLimpo, /sem as tabelas/))), JSON.stringify(confLimpo));
+
+      // ---- 99l. a conferência vê a busca que falha SÓ para quem atende ----
+      // Quem atende sem ler `mensagens`: como dona do banco a busca responde, e
+      // só a chamada no papel de quem atende mostra o defeito (a regra 4 do
+      // LEIA-ME, e a lição do 012).
+      const semLer = await bancoNovo();
+      await semLer.query(ESQUEMA);
+      await aplicar(semLer, BUSCA);
+      await aplicar(semLer, BUSCA_IR);
+      await aplicar(semLer, S015);
+      await semLer.query("revoke select on mensagens from authenticated");
+      const confSemLer = await guardado(() => aplicar(semLer, S049));
+      ok("99l com a busca quebrada só para quem atende, a conferência diz NÃO, com o motivo",
+         Array.isArray(confSemLer) && /^NÃO — permission denied/.test(String(item(confSemLer, /responde para quem atende/))),
+         JSON.stringify(confSemLer));
+    } catch (e) {
+      ok("a seção 99 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
