@@ -18552,5 +18552,261 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
   }
 }
 
+// ==================================================================
+//  96. A CONVERSA ARQUIVADA CONTINUA ARQUIVADA (04/11)
+// ==================================================================
+//
+// Pedido do Rodrigo: "No Zorvin, as conversas arquivadas devem sempre
+// permanecer arquivadas." A mensagem do contato tirava a conversa da pasta;
+// agora ela entra na conversa, e a conversa fica onde a equipe a pôs.
+{
+  console.log("\n96. A conversa arquivada continua arquivada");
+  const agora = new Date().toISOString();
+  const t = await subirTudo({}, {
+    tabelas: {
+      contatos: [{ id: 1, numero: "5511999998888", nome: "Cliente" },
+                 { id: 2, numero: "5511977776666", nome: "Outra cliente" }],
+      conversas: [
+        { id: 1, advogado_id: TELEFONE.id, contato_id: 1, nao_lidas: 0, arquivada: true, ultima_atividade: agora },
+        { id: 2, advogado_id: TELEFONE.id, contato_id: 2, nao_lidas: 0, arquivada: false, ultima_atividade: agora },
+      ],
+    },
+  });
+  const postar = (corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  });
+  const conversa = (id) => t.sb.dados.conversas.find((c) => String(c.id) === String(id)) || {};
+
+  // ---- 96a. o cliente escreve na conversa arquivada ----
+  const r = await postar(mensagemDaUazapi("Oi, voltei a falar", "arq-1"));
+  // E O CONTRASTE: a cliente da conversa que não está na pasta escreve também.
+  // Sem ele, uma ponte que não grava mensagem nenhuma passaria por "continua
+  // arquivada" sem ter feito nada.
+  const daOutra = mensagemDaUazapi("Bom dia", "arq-2");
+  daOutra.message.chatid = daOutra.message.sender = "5511977776666@s.whatsapp.net";
+  await postar(daOutra);
+  await espera(900);
+
+  const msg = t.sb.dados.mensagens.find((m) => m.id_uazapi === "arq-1");
+  ok("96a a mensagem do cliente entra na conversa arquivada",
+     r.status === 200 && msg && String(msg.conversa_id) === "1" && msg.origem === "contato",
+     JSON.stringify(t.sb.dados.mensagens.map((m) => [m.id_uazapi, m.conversa_id])));
+  ok("e a conversa continua arquivada", conversa(1).arquivada === true, JSON.stringify(conversa(1)));
+  ok("a mensagem da outra cliente também entrou, e a conversa dela continua fora da pasta",
+     t.sb.dados.mensagens.some((m) => m.id_uazapi === "arq-2" && String(m.conversa_id) === "2")
+       && conversa(2).arquivada === false,
+     JSON.stringify(conversa(2)));
+
+  // ---- 96b. a ponte nem pede para desarquivar ----
+  // Conferir só o valor final não bastaria: uma escrita que desarquiva e outra
+  // que arquiva de novo deixariam a mesma linha, e a conversa teria pulado da
+  // pasta para a lista (e de volta) na tela de todo mundo, pelo tempo real.
+  // PATCH (o `update` de antes) ou POST (um `upsert` que levasse a coluna).
+  const levaArquivada = (corpo) => [].concat(corpo || [])
+    .some((linha) => linha && typeof linha === "object" && Object.prototype.hasOwnProperty.call(linha, "arquivada"));
+  const escritas = t.sb.chamadas.filter((c) => (c.metodo === "PATCH" || c.metodo === "POST")
+    && c.caminho === "/rest/v1/conversas" && levaArquivada(c.corpo));
+  ok("96b a ponte não escreve em `arquivada`", escritas.length === 0,
+     JSON.stringify(escritas.map((c) => [c.busca, c.corpo])));
+  ok("e o log não diz que ela saiu das arquivadas", !t.registro.join("").includes("saiu das arquivadas"),
+     t.registro.join("").slice(-300));
+
+  // ---- 96c. a mensagem seguinte também não tira da pasta ----
+  // A régua não pode ser "só a primeira": o cliente que escreve três vezes
+  // seguidas continua na pasta nas três.
+  await postar(mensagemDaUazapi("Alguém aí?", "arq-3"));
+  await espera(700);
+  ok("96c a segunda mensagem também entra, e a conversa continua arquivada",
+     t.sb.dados.mensagens.some((m) => m.id_uazapi === "arq-3") && conversa(1).arquivada === true,
+     JSON.stringify(conversa(1)));
+
+  await t.parar();
+}
+
+// ============================================================
+//  97. A LISTA DA EQUIPE DIZ QUEM ESTÁ DESATIVADO (047), num Postgres de verdade
+//
+//  O 047 acrescenta `ativo` à vista `equipe`, para o painel tirar das listas
+//  de escolher quem a ponte já desligou pelo Vantoro. A seção guarda:
+//    - a vista é a de agosto, criada pelo próprio arquivo, com as permissões
+//      do script de setembro — e não uma segunda escrita delas;
+//    - depois do 047, quem atende lê `ativo` de todo mundo (a vista responde
+//      pelo dono), e o pedido de antes (`id, nome, foto_url`) continua igual;
+//    - quem saiu continua na vista, e as permissões não mudam;
+//    - rodar de novo não acusa nada; uma vista noutro formato não é mexida,
+//      e a conferência diz; e a conferência diz NÃO quando quem atende perde
+//      a leitura;
+//    - num banco sem a vista, não faz nada e diz isso.
+// ============================================================
+{
+  console.log("\n97. A lista da equipe diz quem está desativado (047), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 047 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const lerSql = (arq) => fs.readFileSync(new URL(`../sql/${arq}`, import.meta.url), "utf8");
+    const S047 = lerSql("automaticos/047-a-lista-da-equipe-diz-quem-saiu.sql");
+    // A VISTA DE AGOSTO E AS PERMISSÕES DE SETEMBRO, tiradas dos próprios
+    // arquivos: uma segunda escrita delas aqui provaria a cópia, e não o que
+    // está no banco do escritório.
+    const VISTA_DE_AGOSTO = (lerSql("2026-08-nome-e-foto-de-hoje.sql").match(/create view equipe[\s\S]*?;/) || [""])[0];
+    const PERMISSOES_DE_SETEMBRO = (lerSql("2026-09-a-lista-da-equipe-nao-e-publica.sql")
+      .match(/revoke all on public\.equipe from anon;[\s\S]*?grant select on public\.equipe to authenticated;/) || [""])[0];
+    // O ZORVIN MÍNIMO, com a herança da Supabase (a armadilha nº 5): tudo o
+    // que nasce em `public` nasce para anon e authenticated. É nele que se vê
+    // se uma vista refeita do zero voltaria aberta.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', foto_url text,
+  admin boolean not null default false, ativo boolean not null default true, login text);
+alter table usuarios enable row level security;
+create policy usuarios_leitura on usuarios for select to authenticated using (id = auth.uid());
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b",
+                gabi: "00000000-0000-0000-0000-00000000000c" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoAnon = async (c, fn) => {
+      await c.query("set role anon");
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    const acl = async (c) => (await c.query("select coalesce(relacl::text, '') as a from pg_class where oid = 'public.equipe'::regclass")).rows[0].a;
+    const colunas = async (c) => (await c.query(`select string_agg(column_name, ',' order by ordinal_position) as c
+      from information_schema.columns where table_schema = 'public' and table_name = 'equipe'`)).rows[0].c;
+
+    try {
+      ok("97 a vista de agosto e as permissões de setembro foram achadas nos arquivos",
+         /select id, nome, foto_url from usuarios/.test(VISTA_DE_AGOSTO) && /grant select on public\.equipe/.test(PERMISSOES_DE_SETEMBRO),
+         JSON.stringify({ VISTA_DE_AGOSTO, PERMISSOES_DE_SETEMBRO }));
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 97a. banco limpo: sem a vista, nada a fazer ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S047));
+        ok("97a num banco sem a vista, o 047 não faz nada e diz isso",
+           Array.isArray(r) && /nada a fazer/.test(String(item(r, /sem a vista/))), JSON.stringify(r));
+      }
+
+      // ---- 97b. o escritório: a vista de agosto, três pessoas, uma desligada ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(VISTA_DE_AGOSTO);
+      await c.query(PERMISSOES_DE_SETEMBRO);
+      await c.query(`insert into usuarios (id, nome, foto_url, ativo, login) values
+        ($1, 'Ana Atendente', 'https://x/ana.jpg', true, 'ana'),
+        ($2, 'Bia Atendente', null, true, 'bia'),
+        ($3, 'Gabi Que Saiu', 'https://x/gabi.jpg', false, 'gabi')`, [U.ana, U.bia, U.gabi]);
+      const aclAntes = await acl(c);
+      const antes = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select id, ativo from equipe")).rows));
+      ok("97b antes do 047, quem atende não tem como saber quem saiu (a coluna não existe)",
+         antes && antes.codigo === "42703", JSON.stringify(antes));
+
+      const r1 = await guardado(() => aplicar(c, S047));
+      ok("97b o 047 aplica, e a conferência não acusa nada", Array.isArray(r1) && !defeito(r1), JSON.stringify(r1));
+      ok("e conta quem saiu", item(r1, /pessoas desativadas/) === "1", JSON.stringify(r1));
+
+      // ---- 97c. como quem atende ----
+      const depois = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select id, nome, foto_url, ativo from equipe order by nome")).rows));
+      ok("97c quem atende lê os três, e não só a própria linha (a vista responde pelo dono)",
+         Array.isArray(depois) && depois.length === 3, JSON.stringify(depois));
+      ok("e lê quem saiu: a Gabi com ativo = false, as outras com true",
+         Array.isArray(depois) && depois.map((p) => `${p.nome}:${p.ativo}`).join("|")
+           === "Ana Atendente:true|Bia Atendente:true|Gabi Que Saiu:false",
+         JSON.stringify(depois));
+      const pedidoDeAntes = await guardado(() => comoPessoa(c, U.bia, async () =>
+        (await c.query("select id, nome, foto_url from equipe order by nome")).rows));
+      ok("o pedido do painel de antes (id, nome, foto_url) continua igual, com a foto de quem saiu",
+         Array.isArray(pedidoDeAntes) && pedidoDeAntes.length === 3
+           && pedidoDeAntes[2].foto_url === "https://x/gabi.jpg" && !("ativo" in pedidoDeAntes[0]),
+         JSON.stringify(pedidoDeAntes));
+      ok("as colunas de antes ficam na mesma ordem, e `ativo` entra no fim",
+         (await colunas(c)) === "id,nome,foto_url,ativo", await colunas(c));
+
+      // ---- 97d. as permissões não mudam ----
+      ok("97d as permissões da vista são as mesmas de antes", (await acl(c)) === aclAntes,
+         `antes ${aclAntes} · depois ${await acl(c)}`);
+      const anon = await guardado(() => comoAnon(c, async () => (await c.query("select count(*) from equipe")).rows));
+      ok("quem não entrou não lê a vista", anon && anon.codigo === "42501", JSON.stringify(anon));
+      const escrita = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("update equipe set nome = 'Outra' where id = $1 returning id", [U.gabi])).rows));
+      ok("e quem entrou não escreve nela", escrita && escrita.codigo === "42501", JSON.stringify(escrita));
+
+      // ---- 97e. rodar de novo ----
+      const r2 = await guardado(() => aplicar(c, S047));
+      ok("97e rodar de novo aplica sem acusar nada", Array.isArray(r2) && !defeito(r2), JSON.stringify(r2));
+      ok("e a vista continua com as mesmas colunas e as mesmas permissões",
+         (await colunas(c)) === "id,nome,foto_url,ativo" && (await acl(c)) === aclAntes,
+         `${await colunas(c)} · ${await acl(c)}`);
+
+      // ---- 97f. a conferência que pega quem atende sem a leitura ----
+      await c.query("revoke select on equipe from authenticated");
+      const quebrada = await guardado(async () => {
+        try { return await aplicar(c, S047); } finally { await c.query("grant select on equipe to authenticated"); }
+      });
+      ok("97f sem a leitura no papel de quem atende, a conferência diz NÃO, com o motivo",
+         Array.isArray(quebrada) && /^NÃO — permission denied/.test(String(item(quebrada, /quem atende lê/))),
+         JSON.stringify(quebrada));
+
+      // ---- 97g. uma vista noutro formato não é mexida ----
+      {
+        const outro = await bancoNovo();
+        await outro.query(ESQUEMA);
+        await outro.query("create view equipe with (security_invoker = false) as select id, nome from usuarios");
+        const r = await guardado(() => aplicar(outro, S047));
+        ok("97g a vista mexida à mão não é tocada, e a conferência diz o que viu",
+           Array.isArray(r) && /^NÃO — ela tem id,nome; não mexi/.test(String(item(r, /formato de agosto/)))
+             && (await colunas(outro)) === "id,nome",
+           JSON.stringify(r));
+      }
+    } catch (e) {
+      ok("a seção 97 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
