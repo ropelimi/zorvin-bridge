@@ -2384,25 +2384,20 @@ async function processarEventoDoWebhook(corpo) {
     // seria trabalho jogado fora — pior, contra a Uazapi, que tem limite.
     if (buscarOArquivoDepois) buscarOArquivoDepois();
 
-    // A CONVERSA ARQUIVADA VOLTA quando o contato escreve.
+    // A CONVERSA ARQUIVADA CONTINUA ARQUIVADA quando o contato escreve (04/11).
     //
-    // Arquivar quer dizer "por ora, resolvido". Se a pessoa voltou a falar, não
-    // está mais resolvido — e uma mensagem que chega numa conversa arquivada
-    // fica invisível: não aparece na lista, e ninguém vai procurá-la dentro de
-    // Arquivadas. É assim que o WhatsApp se comporta, e é o comportamento que
-    // não deixa cliente sem resposta.
+    // Pedido do Rodrigo: "No Zorvin, as conversas arquivadas devem sempre
+    // permanecer arquivadas." Até aqui a mensagem do contato tirava a conversa
+    // da pasta (o jeito de fábrica do WhatsApp); o escritório quer o outro
+    // jeito do WhatsApp, o "Manter conversas arquivadas". Arquivar é decisão
+    // de quem atende, e quem a desfaz é quem atende — o "Desarquivar" do painel.
     //
-    // Só o CONTATO desarquiva. Mensagem nossa, saindo do próprio Zorvin, não
-    // deve tirar da pasta o que a equipe acabou de guardar lá.
+    // A MENSAGEM NÃO SE PERDE: ela entra na conversa como qualquer outra, soma
+    // nas não lidas, e a linha "Arquivadas" do painel mostra quantas conversas
+    // de lá têm mensagem por ler. O aviso de mensagem nova segue as regras dele.
     //
-    // O `.eq('arquivada', true)` evita uma escrita inútil em toda mensagem: só
-    // as que estão arquivadas são tocadas.
-    if (origem === 'contato') {
-      const { data: voltou, error: erroArq } = await supabase.from('conversas')
-        .update({ arquivada: false }).eq('id', conversa.id).eq('arquivada', true).select('id');
-      if (erroArq) console.log('Não consegui desarquivar (coluna "arquivada"?):', erroArq.message);
-      else if (voltou && voltou.length) console.log(`Conversa ${conversa.id} saiu das arquivadas: o contato escreveu.`);
-    }
+    // Por isso não há código aqui. O que havia era um `update arquivada = false`
+    // a cada mensagem do contato, e ele não volta sem uma decisão do escritório.
 
     // O CLIENTE NOVO GANHA UM RESPONSÁVEL (023), e FORA DO HORÁRIO ELE
     // RECEBE O AVISO DO DEPARTAMENTO (021). As duas depois de a mensagem dele

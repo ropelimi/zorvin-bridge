@@ -232,6 +232,40 @@ fechada" olhava no instante em que a mensagem aparecia — o meio do caminho —
 e, com a máquina ocupada por sabotagens em paralelo, caiu ali. Hoje ela espera
 até 5 segundos pelo fechamento: se a ponte nunca fechar, continua reprovando.
 
+### A conversa arquivada continua arquivada (04/11)
+
+Pedido do Rodrigo: *"No Zorvin, as conversas arquivadas devem sempre
+permanecer arquivadas."* Até aqui a mensagem do contato **desarquivava** a
+conversa (um `update arquivada = false` logo depois de gravar a mensagem), que
+é o jeito de fábrica do WhatsApp. O escritório escolheu o outro jeito do
+WhatsApp, o **"Manter conversas arquivadas"**: arquivar é decisão de quem
+atende, e quem a desfaz é quem atende (o "Desarquivar" do painel).
+
+**Era o único lugar que desarquivava.** Conferido nos dois repositórios e nos
+scripts: o painel só arquiva e desarquiva pelo gesto da pessoa, e nenhum
+gatilho dos arquivos mexe em `arquivada`.
+
+**A mensagem não se perde:**
+
+- ela entra na conversa como qualquer outra e soma nas não lidas;
+- a linha "Arquivadas" do painel mostra quantas conversas de lá têm mensagem
+  por ler;
+- o aviso de mensagem nova (som e tarja) segue as regras dele, sem mudança.
+
+**O que muda, e foi dito ao Rodrigo:** a conversa arquivada não aparece em
+Novos e Em Atendimento, nem no número dessas abas, nem nos clientes sem
+resposta do aviso de espera (041), nem no Controle de atendimento do Vantoro.
+Todos esses já deixavam as arquivadas de fora. A diferença é que, antes, a
+mensagem do cliente tirava a conversa da pasta e ela voltava a aparecer neles.
+
+Prova: seção 96 — a mensagem entra e a conversa continua arquivada, nas duas
+primeiras mensagens; a conversa que não estava arquivada continua fora da
+pasta (o contraste, sem o qual uma ponte que não grava nada passaria); a ponte
+não escreve `arquivada` em nenhum pedido; e o log não diz que ela saiu. **2
+sabotagens e 2 pegas**: a ponte de antes (4 reprovações) e um desarquivar
+escondido num `upsert` da conversa (pego só pela conferência dos pedidos — o
+valor final continuava certo).
+
 ## A fila de envio — quando a ponte insiste sozinha, e quando não
 
 Uma falha, e a mensagem morria ali: virava bolha vermelha e só saía se alguém
@@ -4002,6 +4036,57 @@ publicação não desliga ninguém. **Só vale com Vantoro**: sem
 Duas variáveis **opcionais**, para a bancada encurtar a rodada:
 `PERMISSOES_INTERVALO_MS` (padrão 3 min) e `PERMISSOES_PRIMEIRA_MS` (a
 primeira, 20 s depois de subir).
+
+### E a tela passou a saber quem saiu (script 047, 04/11)
+
+Relato do Rodrigo, com a foto do menu "Passar para": *"A Gabriely Mota está
+desativada, ela já foi desligada da empresa e não deve mais aparecer no
+Zorvin. Ela já não está mais ativa no Vantoro, precisa ter essa comunicação
+entre ambos sistemas."*
+
+**A comunicação existia, e funcionou.** Medido no banco em 04/11: a Gabriely
+estava com `usuarios.ativo = false`, sem nenhuma permissão e com a entrada
+bloqueada no Auth — o que esta rodada faz. Ela era a única desativada, e não
+tinha nenhuma conversa nem tarefa no nome dela. **O que faltava era a TELA
+saber disso:** o painel monta as listas de escolher pessoa pela vista
+`equipe`, que só tinha id, nome e foto, e `usuarios` é fechada para quem
+atende.
+
+`sql/automaticos/047-a-lista-da-equipe-diz-quem-saiu.sql` acrescenta `ativo`
+à vista, **no fim**. É o que `create or replace view` aceita, e as três
+colunas de antes não mudam: o painel de antes, que pede `id, nome, foto_url`,
+não percebe nada.
+
+- **quem saiu continua na vista**, de propósito: as mensagens antigas dele
+  precisam de nome. É o painel que deixa de oferecê-lo para escolher;
+- **`security_invoker = false`**, como no script de agosto: a vista responde
+  pelo dono dela, e quem atende lê `ativo` de todo mundo;
+- **as permissões não mudam**: `create or replace` não mexe nelas, e a
+  conferência confere (quem entrou só lê; quem não entrou não alcança);
+- **a vista num formato que não é o de agosto não é mexida**: o `create or
+  replace` aceitaria acrescentar colunas a uma vista feita à mão, e ela
+  mudaria calada. A conferência diz "NÃO — ela tem …; não mexi";
+- **a conferência conta quantas pessoas estão desativadas**, e chama a vista
+  no papel de quem atende (a régua 4).
+
+A tela está no CLAUDE.md do painel ("Quem saiu não aparece para escolher").
+
+Prova: seção 97, num Postgres de verdade, com a vista criada pelo próprio
+arquivo de agosto e as permissões pelo de setembro (e não uma segunda escrita
+delas), num banco com a herança da Supabase. **9 sabotagens e 9 pegas**,
+todas limpas, rodadas em cópias e lidas uma a uma:
+
+- sem a coluna `ativo` (8 reprovações);
+- a vista no olho de quem pergunta (`security_invoker = true`: quem atende lê
+  só a própria linha);
+- a vista escondendo quem saiu (`where ativo`);
+- a vista refeita do zero (`drop` e `create`): com a herança da Supabase, ela
+  volta aberta para quem não entrou e gravável para quem entrou;
+- `ativo` no começo (o banco recusa trocar o nome das colunas de antes);
+- sem a guarda do formato (a vista feita à mão ganha duas colunas calada);
+- sem a guarda do banco limpo;
+- a tabela da conferência criada depois da guarda;
+- e a conferência rodando como dona do banco, e não como quem atende.
 
 ### As senhas saem do histórico de alterações (script 038)
 
