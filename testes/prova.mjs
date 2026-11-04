@@ -18808,5 +18808,336 @@ create policy usuarios_leitura on usuarios for select to authenticated using (id
   }
 }
 
+// ============================================================
+//  98. QUEM SAI DEVOLVE AS CONVERSAS E AS TAREFAS (048), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 04/11: "Quando alguém sai, as conversas e tarefas
+//  abertas devem voltar para 'Sem responsável'." A seção guarda:
+//    - antes do 048, desligar deixa tudo no nome de quem saiu (o pedido);
+//    - ao instalar, quem já tinha saído devolve o que estava no nome dele;
+//    - desligar devolve todas as conversas da pessoa (as finalizadas e as
+//      arquivadas também), com as três colunas do responsável nulas, e as
+//      tarefas abertas; a concluída e as dos colegas ficam;
+//    - religar devolve o que ninguém pegou, igual a antes; o que um colega
+//      assumiu fica com ele; e o registro fecha;
+//    - a gravação que não muda `ativo` não faz nada;
+//    - quem administra desliga pela própria sessão, e funciona;
+//    - a mesma conversa devolvida por duas pessoas é da que saiu depois;
+//    - o que a pessoa largou de propósito não volta para ela numa segunda volta;
+//    - se devolver falhar, a pessoa é desligada assim mesmo, com um aviso;
+//    - quem entrou não alcança o registro nem as funções;
+//    - rodar de novo não muda nada, e devolve o que alguém pôs no nome de quem
+//      saiu; e sem as tabelas, nada estoura.
+// ============================================================
+{
+  console.log("\n98. Quem sai devolve as conversas e as tarefas (048), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 048 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const lerSql = (arq) => fs.readFileSync(new URL(`../sql/${arq}`, import.meta.url), "utf8");
+    // O RESPONSÁVEL E AS TAREFAS, tirados dos próprios arquivos: uma segunda
+    // escrita deles aqui provaria a cópia, e não o que está no banco.
+    const S008 = lerSql("automaticos/008-o-responsavel-pela-conversa.sql");
+    const S018 = lerSql("automaticos/018-tarefas-e-lembretes.sql");
+    const S048 = lerSql("automaticos/048-quem-sai-devolve-as-conversas.sql");
+    // O ZORVIN MÍNIMO, com a herança da Supabase (a armadilha nº 5): tudo o
+    // que nasce em `public` nasce para anon e authenticated — tabelas,
+    // sequências e funções. É nela que se vê se o 048 fecha o que cria. E a
+    // regra de `usuarios` é a do escritório: quem administra grava qualquer
+    // linha pela própria sessão.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', foto_url text,
+  admin boolean not null default false, ativo boolean not null default true, login text);
+create or replace function zorvin_admin() returns boolean language sql stable security definer
+  set search_path = public as $f$
+  select coalesce((select admin and ativo from usuarios where id = auth.uid()), false) $f$;
+alter table usuarios enable row level security;
+create policy usuarios_leitura on usuarios for select to authenticated using (id = auth.uid() or zorvin_admin());
+create policy usuarios_admin on usuarios for all to authenticated using (zorvin_admin()) with check (zorvin_admin());
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid,
+  situacao text not null default 'aberto', arquivada boolean not null default false,
+  ultima_atividade timestamptz not null default now());
+alter table conversas enable row level security;
+create policy conversas_tudo on conversas for all to authenticated using (true) with check (true);
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoAnon = async (c, fn) => {
+      await c.query("set role anon");
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+
+    const U = { sai: "00000000-0000-0000-0000-0000000000a1", col: "00000000-0000-0000-0000-0000000000a2",
+                adm: "00000000-0000-0000-0000-0000000000a3", ja: "00000000-0000-0000-0000-0000000000a4" };
+    const C = { aberta: "00000000-0000-0000-0000-0000000000b1", finalizada: "00000000-0000-0000-0000-0000000000b2",
+                arquivada: "00000000-0000-0000-0000-0000000000b3", colega: "00000000-0000-0000-0000-0000000000b4",
+                sem: "00000000-0000-0000-0000-0000000000b5", ja: "00000000-0000-0000-0000-0000000000b6",
+                q: "00000000-0000-0000-0000-0000000000b7" };
+    const T = { aberta: "00000000-0000-0000-0000-0000000000c1", feita: "00000000-0000-0000-0000-0000000000c2",
+                colega: "00000000-0000-0000-0000-0000000000c3", ja: "00000000-0000-0000-0000-0000000000c4",
+                q: "00000000-0000-0000-0000-0000000000c5" };
+    const EM = "2026-10-01T12:00:00.000Z";
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 98a. sem as tabelas, ou sem o responsável, nada a fazer ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S048));
+        ok("98a num banco limpo, o 048 não faz nada e diz isso",
+           Array.isArray(r) && /nada a fazer/.test(String(item(r, /sem usuarios\.ativo/))), JSON.stringify(r));
+        const sem008 = await bancoNovo();
+        await sem008.query(ESQUEMA);
+        await aplicar(sem008, S018);
+        const r2 = await guardado(() => aplicar(sem008, S048));
+        ok("e num banco sem o responsável (008), também não",
+           Array.isArray(r2) && /nada a fazer/.test(String(item(r2, /sem usuarios\.ativo/)))
+             && !(await sem008.query("select 1 from pg_trigger where tgname = 'zorvin_quem_sai_devolve'")).rowCount,
+           JSON.stringify(r2));
+      }
+
+      // ---- 98b. o escritório, antes do 048 ----
+      const c = await bancoNovo();
+      const avisos = [];
+      c.on("notice", (n) => avisos.push(String(n.message || "")));
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin, ativo, login) values
+        ($1, 'Sai Atendente', false, true, 'sai'), ($2, 'Col Atendente', false, true, 'col'),
+        ($3, 'Adm Gerente', true, true, 'adm'), ($4, 'Ja Saiu', false, false, 'ja')`, [U.sai, U.col, U.adm, U.ja]);
+      for (const s of [S008, S018]) {
+        const r = await aplicar(c, s);
+        if (defeito(r)) throw new Error(`o 008 ou o 018 acusaram defeito: ${JSON.stringify(r)}`);
+      }
+      await c.query(`insert into conversas (id, situacao, arquivada, responsavel_id, responsavel_em, responsavel_por) values
+        ($1, 'aberto', false, $8, $12, $10), ($2, 'finalizado', false, $8, $12, $10), ($3, 'aberto', true, $8, $12, $10),
+        ($4, 'aberto', false, $9, $12, $9), ($5, 'aguardando', false, null, null, null), ($6, 'aberto', false, $11, $12, $10),
+        ($7, 'aberto', false, null, null, null)`,
+        [C.aberta, C.finalizada, C.arquivada, C.colega, C.sem, C.ja, C.q, U.sai, U.col, U.adm, U.ja, EM]);
+      await c.query(`insert into zorvin_tarefas (id, conversa_id, texto, vence_em, para_quem, feita_em) values
+        ($1, $5, 'Ligar para o cliente', now() + interval '1 day', $9, null),
+        ($2, $6, 'Mandar a minuta', now() - interval '1 day', $9, now()),
+        ($3, $7, 'Cobrar o documento', now() + interval '2 days', $10, null),
+        ($4, $8, 'Retornar a ligação', now() + interval '3 days', $11, null)`,
+        [T.aberta, T.feita, T.colega, T.ja, C.aberta, C.finalizada, C.colega, C.ja, U.sai, U.col, U.ja]);
+
+      const donoDe = async (id) => (await c.query(
+        "select responsavel_id::text as id, responsavel_em, responsavel_por::text as por from conversas where id = $1", [id])).rows[0];
+      const paraQuem = async (id) => (await c.query("select para_quem::text as p from zorvin_tarefas where id = $1", [id])).rows[0].p;
+      const doNome = async (uid) => Number((await c.query("select count(*) from conversas where responsavel_id = $1", [uid])).rows[0].count);
+      const registros = async (uid) => (await c.query(`select conversa_id::text as conversa, tarefa_id::text as tarefa,
+        responsavel_em, responsavel_por::text as por, voltou_em from zorvin_devolvidas_na_saida
+        where pessoa_id = $1 order by id`, [uid])).rows;
+      const desligar = (uid, ativo) => c.query("update usuarios set ativo = $2 where id = $1", [uid, ativo]);
+
+      await desligar(U.sai, false);
+      ok("98b antes do 048, desligar deixa as três conversas no nome de quem saiu (o pedido reproduzido)",
+         (await doNome(U.sai)) === 3, String(await doNome(U.sai)));
+      ok("e a tarefa aberta também", (await paraQuem(T.aberta)) === U.sai, await paraQuem(T.aberta));
+      await desligar(U.sai, true);
+
+      // ---- 98c. a instalação ----
+      const r1 = await guardado(() => aplicar(c, S048));
+      ok("98c o 048 aplica, e a conferência não acusa nada", Array.isArray(r1) && !defeito(r1), JSON.stringify(r1));
+      ok("e diz que quem já tinha saído devolveu uma conversa e uma tarefa aberta",
+         item(r1, /conversas que voltaram agora/) === "1" && item(r1, /tarefas abertas que voltaram agora/) === "1",
+         JSON.stringify(r1));
+      const ja = await donoDe(C.ja);
+      ok("a conversa de quem já tinha saído ficou sem responsável, e a tarefa dele sem dono",
+         ja.id === null && ja.responsavel_em === null && ja.por === null && (await paraQuem(T.ja)) === null,
+         JSON.stringify({ ja, tarefa: await paraQuem(T.ja) }));
+      ok("e as duas ficaram anotadas no registro", (await registros(U.ja)).length === 2, JSON.stringify(await registros(U.ja)));
+
+      // ---- 98d. desligar, como a ponte faz ----
+      await desligar(U.sai, false);
+      const soltas = [await donoDe(C.aberta), await donoDe(C.finalizada), await donoDe(C.arquivada)];
+      ok("98d desligar devolve as três conversas dela — a aberta, a finalizada e a arquivada",
+         soltas.every((x) => x.id === null) && soltas.length === 3, JSON.stringify(soltas));
+      ok("com as três colunas do responsável nulas, como o painel escreve \"Deixar sem responsável\"",
+         soltas.length === 3 && soltas.every((x) => x.responsavel_em === null && x.por === null), JSON.stringify(soltas));
+      ok("a tarefa aberta fica sem dono", (await paraQuem(T.aberta)) === null, String(await paraQuem(T.aberta)));
+      ok("a tarefa concluída continua com ela: é o registro de quem a fez", (await paraQuem(T.feita)) === U.sai,
+         String(await paraQuem(T.feita)));
+      ok("e o que é da colega não muda", (await donoDe(C.colega)).id === U.col && (await paraQuem(T.colega)) === U.col,
+         JSON.stringify(await donoDe(C.colega)));
+      const regSai = await registros(U.sai);
+      ok("o registro guarda as três conversas com o \"desde quando\" e o \"quem pôs\" de antes, e a tarefa",
+         regSai.length === 4 && regSai.filter((x) => x.conversa).length === 3
+           && regSai.filter((x) => x.conversa).every((x) => x.responsavel_em instanceof Date
+                && x.responsavel_em.toISOString() === EM && x.por === U.adm)
+           && regSai.filter((x) => x.tarefa === T.aberta).length === 1 && regSai.every((x) => x.voltou_em === null),
+         JSON.stringify(regSai));
+
+      // ---- 98e. a colega assume uma, e ela volta ----
+      await c.query("update conversas set responsavel_id = $2, responsavel_em = now(), responsavel_por = $2 where id = $1",
+                    [C.aberta, U.col]);
+      await desligar(U.sai, true);
+      const volta = [await donoDe(C.finalizada), await donoDe(C.arquivada)];
+      ok("98e religar devolve o que ninguém pegou",
+         volta.length === 2 && volta.every((x) => x.id === U.sai), JSON.stringify(volta));
+      ok("igual a antes: o mesmo \"desde quando\" e o mesmo \"quem pôs\"",
+         volta.length === 2 && volta.every((x) => x.responsavel_em instanceof Date && x.responsavel_em.toISOString() === EM
+           && x.por === U.adm), JSON.stringify(volta));
+      ok("a que a colega assumiu fica com a colega", (await donoDe(C.aberta)).id === U.col, JSON.stringify(await donoDe(C.aberta)));
+      ok("a tarefa volta para ela", (await paraQuem(T.aberta)) === U.sai, String(await paraQuem(T.aberta)));
+      ok("e o registro daquela saída fecha", (await registros(U.sai)).every((x) => x.voltou_em instanceof Date),
+         JSON.stringify(await registros(U.sai)));
+
+      // ---- 98f. a gravação que não muda `ativo` não faz nada ----
+      const totalAntes = Number((await c.query("select count(*) from zorvin_devolvidas_na_saida")).rows[0].count);
+      await c.query("update usuarios set ativo = true, nome = nome where id = $1", [U.sai]);
+      ok("98f regravar a linha com o mesmo `ativo` (o que a entrada faz) não mexe em nada",
+         (await doNome(U.sai)) === 2
+           && Number((await c.query("select count(*) from zorvin_devolvidas_na_saida")).rows[0].count) === totalAntes,
+         `${await doNome(U.sai)} conversas`);
+
+      // ---- 98g. quem administra desliga pela própria sessão ----
+      const pelaTela = await guardado(() => comoPessoa(c, U.adm, async () =>
+        (await c.query("update usuarios set ativo = false where id = $1 returning id", [U.col])).rowCount));
+      ok("98g quem administra desliga a colega pela própria sessão", pelaTela === 1, JSON.stringify(pelaTela));
+      ok("e as conversas e a tarefa dela voltam para \"Sem responsável\" do mesmo jeito",
+         (await doNome(U.col)) === 0 && (await donoDe(C.colega)).id === null && (await paraQuem(T.colega)) === null,
+         JSON.stringify({ conversas: await doNome(U.col), tarefa: await paraQuem(T.colega) }));
+      const religa = await guardado(() => comoPessoa(c, U.adm, async () =>
+        (await c.query("update usuarios set ativo = true where id = $1 returning id", [U.col])).rowCount));
+      ok("e religada pela tela, recebe tudo de volta",
+         religa === 1 && (await doNome(U.col)) === 2 && (await paraQuem(T.colega)) === U.col,
+         JSON.stringify({ religa, conversas: await doNome(U.col) }));
+
+      // ---- 98h. a mesma conversa (e a mesma tarefa) devolvida por duas pessoas ----
+      await c.query("update conversas set responsavel_id = $2, responsavel_em = now(), responsavel_por = $2 where id = $1", [C.q, U.sai]);
+      await c.query(`insert into zorvin_tarefas (id, conversa_id, texto, vence_em, para_quem)
+                     values ($1, $2, 'Conferir o acordo', now() + interval '1 day', $3)`, [T.q, C.q, U.sai]);
+      await desligar(U.sai, false);
+      await c.query("update conversas set responsavel_id = $2, responsavel_em = now(), responsavel_por = $2 where id = $1", [C.q, U.col]);
+      await c.query("update zorvin_tarefas set para_quem = $2 where id = $1", [T.q, U.col]);
+      await desligar(U.col, false);
+      ok("98h a conversa e a tarefa que a colega assumiu voltam para \"Sem responsável\" quando ela também sai",
+         (await donoDe(C.q)).id === null && (await paraQuem(T.q)) === null,
+         JSON.stringify({ conversa: await donoDe(C.q), tarefa: await paraQuem(T.q) }));
+      await desligar(U.sai, true);
+      ok("quem saiu primeiro e volta não as recebe: elas são da que saiu depois",
+         (await donoDe(C.q)).id === null && (await paraQuem(T.q)) === null,
+         JSON.stringify({ conversa: await donoDe(C.q), tarefa: await paraQuem(T.q) }));
+      await desligar(U.col, true);
+      ok("e a que saiu depois, ao voltar, recebe as duas",
+         (await donoDe(C.q)).id === U.col && (await paraQuem(T.q)) === U.col,
+         JSON.stringify({ conversa: await donoDe(C.q), tarefa: await paraQuem(T.q) }));
+
+      // ---- 98i. o que ela largou de propósito não volta numa segunda volta ----
+      await c.query("update conversas set responsavel_id = null, responsavel_em = null, responsavel_por = null where id = $1",
+                    [C.finalizada]);
+      await desligar(U.sai, false);
+      // E A TAREFA QUE UM COLEGA CONCLUIU enquanto ela estava fora: concluída,
+      // ela é o registro de quem a fez, e não volta para ninguém.
+      await c.query("update zorvin_tarefas set feita_em = now() where id = $1", [T.aberta]);
+      await desligar(U.sai, true);
+      ok("98i a conversa que ela deixou sem responsável depois de voltar não volta para ela na volta seguinte",
+         (await donoDe(C.finalizada)).id === null && (await donoDe(C.arquivada)).id === U.sai,
+         JSON.stringify([await donoDe(C.finalizada), await donoDe(C.arquivada)]));
+      ok("e a tarefa que alguém concluiu enquanto ela estava fora não volta para ela",
+         (await paraQuem(T.aberta)) === null, String(await paraQuem(T.aberta)));
+
+      // ---- 98j. se devolver falhar, desligar acontece assim mesmo ----
+      avisos.length = 0;
+      await c.query("alter table zorvin_devolvidas_na_saida rename to zorvin_devolvidas_escondida");
+      const falhou = await guardado(() => desligar(U.sai, false));
+      await c.query("alter table zorvin_devolvidas_escondida rename to zorvin_devolvidas_na_saida");
+      const ativoDela = (await c.query("select ativo from usuarios where id = $1", [U.sai])).rows[0].ativo;
+      ok("98j sem como devolver, a pessoa é desligada assim mesmo",
+         !(falhou && falhou.erro) && ativoDela === false, JSON.stringify({ falhou, ativoDela }));
+      ok("o que era dela continua no nome dela (não houve meia devolução)", (await doNome(U.sai)) === 1,
+         String(await doNome(U.sai)));
+      ok("e o banco anota o aviso", avisos.some((m) => /NÃO voltaram para "Sem responsável"/.test(m)), JSON.stringify(avisos));
+      await desligar(U.sai, true);
+
+      // ---- 98k. quem entrou e quem não entrou ----
+      const leitura = await guardado(() => comoPessoa(c, U.col, async () =>
+        (await c.query("select count(*) from zorvin_devolvidas_na_saida")).rows));
+      ok("98k quem entrou não lê o registro", leitura && leitura.codigo === "42501", JSON.stringify(leitura));
+      const porta = await guardado(() => comoPessoa(c, U.col, async () =>
+        (await c.query("select zorvin_devolver_o_que_era_de($1)", [U.sai])).rows));
+      // A RECUSA TEM DE SER DA FUNÇÃO, e não do registro lá dentro: uma função
+      // aberta que estourasse no registro também daria 42501, e a porta estaria
+      // aberta assim mesmo (a lição do 041: a chamada pode estourar por outro
+      // motivo).
+      ok("nem devolve as conversas de uma colega pela função (a recusa é da própria função)",
+         porta && porta.codigo === "42501" && /permission denied for function/.test(porta.erro), JSON.stringify(porta));
+      const portaVolta = await guardado(() => comoPessoa(c, U.col, async () =>
+        (await c.query("select zorvin_devolver_a_quem_voltou($1)", [U.col])).rows));
+      ok("nem chama a volta", portaVolta && portaVolta.codigo === "42501"
+         && /permission denied for function/.test(portaVolta.erro), JSON.stringify(portaVolta));
+      const anon = await guardado(() => comoAnon(c, async () => (await c.query("select count(*) from zorvin_devolvidas_na_saida")).rows));
+      ok("e quem não entrou também não lê", anon && anon.codigo === "42501", JSON.stringify(anon));
+      ok("a conversa da Sai continua com ela depois de as portas recusarem", (await doNome(U.sai)) === 1,
+         String(await doNome(U.sai)));
+
+      // ---- 98l. rodar de novo ----
+      await c.query("update conversas set responsavel_id = $2, responsavel_em = now(), responsavel_por = $3 where id = $1",
+                    [C.sem, U.ja, U.adm]);
+      const r2 = await guardado(() => aplicar(c, S048));
+      ok("98l rodar de novo aplica sem acusar nada", Array.isArray(r2) && !defeito(r2), JSON.stringify(r2));
+      ok("e devolve a conversa que alguém pôs no nome de quem já tinha saído",
+         item(r2, /conversas que voltaram agora/) === "1" && (await donoDe(C.sem)).id === null,
+         JSON.stringify({ r2, sem: await donoDe(C.sem) }));
+      ok("com um gatilho só", Number((await c.query(
+        "select count(*) from pg_trigger where tgrelid = 'usuarios'::regclass and tgname = 'zorvin_quem_sai_devolve'")).rows[0].count) === 1);
+
+      // ---- 98m. apagar a conversa não esbarra no registro ----
+      const apagar = await guardado(async () => (await c.query("delete from conversas where id = $1", [C.ja])).rowCount);
+      ok("98m a conversa apagada leva o registro dela junto (a junção de conversas apaga a que sai)",
+         apagar === 1 && !(await c.query("select 1 from zorvin_devolvidas_na_saida where conversa_id = $1", [C.ja])).rowCount,
+         JSON.stringify(apagar));
+    } catch (e) {
+      ok("a seção 98 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

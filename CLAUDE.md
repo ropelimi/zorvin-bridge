@@ -4088,6 +4088,109 @@ todas limpas, rodadas em cópias e lidas uma a uma:
 - a tabela da conferência criada depois da guarda;
 - e a conferência rodando como dona do banco, e não como quem atende.
 
+### E quem sai devolve as conversas e as tarefas (script 048, 04/11)
+
+Resposta do Rodrigo à pergunta que ficou do 047: *"Quando alguém sai, as
+conversas e tarefas abertas devem voltar para 'Sem responsável'."* Até aqui,
+desligar alguém tirava o acesso e deixava no nome dela tudo o que era dela. E
+o aviso de mensagem nova de uma conversa com responsável vai **só** para o
+responsável: o cliente dela escreveria, e ninguém seria avisado.
+
+`sql/automaticos/048-quem-sai-devolve-as-conversas.sql` põe um gatilho em
+`usuarios.ativo`. **No mesmo instante** em que a pessoa é desligada:
+
+| o que era dela | vai para |
+|---|---|
+| toda conversa em que ela é a responsável — **as finalizadas e as arquivadas também** | "Sem responsável", com as três colunas nulas (como o painel escreve "Deixar sem responsável") |
+| toda tarefa **aberta** para ela | sem dono, e aparece em "Da equipe" |
+| a tarefa **concluída** | fica: é o registro de quem a fez |
+
+**As finalizadas e as arquivadas vão junto, e é decisão** (dita ao Rodrigo):
+no Zorvin elas não estão fechadas para sempre. O cliente que escreve reabre a
+finalizada (028), e a arquivada recebe a mensagem e continua na pasta
+(04/11). No nome de quem saiu, o aviso iria para ela quando o cliente
+voltasse. Quem finalizou e quem respondeu continuam onde sempre estiveram
+(os atendimentos, os "Já tratei", as mensagens).
+
+**Quem volta, recebe de volta**, a régua de "quem volta à lista, volta" da
+rodada das permissões. Um "Ativo" desmarcado por engano no Vantoro, e
+marcado de novo, não pode deixar dezenas de conversas para alguém repassar
+uma a uma (o painel não tem como passar em lote). Por isso o que foi
+devolvido fica anotado (`zorvin_devolvidas_na_saida`), com o "desde quando" e
+o "quem pôs" de antes, e a volta devolve igual. Só volta:
+
+- o que continua sem dono: a conversa que um colega assumiu fica com ele;
+- a tarefa que continua aberta: a que alguém concluiu enquanto ela estava
+  fora fica como está;
+- o que foi devolvido **por último**: se a mesma conversa foi devolvida por
+  duas pessoas, ela é da que saiu depois.
+
+E o registro daquela saída fecha (`voltou_em`), voltando ou não. Sem isso, a
+conversa que ela largou de propósito depois de voltar voltaria para ela na
+volta seguinte.
+
+**Quem decide é o banco, num gatilho, e não a ponte.** São três jeitos de
+desligar alguém: a ponte, quando a pessoa some do Vantoro
+(`desligarQuemSaiuDoVantoro`); a chave "Conta ativa", sem Vantoro; e o SQL à
+mão. O gatilho vale para os três, e uma regra escrita em cada caminho
+divergiria no primeiro conserto. **A ponte não mudou uma linha.**
+
+- **o gatilho age como dono do banco** (`security definer`). Quem administra
+  pode desligar alguém pela própria sessão (a política `usuarios_admin`), e
+  nesse papel o registro não se alcança: sem o poder de dono, a devolução
+  falharia calada justamente ali;
+- **desligar nunca espera por isto**: a chamada vive num `exception when
+  others`. Se devolver falhar, a pessoa é desligada assim mesmo e o banco
+  anota um aviso (`raise warning`). Tirar o acesso de quem saiu vale mais do
+  que a arrumação das conversas dela. E não há meia devolução: ou volta tudo,
+  ou fica tudo;
+- **a gravação que não muda `ativo` não faz nada** (o `when` do gatilho): a
+  entrada de cada pessoa regrava a linha dela com o mesmo valor;
+- **ninguém do painel alcança o registro nem as funções de devolver**: a
+  herança da Supabase é tirada de quem entra e de quem não entrou, e o gatilho
+  dispara sem a permissão de executar (a nota do 032). Sem isso, quem entra
+  poderia devolver as conversas de um colega por uma porta de dono;
+- **quem já tinha saído devolve na instalação**. Medido em 04/11: uma pessoa
+  desativada, sem nenhuma conversa e nenhuma tarefa aberta — no escritório,
+  a instalação não muda nada. Rodar de novo devolve o que alguém tiver posto
+  no nome de quem saiu, e a conferência diz quantas.
+
+**É uma gravação em lote**, como o "Marcar todas como lidas": cada conversa
+devolvida é um aviso do tempo real para cada aba aberta do escritório. Medido
+em 04/11, a maior carteira tinha 171 conversas. Acontece quando alguém sai, e
+não no dia a dia.
+
+**O aviso de mensagem nova precisou de um ajuste no painel**, porque devolver
+não bastava: a conversa em que só quem saiu tinha respondido continuava
+contando como "de outra pessoa", e a regra de 15/09 não avisa ninguém nesse
+caso. Ver o CLAUDE.md do painel.
+
+Prova: seção 98, num Postgres de verdade, com o responsável (008) e as
+tarefas (018) aplicados a partir dos próprios arquivos, a herança da Supabase
+e a regra de `usuarios` do escritório. 40 conferências, **19 sabotagens e 19
+pegas**, todas limpas, rodadas em cópias e lidas uma a uma:
+
+- **o gatilho:** sem ele; sem o poder de dono (quem administra desliga pela
+  tela e nada volta); sem a guarda do desligar (o desligar falha junto);
+- **o que vai:** só as abertas (a finalizada e a arquivada ficam com quem
+  saiu); as tarefas concluídas também; só o dono, sem o "desde quando" e o
+  "quem pôs";
+- **o registro:** sem o "desde quando" e o "quem pôs" de antes; aberto para
+  quem entra; as funções abertas para quem entra;
+- **a volta:** tomando a conversa que a colega assumiu; sem o "mais novo",
+  nas conversas e nas tarefas; sem olhar de quem é o registro (a conversa de
+  uma colega vai para quem volta); com o "quem pôs" errado; a tarefa concluída
+  voltando; sem fechar o registro;
+- **a instalação:** sem devolver quem já tinha saído; sem a guarda do banco
+  limpo; a tabela da conferência depois da guarda.
+
+**Uma conferência da prova vinha passando pelo motivo errado**, e a sabotagem
+mostrou. Com as funções abertas para quem entra, a chamada delas dava 42501
+assim mesmo, só que vindo do registro lá dentro, e não da função. Hoje a prova
+exige que a recusa seja da própria função. É a lição do 041 outra vez: **a
+chamada pode estourar por outro motivo**, e a conferência do script pergunta ao
+banco quem alcança o quê (`has_function_privilege`).
+
 ### As senhas saem do histórico de alterações (script 038)
 
 O histórico de alterações do cadastro (`alteracoes`, `tipo = 'cadastro'`)
