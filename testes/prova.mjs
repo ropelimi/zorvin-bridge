@@ -18685,5 +18685,272 @@ console.log("\n94. O acompanhamento por etapa: a rodada da ponte");
   }
 }
 
+// ============================================================
+//  95. O NÚMERO DE CADA ABA, POR RESPONSÁVEL (046), num Postgres de verdade
+//
+//  O 046 troca `zorvin_contar_situacoes(p_telefone)` pela versão que recorta
+//  pelos responsáveis escolhidos no alto da lista do painel. A seção guarda:
+//    - a de um argumento sai, e a chamada de antes (só o telefone) continua
+//      valendo — é a do painel de antes;
+//    - cada recorte conta o que deve: uma pessoa, duas, só as sem
+//      responsável, e uma pessoa mais as sem responsável — e as não lidas de
+//      cada aba junto;
+//    - a lista vazia vale como "sem filtro", e não como "ninguém";
+//    - as mesmas regras do 028: sem as arquivadas e sem a conversa sem
+//      mensagem;
+//    - o olho de quem pergunta (security invoker), e quem não entrou não
+//      chama;
+//    - rodar de novo não acusa nada, e a conferência diz NÃO quando quem
+//      atende perde a conta;
+//    - num banco sem o Zorvin, não faz nada e diz isso.
+// ============================================================
+{
+  console.log("\n95. O número de cada aba, por responsável (046), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 046 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S004 = ler("004-a-espera-comeca-na-primeira.sql"), S005 = ler("005-ja-tratei.sql"),
+          S006 = ler("006-a-espera-nao-comeca-no-rabicho.sql"), S008 = ler("008-o-responsavel-pela-conversa.sql"),
+          S020 = ler("020-a-auditoria-do-banco.sql"), S028 = ler("028-aguardando-em-aberto-e-finalizados.sql"),
+          S046 = ler("046-o-numero-das-abas-por-responsavel.sql");
+    // O ZORVIN MÍNIMO DA SEÇÃO 86, com a herança da Supabase: toda função nova
+    // de `public` nasce para anon, pelo NOME (a armadilha nº 5) — é nele que se
+    // vê se o 046 tira a conta de quem não entrou.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(), unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    // A RESPOSTA PODE SER O ERRO, e não a lista (a lição da seção 89).
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b",
+                rod: "00000000-0000-0000-0000-000000000011" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoAnon = async (c, fn) => {
+      await c.query("set role anon");
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    // A CONTA COMO O PAINEL A PEDE: pelos NOMES dos argumentos, que é como o
+    // PostgREST chama — e é assim que a chamada só com o telefone acha a
+    // função de três.
+    const contar = (c, tel, quem, sem) => {
+      const partes = ["p_telefone => $1"];
+      const args = [tel];
+      if (quem !== undefined) { args.push(quem); partes.push(`p_responsaveis => $${args.length}::uuid[]`); }
+      if (sem !== undefined) { args.push(sem); partes.push(`p_sem_responsavel => $${args.length}`); }
+      return guardado(async () => (await c.query(`select zorvin_contar_situacoes(${partes.join(", ")}) as r`, args)).rows[0].r);
+    };
+    const resumo = (r) => (r && r.aguardando !== undefined
+      ? `${r.aguardando}/${r.aberto}/${r.finalizado} · não lidas ${r.nao_lidas.aguardando}/${r.nao_lidas.aberto}/${r.nao_lidas.finalizado}`
+      : JSON.stringify(r));
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 95a. banco limpo ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S046));
+        ok("95a num banco sem o Zorvin, o 046 não faz nada e diz isso",
+           Array.isArray(r) && /nada a fazer/.test(String(item(r, /sem o responsável/)))
+           && (await limpo.query("select to_regproc('public.zorvin_contar_situacoes') is null as n")).rows[0].n,
+           JSON.stringify(r));
+      }
+
+      // ---- 95a-bis. as abas sem o responsável (o 028 sem o 008) ----
+      //
+      // A conta nova cita `responsavel_id`, e o Postgres confere o corpo de
+      // uma função `sql` ao criá-la: sem a coluna, o 046 morreria ali e
+      // pararia os scripts seguintes. Com a guarda, ele diz o que falta.
+      {
+        const sem008 = await bancoNovo();
+        await sem008.query(ESQUEMA);
+        for (const s of [S004, S005, S006, S020, S028]) await sem008.query(s);
+        const r = await guardado(() => aplicar(sem008, S046));
+        ok("95a-bis com as abas e sem o responsável, o 046 não faz nada e diz o que falta",
+           Array.isArray(r) && /nada a fazer/.test(String(item(r, /sem o responsável/)))
+           && (await sem008.query("select to_regprocedure('public.zorvin_contar_situacoes(uuid)') is not null as tem")).rows[0].tem,
+           JSON.stringify(r));
+      }
+
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of [S004, S005, S006, S008, S020, S028]) await c.query(s);
+      await c.query("insert into departamentos (nome) values ('SAC'), ('SDC')");
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U.ana}', 'Ana', false), ('${U.bia}', 'Bia', false), ('${U.rod}', 'Rodrigo', true)`);
+      const tel = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $1, $2) returning id", [nome, dep])).rows[0].id;
+      const SAC = await tel("SAC", 1), SDC = await tel("SDC", 2);
+      // Ana e Bia veem só o SAC; o Rodrigo administra e vê tudo.
+      await c.query("insert into permissoes (usuario_id, departamento_id) values ($1, 1), ($2, 1)", [U.ana, U.bia]);
+      let n = 0;
+      const assunto = (await c.query("select id from zorvin_assuntos order by ordem limit 1")).rows[0].id;
+      // UMA CONVERSA DE CADA JEITO. A aba sai dos gatilhos do 028, como em
+      // produção: só o cliente escreveu → Novos; a equipe respondeu → Em
+      // Atendimento; e o "Já tratei" finaliza.
+      const conversa = async ({ t = SAC, dono = null, equipe = true, finaliza = false, naoLidas = 0, arquivada = false, semMensagem = false }) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+          [`5511${String(++n).padStart(8, "0")}`, `Cliente ${n}`])).rows[0].id;
+        const id = (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [t, ct])).rows[0].id;
+        if (!semMensagem) {
+          await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'contato', 'oi', $2, now() - interval '2 hours')",
+            [id, `m${n}a`]);
+          if (equipe) await c.query("insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em) values ($1, 'advogado', 'olá', $2, now() - interval '1 hour')",
+            [id, `m${n}b`]);
+          if (finaliza) await c.query("insert into zorvin_tratamentos (conversa_id, assunto_id, quem) values ($1, $2, $3)", [id, assunto, U.rod]);
+        }
+        await c.query("update conversas set responsavel_id = $2, nao_lidas = $3, arquivada = $4 where id = $1", [id, dono, naoLidas, arquivada]);
+        return id;
+      };
+      await conversa({ dono: U.ana, naoLidas: 2 });                    // Ana, em atendimento, por ler
+      await conversa({ dono: U.ana, finaliza: true });                 // Ana, finalizada
+      await conversa({ dono: U.ana, arquivada: true, naoLidas: 1 });   // Ana, arquivada: fora da conta
+      await conversa({ dono: U.ana, semMensagem: true });              // Ana, sem mensagem: fora da conta
+      await conversa({ dono: U.bia });                                 // Bia, em atendimento
+      await conversa({ equipe: false, naoLidas: 1 });                  // sem responsável, em Novos, por ler
+      await conversa({});                                              // sem responsável, em atendimento
+      await conversa({ t: SDC, dono: U.ana });                         // Ana, no outro telefone
+      const abas = (await c.query("select situacao, count(*)::int as n from conversas where advogado_id = $1 and not arquivada group by 1 order by 1", [SAC])).rows;
+      ok("95b a montagem dá as abas que a prova espera (o 028 decidiu pelos gatilhos)",
+         JSON.stringify(abas) === JSON.stringify([{ situacao: "aberto", n: 4 }, { situacao: "finalizado", n: 1 }, { situacao: "aguardando", n: 1 }].sort((a, b) => a.situacao.localeCompare(b.situacao))),
+         JSON.stringify(abas));
+
+      // ---- 95c. antes do 046: a conta não recorta ----
+      const antes = await contar(c, SAC, [U.ana]);
+      ok("95c antes do 046, pedir a conta pelos responsáveis não acha a função (42883) — o painel fica sem número, e não com o do telefone",
+         antes.codigo === "42883", JSON.stringify(antes));
+
+      // ---- 95d. aplicar ----
+      const conf = await guardado(() => aplicar(c, S046));
+      ok("95d o 046 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que a conta é uma só, que as partes somam o todo e que quem atende a chama",
+         item(conf, /uma conta só/) === "true" && item(conf, /dão o número de cada aba/) === "true"
+         && item(conf, /quem atende chama/) === "true" && item(conf, /quem não entrou/) === "true", JSON.stringify(conf));
+      const funcoes = (await c.query("select count(*)::int as n from pg_proc where proname = 'zorvin_contar_situacoes'")).rows[0].n;
+      ok("a de um argumento saiu: sobra uma função só", funcoes === 1, String(funcoes));
+
+      // ---- 95e. cada recorte ----
+      const todos = await contar(c, SAC);
+      ok("95e só com o telefone (a chamada de antes), conta tudo — sem a arquivada e sem a conversa sem mensagem",
+         resumo(todos) === "1/3/1 · não lidas 1/1/0", resumo(todos));
+      const daAna = await contar(c, SAC, [U.ana]);
+      ok("só a Ana: a conversa em atendimento (por ler) e a finalizada", resumo(daAna) === "0/1/1 · não lidas 0/1/0", resumo(daAna));
+      const anaEBia = await contar(c, SAC, [U.ana, U.bia]);
+      ok("a Ana e a Bia: as das duas, somadas", resumo(anaEBia) === "0/2/1 · não lidas 0/1/0", resumo(anaEBia));
+      const semDono = await contar(c, SAC, null, true);
+      ok("só as sem responsável", resumo(semDono) === "1/1/0 · não lidas 1/0/0", resumo(semDono));
+      const biaESem = await contar(c, SAC, [U.bia], true);
+      ok("a Bia mais as sem responsável", resumo(biaESem) === "1/2/0 · não lidas 1/0/0", resumo(biaESem));
+      const vazia = await contar(c, SAC, [], false);
+      ok("a lista vazia, sem as sem responsável, vale como sem filtro — e não como ninguém",
+         resumo(vazia) === resumo(todos), resumo(vazia));
+      const ninguem = await contar(c, SAC, ["00000000-0000-0000-0000-0000000000ff"]);
+      ok("quem não tem conversa nenhuma tem zero em tudo", resumo(ninguem) === "0/0/0 · não lidas 0/0/0", resumo(ninguem));
+      const outroTel = await contar(c, SDC, [U.ana]);
+      ok("o telefone continua recortando: a Ana no outro telefone conta só a de lá", resumo(outroTel) === "0/1/0 · não lidas 0/0/0", resumo(outroTel));
+
+      // ---- 95f. o olho de quem pergunta ----
+      const comoAna = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select zorvin_contar_situacoes(p_telefone => $1, p_responsaveis => $2::uuid[]) as r", [SAC, [U.ana]])).rows[0].r));
+      ok("95f quem atende chama a conta pelos responsáveis", resumo(comoAna) === "0/1/1 · não lidas 0/1/0", resumo(comoAna));
+      const anaNoOutro = await guardado(() => comoPessoa(c, U.ana, async () =>
+        (await c.query("select zorvin_contar_situacoes(p_telefone => $1, p_responsaveis => $2::uuid[]) as r", [SDC, [U.ana]])).rows[0].r));
+      ok("e conta só o que ela enxerga: no telefone que ela não atende, zero (security invoker)",
+         resumo(anaNoOutro) === "0/0/0 · não lidas 0/0/0", resumo(anaNoOutro));
+      const anon = await guardado(() => comoAnon(c, () => c.query("select zorvin_contar_situacoes(p_telefone => $1)", [SAC])));
+      ok("quem não entrou não chama a conta", anon.codigo === "42501", JSON.stringify(anon));
+
+      // ---- 95g. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S046));
+      ok("95g rodar de novo aplica sem acusar nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      ok("e a função continua uma só",
+         (await c.query("select count(*)::int as n from pg_proc where proname = 'zorvin_contar_situacoes'")).rows[0].n === 1);
+
+      // ---- 95h. a conferência que pega quem atende sem a conta ----
+      // O 046 DEVOLVE A CONTA a quem atende a cada rodada — é o certo —, então
+      // tirar a permissão da FUNÇÃO não daria à conferência o que pegar. Tira-
+      // se a leitura das CONVERSAS, que o 046 não mexe: a conta roda no papel
+      // de quem pergunta, e morre ali para quem atende — a régua 4 do LEIA-ME.
+      await c.query("revoke select on conversas from authenticated");
+      const quebrada = await guardado(async () => {
+        try { return await aplicar(c, S046); } finally { await c.query("grant select on conversas to authenticated"); }
+      });
+      ok("95h sem como chamar a conta no papel de quem atende, a conferência diz NÃO, com o motivo",
+         Array.isArray(quebrada) && /^NÃO — permission denied/.test(String(item(quebrada, /quem atende chama/))),
+         JSON.stringify(quebrada));
+    } catch (e) {
+      ok("a seção 95 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
