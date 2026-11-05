@@ -9500,8 +9500,9 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     const e = await estado(t);
     ok("sem a chave, o estado diz que o copiloto está desligado", e.ok === true && e.ligado === false, JSON.stringify(e));
     const r = await pedir(t, 1);
-    ok("e a rota recusa dizendo o nome da variável",
-       r.status === 503 && /ANTHROPIC_API_KEY/.test(r.corpo.erro || ""), JSON.stringify(r));
+    ok("e a rota recusa dizendo o nome da variável — e o nome do assistente, o Quazar",
+       r.status === 503 && /ANTHROPIC_API_KEY/.test(r.corpo.erro || "")
+       && /^O Quazar ainda não está ligado/.test(r.corpo.erro || ""), JSON.stringify(r));
     ok("sem ir à Anthropic", claude.pedidos.length === 0, `foram ${claude.pedidos.length}`);
     await t.parar(); await claude.parar();
   }
@@ -9647,11 +9648,12 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     ok("o que a IA pensou antes não vai para a caixa — só o texto",
        a.status === 200 && a.corpo.sugestao === "Vou verificar e já te retorno.", JSON.stringify(a));
     const b = await pedir(t, 1);
-    ok("a IA que se recusa: a frase diz que é para escrever sem o copiloto",
-       b.status === 502 && /preferiu não sugerir/.test(b.corpo.erro || ""), JSON.stringify(b));
+    ok("a IA que se recusa: a frase diz, pelo nome do assistente, que é para escrever sem ele",
+       b.status === 502 && /^O Quazar preferiu não sugerir/.test(b.corpo.erro || "")
+       && /sem ele\.$/.test(b.corpo.erro || "") && !/copiloto/i.test(b.corpo.erro || ""), JSON.stringify(b));
     const c = await pedir(t, 1);
     ok("resposta em branco: diz que não veio sugestão, e não devolve caixa vazia",
-       c.status === 502 && /não devolveu sugestão/.test(c.corpo.erro || ""), JSON.stringify(c));
+       c.status === 502 && /^O Quazar não devolveu sugestão/.test(c.corpo.erro || ""), JSON.stringify(c));
     await t.parar(); await claude.parar();
   }
 
@@ -9674,7 +9676,7 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
       quebrar: (metodo, tabela) => (tabela === "zorvin_copiloto" ? "banco fora do ar" : null) });
     const r = await pedir(t, 1);
     ok("com o manual existindo e a leitura falhando, não sugere sem ele — e diz, com o código",
-       r.status === 502 && /manual do copiloto/.test(r.corpo.erro || "") && /XX000/.test(r.corpo.erro || ""), JSON.stringify(r));
+       r.status === 502 && /manual do Quazar/.test(r.corpo.erro || "") && /XX000/.test(r.corpo.erro || ""), JSON.stringify(r));
     ok("e não foi à Anthropic", claude.pedidos.length === 0, `foram ${claude.pedidos.length}`);
     await t.parar(); await claude.parar();
   }
@@ -16095,8 +16097,9 @@ console.log("\n87. O resumo da conversa, ao clicar");
     const e = await estado(t);
     ok("o estado diz que esta ponte tem o resumo, mesmo sem a chave", e.ligado === false && e.resumo === true, JSON.stringify(e));
     const r = await pedir(t, 1);
-    ok("sem a chave, o resumo recusa dizendo o nome da variável",
-       r.status === 503 && /ANTHROPIC_API_KEY/.test(r.corpo.erro || ""), JSON.stringify(r));
+    ok("sem a chave, o resumo recusa dizendo o nome da variável — e o do assistente",
+       r.status === 503 && /ANTHROPIC_API_KEY/.test(r.corpo.erro || "")
+       && /^O Quazar ainda não está ligado/.test(r.corpo.erro || ""), JSON.stringify(r));
     ok("sem ir à Anthropic", claude.pedidos.length === 0, `foram ${claude.pedidos.length}`);
     await t.parar(); await claude.parar();
   }
@@ -16241,14 +16244,14 @@ console.log("\n87. O resumo da conversa, ao clicar");
     const t = await subirTudo(daAnthropic(claude), { tabelas: tabelas() });
     const a = await pedir(t, 1);
     ok("a IA que se recusa: a frase diz, e não sai resumo",
-       a.status === 502 && /preferiu não resumir/.test(a.corpo.erro || "") && !a.corpo.resumo, JSON.stringify(a));
+       a.status === 502 && /^O Quazar preferiu não resumir/.test(a.corpo.erro || "") && !a.corpo.resumo, JSON.stringify(a));
     const b = await pedir(t, 1);
-    ok("a resposta cortada no teto: diz que não coube", b.status === 502 && /não coube/.test(b.corpo.erro || ""), JSON.stringify(b));
+    ok("a resposta cortada no teto: diz que não coube", b.status === 502 && /não coube na resposta do Quazar/.test(b.corpo.erro || ""), JSON.stringify(b));
     const c = await pedir(t, 1);
     ok("texto que não é o JSON: diz que veio num formato que o Zorvin não entendeu",
-       c.status === 502 && /formato que o Zorvin não entendeu/.test(c.corpo.erro || ""), JSON.stringify(c));
+       c.status === 502 && /^O Quazar devolveu o resumo num formato que o Zorvin não entendeu/.test(c.corpo.erro || ""), JSON.stringify(c));
     const d = await pedir(t, 1);
-    ok("as três partes vazias: diz que não veio resumo", d.status === 502 && /não devolveu resumo/.test(d.corpo.erro || ""),
+    ok("as três partes vazias: diz que não veio resumo", d.status === 502 && /^O Quazar não devolveu resumo/.test(d.corpo.erro || ""),
        JSON.stringify(d));
     const e = await pedir(t, 1);
     const rs = (e.corpo && e.corpo.resumo) || {};
@@ -19922,7 +19925,7 @@ console.log("\n101. O agente: pedir uma mudança ao copiloto, e o que ele aprend
       quebrar: (m, tab) => (m === "GET" && tab === "zorvin_copiloto_licoes" ? "falha de prova" : null) });
     const r = await sugerir(t, 1);
     ok("com a leitura das lições falhando, não sugere, e diz por quê com o código",
-       r.status === 502 && /lições do copiloto/.test(r.corpo.erro || "") && /XX000/.test(r.corpo.erro || ""), JSON.stringify(r));
+       r.status === 502 && /lições do Quazar/.test(r.corpo.erro || "") && /XX000/.test(r.corpo.erro || ""), JSON.stringify(r));
     ok("sem ir à Anthropic", claude.pedidos.length === 0, `foram ${claude.pedidos.length}`);
     await t.parar(); await claude.parar();
   }
@@ -20045,13 +20048,14 @@ console.log("\n101. O agente: pedir uma mudança ao copiloto, e o que ele aprend
     ok("101f sem login, sem pedido, com o pedido longo demais ou a mensagem longa demais, recusa",
        semLogin.status === 401 && semPedido.status === 400 && longo.status === 400 && mensagemLonga.status === 400,
        JSON.stringify([semLogin.status, semPedido.status, longo.status, mensagemLonga.status]));
-    ok("dizendo o que fazer", /Escreva o que o copiloto deve mudar/.test(semPedido.corpo.erro || "")
+    ok("dizendo o que fazer", /Escreva o que o Quazar deve mudar/.test(semPedido.corpo.erro || "")
        && /500 caracteres/.test(longo.corpo.erro || ""), JSON.stringify([semPedido.corpo, longo.corpo]));
     ok("sem ir à Anthropic", claude.pedidos.length === 0, `foram ${claude.pedidos.length}`);
     await t.parar();
     const t2 = await subirTudo({ ANTHROPIC_API_KEY: "", ANTHROPIC_API_URL: claude.url }, { tabelas: tabelas() });
     const semChave = await ajustar(t2, { conversa_id: 1, sugestao: "x", pedido: PEDIDO });
-    ok("sem a chave, diz o nome da variável", semChave.status === 503 && /ANTHROPIC_API_KEY/.test(semChave.corpo.erro || ""), JSON.stringify(semChave));
+    ok("sem a chave, diz o nome da variável — e o do assistente", semChave.status === 503 && /ANTHROPIC_API_KEY/.test(semChave.corpo.erro || "")
+       && /^O Quazar ainda não está ligado/.test(semChave.corpo.erro || ""), JSON.stringify(semChave));
     await t2.parar(); await claude.parar();
   }
 
@@ -20071,12 +20075,12 @@ console.log("\n101. O agente: pedir uma mudança ao copiloto, e o que ele aprend
     const vazia = await ajustar(t, { conversa_id: 1, sugestao: "x", pedido: "três" });
     const cortada = await ajustar(t, { conversa_id: 1, sugestao: "x", pedido: "quatro" });
     const chave = await ajustar(t, { conversa_id: 1, sugestao: "x", pedido: "cinco" });
-    ok("101g a IA que se recusa: diz, e manda fazer à mão", recusa.status === 502 && /preferiu não mudar/.test(recusa.corpo.erro || ""), JSON.stringify(recusa));
-    ok("a resposta que não é o formato: diz que não entendeu", naoJson.status === 502 && /não entendi/.test(naoJson.corpo.erro || ""), JSON.stringify(naoJson));
+    ok("101g a IA que se recusa: diz, e manda fazer à mão", recusa.status === 502 && /^O Quazar preferiu não mudar/.test(recusa.corpo.erro || ""), JSON.stringify(recusa));
+    ok("a resposta que não é o formato: diz que o Zorvin não entendeu", naoJson.status === 502 && /^O Quazar devolveu uma resposta num formato que o Zorvin não entendeu/.test(naoJson.corpo.erro || ""), JSON.stringify(naoJson));
     ok("a mensagem vazia: diz, e a lição dela não fica",
-       vazia.status === 502 && /não devolveu a mensagem/.test(vazia.corpo.erro || "")
+       vazia.status === 502 && /^O Quazar não devolveu a mensagem/.test(vazia.corpo.erro || "")
        && (t.sb.dados.zorvin_copiloto_licoes || []).length === antes, JSON.stringify(vazia));
-    ok("a resposta cortada no teto: diz", cortada.status === 502 && /não terminou/.test(cortada.corpo.erro || ""), JSON.stringify(cortada));
+    ok("a resposta cortada no teto: diz", cortada.status === 502 && /^O Quazar não terminou/.test(cortada.corpo.erro || ""), JSON.stringify(cortada));
     ok("a chave recusada: diz o que conferir", chave.status === 502 && /recusou a chave/.test(chave.corpo.erro || ""), JSON.stringify(chave));
     await espera(100);
     const log = t.registro.join("");
