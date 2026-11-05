@@ -91,6 +91,12 @@ Variáveis de ambiente (no Render):
   administra escreveu em cada etapa.** `ACOMPANHAMENTO_INTERVALO_MS` (padrão
   10 min) e `ACOMPANHAMENTO_PRIMEIRA_MS` (2 min) são para a bancada. Ver "O
   acompanhamento por etapa (script 045, 02/11)".
+- `COPILOTO_APRENDER` — `desligado` faz o copiloto não ler as conversas (as
+  notas param de crescer; as lições da equipe continuam valendo). **Opcional:
+  sem ela, a ponte lê um pedaço de conversas por minuto** (e só com
+  `ANTHROPIC_API_KEY`). `COPILOTO_APRENDER_INTERVALO_MS` (padrão 1 min),
+  `COPILOTO_APRENDER_PRIMEIRA_MS` (3 min) e `COPILOTO_APRENDER_MINIMO` (150)
+  são para a bancada. Ver "O copiloto aprende (script 050, 05/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -2815,7 +2821,10 @@ o **Claude Haiku 5.5** — escolhido por ele entre o Claude e o Groq.
 era tirar uma amostra anonimizada para escrever o manual; a verificação de
 segurança do ambiente recusou preparar essa extração, e o caminho que ficou é
 o de menos trabalho para ele: o copiloto lê, **no servidor e na hora do
-clique**, o que já está no Zorvin. Nada foi "treinado".
+clique**, o que já está no Zorvin. Nada foi "treinado". **Desde 05/11 ele
+também lê as conversas sozinho, no servidor, e guarda notas do que aprendeu**
+— e continua sem nenhuma conversa passar por aqui: ver "O copiloto aprende
+(script 050, 05/11)".
 
 `POST /copiloto/sugerir` (`{ conversa_id }`, com login) devolve `{ sugestao }`:
 
@@ -3176,6 +3185,205 @@ régua das seções vizinhas), e as duas são pegas por três conferências cada
   Foi o que aconteceu de novo aqui, e é a mesma armadilha que o painel já
   registrou duas vezes. **Depois de escrever uma expressão com escapa de
   acento, confira os bytes do arquivo.**
+
+### O copiloto aprende (script 050, 05/11)
+
+Pedido do Rodrigo: *"O Copiloto precisa ser mais inteligente e sempre
+aprender, ficar cada vez mais inteligente. Faça ele ler todas as mensagens que
+temos no banco de dados e aprender com as conversas, isso para cada
+departamento, cada telefone. E outra função que preciso é de um agente [...]:
+o usuário pode interagir com o Copiloto e pedir essa alteração, e o Copiloto
+tem que aprender com isso para caso aconteça novamente com outro cliente no
+futuro."* Decidido com ele: **o que o copiloto aprende vale na hora** (quem
+administra vê, corrige e apaga; quem ensinou desfaz a sua), e **as correções
+valem para o escritório inteiro**. O que ele aprende lendo as conversas é por
+telefone e por departamento, como o pedido diz.
+
+**"Aprender" não é treinar a IA**, e é isso que precisa ficar claro: o modelo
+não muda. Muda o que ele LÊ antes de sugerir. São duas coisas, guardadas no
+banco (`sql/automaticos/050-o-copiloto-aprende.sql`):
+
+| | o que é | de onde vem | vale para |
+|---|---|---|---|
+| **as notas** (`zorvin_copiloto_aprendido`) | o que a IA anotou lendo as conversas: as perguntas de sempre, os procedimentos, o que a equipe não faz, o tom | a rodada da ponte, sozinha | uma linha por telefone e uma por departamento |
+| **as lições** (`zorvin_copiloto_licoes`) | as correções da equipe ("não passamos o telefone do advogado") | o "Pedir uma mudança" | o escritório inteiro, na hora |
+
+**Medido em 05/11, só contando:** 53.094 mensagens para ler (3,4 milhões de
+caracteres), desde 07/12/2022, em 16 telefones e 4 departamentos. Chegam umas
+3.300 por semana.
+
+#### A rodada que lê as conversas (`aprenderComAsConversas`)
+
+De minuto em minuto, a ponte pergunta ao banco quem tem o que aprender
+(`zorvin_copiloto_para_aprender`) e lê UM pedaço de UMA linha
+(`zorvin_copiloto_pedaco`): até 400 mensagens ou 45 mil caracteres, na ordem
+em que aconteceram, agrupadas por conversa. A IA recebe as notas de agora e o
+pedaço, e devolve as notas atualizadas, inteiras (até 6000 caracteres,
+cortadas no fim de uma linha).
+
+- **Quem tem o que aprender:** 150 mensagens novas por ler, ou alguma e a
+  última leitura há mais de 24 horas. Quem nunca leu vem primeiro, depois quem
+  leu há mais tempo: todo telefone e todo departamento andam juntos.
+- **O ponto da leitura** (`leu_ate` e `leu_ate_id`) é a última mensagem que
+  COUBE no pedaço, e não a última que veio: a hora e o id juntos, com o id
+  desempatando as da mesma hora (o álbum de fotos).
+- **O que não é lido:** as notas internas (nunca), a mensagem apagada, o aviso
+  automático (037) e o que não tem texto nem transcrição. O áudio vai pela
+  transcrição.
+- **No departamento, cada conversa diz por qual telefone é**, e o grupo vai
+  marcado.
+- **A primeira passada leva umas quatro horas e meia de ponte acordada** (uns
+  270 pedaços, um por minuto, cada mensagem lida duas vezes: no telefone e no
+  departamento) e custa por volta de US$ 1 (o Haiku 5.5, pela tabela do
+  copiloto). Depois, umas vinte leituras por dia, por volta de US$ 1,50 por
+  mês.
+- **A primeira volta espera três minutos** depois de subir: numa publicação, a
+  ponte velha ainda termina o que começou.
+
+**O que segura a rodada, e por quê:**
+
+| desfecho | o que acontece |
+|---|---|
+| a IA preferiu não ler o pedaço | o ponto anda, e as notas ficam como estavam: a linha não fica presa nele |
+| resposta vazia, ou cortada no teto | nada é gravado, e a linha tenta de novo mais tarde |
+| limite de uso (429) | a rodada para pelo tempo que a Anthropic pedir (de 30 s a 10 min): o copiloto da equipe usa a mesma cota |
+| chave, crédito ou modelo recusados | a rodada para por meia hora |
+| outra falha | a linha espera 5 min, 30 min e 2 h; depois, só quando o ponto mudar |
+| quem administra corrigiu as notas no meio da leitura | nada é gravado: a gravação confere `atualizado_em`, que o gatilho muda a cada gravação |
+
+**As notas não guardam dado de cliente**, nas regras e na volta: a ponte troca
+CPF, CNPJ, número de processo, e-mail e telefone por "[dado removido]"
+(`semDadosPessoais`) antes de gravar. As regras também mandam não anotar o que
+aconteceu num caso.
+
+**O texto das conversas fica entre a ponte e a Anthropic.** Nenhuma conversa
+de cliente passou por esta sessão de desenvolvimento, e a decisão de 13/10
+continua valendo (ver "O copiloto"): as provas usam conversas inventadas.
+**Só números no log.**
+
+**Histórico importado depois, com a data antiga, não é lido**, e é decisão:
+ele cai atrás do ponto onde a leitura já está. Andar pela hora da gravação
+pediria uma coluna nova em `mensagens`, e as mensagens de antes dela teriam
+todas a mesma hora. Para ler de novo, quem administra usa "Ler tudo de novo"
+(`zorvin_copiloto_ler_de_novo`), que volta o ponto ao começo e apaga as notas
+daquela linha.
+
+#### O agente — "Pedir uma mudança" (`POST /copiloto/ajustar`)
+
+A atendente escreve o que mudar, e a ponte lê o mesmo que a sugestão lê, mais
+a mensagem que está na caixa de escrever e o pedido. A IA devolve, presa pelo
+formato (`output_config.format`), a mensagem refeita e a lição: a regra geral,
+se o pedido ensina uma ("não podemos passar o telefone do advogado"), ou nada,
+se o pedido vale só para aquela conversa ("troque amanhã por segunda").
+
+- **A lição é gravada na hora**, com quem ensinou, o pedido e a conversa. A
+  próxima sugestão de qualquer pessoa já a lê.
+- **A lição repetida não vira duas** (a comparação sem acento e sem maiúscula,
+  `chaveDoNomeDoAssunto`).
+- **A lição passa pela limpeza de dados, menos o telefone**: quem ensina pode
+  estar dizendo qual telefone do escritório passar ao cliente.
+- **A mensagem refeita não sai sozinha**: volta para a caixa de escrever, como
+  a sugestão.
+- **A lição que não se grava não derruba o ajuste**: a mensagem volta, e um
+  `aviso` diz por quê (sem o 050, que falta a atualização; com erro, o
+  código). Calada, a atendente acharia que o copiloto aprendeu.
+- **O duplo clique é uma ida só** (`ajustesEmVoo`).
+
+#### O que a sugestão lê agora
+
+| parte do sistema | o que leva | por quê |
+|---|---|---|
+| a primeira | as regras, o manual, as rápidas e **as lições** (até 150, as mais recentes, até 30 mil caracteres) | é a mesma para o escritório inteiro, e o cache dela serve a todo mundo |
+| a segunda | **as notas do departamento e do telefone** da conversa | muda de um telefone para outro: na primeira, quebraria o cache de todos |
+
+As regras dizem que **as lições valem mais do que o manual e do que as
+notas**: são as correções mais recentes. As notas são referência, e não regra.
+
+- **A leitura das lições que falha não sugere** (a régua do manual): sugerir
+  sem elas, calado, devolveria o erro que alguém já corrigiu. **Sem o 050,
+  sugere como antes.**
+- **As notas que falham não impedem**: o log diz, e a sugestão sai sem elas.
+- **`/copiloto/estado` ganhou `ajustar: true` e `aprende`** (falso com
+  `COPILOTO_APRENDER=desligado`): o painel publicado antes desta ponte não
+  oferece o campo.
+
+#### O banco (050)
+
+- **Quem atende não lê as notas** (só quem administra, pela regra de acesso),
+  **e lê as lições**.
+- **Pela tela, só o texto muda.** Das notas, quem administra corrige o texto (e
+  fica como autora, pelo gatilho); o ponto da leitura é da ponte. Das lições,
+  quem administra corrige e apaga, e quem ensinou apaga a sua (o Desfazer).
+- **A lição não nasce pela tela**: sem `insert` para quem entrou. Pela tela,
+  alguém poderia escrever uma lição em nome de outra pessoa.
+- **As funções da leitura são só da ponte**: elas devolvem mensagens de todos
+  os telefones. "Ler tudo de novo" é de quem entrou, e recusa quem não
+  administra.
+- **As linhas nascem na instalação**, e as do telefone e do departamento que
+  vierem depois, na primeira pergunta da rodada.
+- **A conferência chama no papel de quem atende** (a régua 4): quem não
+  administra lê zero linhas das notas, e quem administra lê todas.
+
+#### As provas
+
+Seções 100 (o 050 num Postgres de verdade, com a herança da Supabase, 39
+conferências), 101 (o agente e a sugestão, 46) e 102 (a rodada, 32), com um
+Claude de mentira; na 102, as duas funções do 050 são fingidas com o mesmo
+contrato. **83 sabotagens e 83 pegas**, rodadas em cópias e lidas uma a uma:
+
+- **o script (32):** a leitura das notas aberta a quem atende; a lição criada
+  pela tela; o ponto da leitura mudado pela tela; o gatilho sem mudar
+  `atualizado_em`; o pedaço sem o id desempatando, com a apagada, com o aviso
+  automático e com a foto sem legenda; a fila sem as horas, sem o `nulls
+  first`, sem o limite da conta e sem as linhas novas; "Ler tudo de novo" sem
+  conferir quem administra, sem limpar a autora e sem voltar o ponto; as
+  funções para quem entra e para quem não entrou; as tabelas para quem não
+  entrou; sem a guarda das tabelas e sem a das colunas; a conferência depois
+  da guarda e como dona do banco; o departamento lendo os telefones dos
+  outros; a lição apagada e corrigida por qualquer um, e sem quem corrigiu; o
+  ponto sem o par; a lição vazia aceita; sem tirar a herança das duas tabelas;
+  e as notas sem a regra de acesso;
+- **o código (51):** a sugestão sem as lições, com as notas na parte de cima,
+  sem as notas, e numa parte só; a falha das lições ignorada; sem o 050 não
+  sugerindo; as notas que falham derrubando a sugestão; as notas de outro
+  telefone; as lições sem tirar a etiqueta; a lição sem a limpeza, sem o
+  telefone, repetida, repetida com outro acento, sem quem ensinou e sem o
+  pedido; o ajuste sem o formato, com a chave da ponte, sem as lições, sem a
+  mensagem de agora, sem dizer a recusa e o corte, aceitando o pedido longo e
+  sem juntar o duplo clique; a lição que não gravou calada; o log do ajuste com
+  a lição e com o texto da IA; o estado sem o `ajustar`, e dizendo que aprende
+  sempre; a rodada sem conferir `atualizado_em`, com o ponto na última que
+  veio, presa na recusa, gravando a resposta cortada, sem o teto de
+  caracteres, sem o esforço, sem o manual, sem as notas de agora, sem agrupar
+  por conversa, sem dizer o telefone no departamento, sem o departamento no
+  telefone e na ordem errada; o limite sem pausa e sem o `retry-after`; a
+  chave recusada sem pausa; sem espera depois de falhar; as notas sem a
+  limpeza, sem o teto e cortadas no meio; o log com as notas; sem o 050
+  perguntando sempre; desligada que não desliga; e sem a chave perguntando
+  assim mesmo.
+
+**A primeira rodada pegou 81, e as duas que passaram eram defeitos da
+prova:**
+
+- **a hora lida pelo `pg` perde os microssegundos.** A conferência "a ponte
+  que leu antes da correção não grava por cima" comparava `atualizado_em` com
+  o Date do JavaScript, que guarda só os milissegundos, e nunca casava:
+  passava com o gatilho ou sem ele. Hoje a hora é lida como texto, e um
+  contraste prova que a gravação que confere casa quando a hora é a certa.
+  **No banco, compare horas como texto, e prove que a comparação casa antes de
+  provar que ela não casa;**
+- **a lição repetida da prova só mudava a caixa**, e não o acento: uma
+  comparação que ignora a caixa e não o acento passava. Hoje a IA de mentira
+  devolve "Nao" contra o "não" guardado.
+
+**E uma pegou parando a seção:** com a lição apagada pela sabotagem, a linha
+relida não existia, e a seção 100 estourava ali, sem dizer as conferências
+seguintes. Hoje a leitura é guardada. Consertada a prova, a rodada foi
+refeita inteira.
+
+**A prova ganhou três conferências antes da rodada**, porque três sabotagens
+planejadas não teriam o que pegar: a resposta cortada no teto, a chave
+recusada e o teto das notas.
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
