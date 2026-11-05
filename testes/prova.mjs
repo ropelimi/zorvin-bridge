@@ -20356,6 +20356,9 @@ console.log("\n102. O copiloto aprende com as conversas — a rodada da ponte");
     const l = da(t, "a1-tel");
     ok("102d a correção de quem administra no meio da leitura fica, e o ponto não anda",
        l.texto === "CORRIGIDO-PELA-ADMIN" && l.leu_ate_id === null && l.mensagens_lidas === 0, JSON.stringify(l));
+    // O log sai DEPOIS da gravação, e o que a ponte escreve chega à prova um
+    // instante depois: espera-se a linha, e ela continua reprovando se não vier.
+    await esperarAte(() => /as notas mudaram no meio da leitura/.test(t.registro.join("")), 5000);
     ok("e o log diz", /as notas mudaram no meio da leitura, e nada foi gravado/.test(t.registro.join("")), t.registro.join("").slice(-300));
     await t.parar(); await claude.parar();
   }
@@ -20369,7 +20372,8 @@ console.log("\n102. O copiloto aprende com as conversas — a rodada da ponte");
     await esperarAte(() => da(t, "a1-tel").leu_ate_id === "m05");
     ok("102e a IA que prefere não ler: as notas ficam, e o ponto anda (a linha não fica presa nesse pedaço)",
        da(t, "a1-tel").texto === "NOTAS-DE-ANTES" && da(t, "a1-tel").leu_ate_id === "m05", JSON.stringify(da(t, "a1-tel")));
-    ok("e o log diz", /a IA preferiu não ler um pedaço de 4 mensagens/.test(t.registro.join("")));
+    await esperarAte(() => /a IA preferiu não ler/.test(t.registro.join("")), 5000);
+    ok("e o log diz", /a IA preferiu não ler um pedaço de 4 mensagens/.test(t.registro.join("")), t.registro.join("").slice(-300));
     await t.parar(); await claude.parar();
   }
   {
@@ -21406,6 +21410,373 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
       ok("105j e não é tentado de novo nem anotado como pausa da hospedagem",
          buscas(t) === 1 && !/Vantoro: 429/.test(t.registro.join("")), `${buscas(t)} buscas`);
     } finally { await t.parar(); }
+  }
+}
+
+// ==================================================================
+//  106. AS NOTAS INTERNAS COM ANEXO (053), NUM POSTGRES DE VERDADE
+//
+//  Pedido do Rodrigo em 05/11: "Nas notas internas precisa ter a
+//  possibilidade de anexar documentos." O 053 acrescenta quatro colunas
+//  opcionais a `notas`, e as duas regras do 034: o tipo é um dos que o painel
+//  desenha, e endereço e tipo andam juntos.
+//
+//  A tabela desta seção é a do escritório como ela é (medida em 05/11): RLS
+//  ligada, as quatro políticas de quem entrou e a permissão da TABELA inteira.
+//  As colunas novas têm de valer para quem atende sem política nem permissão
+//  nova — e é no papel de quem atende que esta seção grava. E `notas` está no
+//  tempo real, que é por onde os colegas veem a nota com o documento.
+// ==================================================================
+{
+  console.log("\n106. As notas internas com anexo (053), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o anexo das notas (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S053 = fs.readFileSync(new URL("../sql/automaticos/053-as-notas-com-anexo.sql", import.meta.url), "utf8");
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+end $$;
+grant usage on schema public to anon, authenticated;
+create table public.conversas (id uuid primary key default gen_random_uuid());
+create table public.notas (id uuid primary key default gen_random_uuid(),
+  conversa_id uuid not null references public.conversas(id) on delete cascade,
+  texto text not null, autor text, criado_em timestamptz not null default now(),
+  autor_id uuid, apagada_em timestamptz, atualizado_em timestamptz default now());
+alter table public.notas enable row level security;
+create policy notas_ler on public.notas for select to authenticated using (true);
+create policy notas_criar on public.notas for insert to authenticated with check (true);
+create policy notas_atualizacao on public.notas for update to authenticated using (true) with check (true);
+create policy notas_apagar on public.notas for delete to authenticated using (true);
+grant select, insert, update, delete on public.notas to authenticated;
+grant select on public.conversas to authenticated;
+insert into public.conversas default values;
+insert into public.notas (conversa_id, texto, autor) select id, 'Cliente vai mandar o RG', 'Ana' from public.conversas;
+create publication supabase_realtime for table public.notas;
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^\s*n[ãaÃA]o\b/i.test(String(x.resposta))
+                                              || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    // NO PAPEL DE QUEM ATENDE — e volta, aconteça o que acontecer.
+    const comoQuemAtende = async (c, fn) => {
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); }
+    };
+    const PDF = ["https://x.supabase.co/storage/v1/object/public/anexos/notas/cv/1762-ab12-Procuracao.pdf",
+                 "documento", "application/pdf", "0001.01 - Procuração.pdf"];
+    try {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      const conversa = (await c.query("select id from public.conversas limit 1")).rows[0].id;
+
+      // ---- 106a. antes do 053, o anexo não tem onde ficar ----
+      const antes = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.notas (conversa_id, texto, midia_url) values ($1, 'y', 'u')", [conversa])));
+      ok("106a antes do 053, gravar o anexo na nota dá coluna que não existe (42703) — é por ela que o painel sabe",
+         antes.codigo === "42703", JSON.stringify(antes));
+
+      // ---- 106b. o 053 aplica, e a conferência não acusa nada ----
+      const conf = await guardado(() => aplicar(c, S053));
+      ok("106b o 053 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      for (const re of [/quatro colunas/, /duas regras/, /GRAVAR o anexo/, /LER o anexo/, /tempo real/]) {
+        ok(`106b a conferência diz: ${re.source}`, item(conf, re) === "true", JSON.stringify(item(conf, re)));
+      }
+
+      // ---- 106c. quem atende grava a nota que é só o documento ----
+      const gravar = await guardado(() => comoQuemAtende(c, () => c.query(
+        `insert into public.notas (conversa_id, texto, autor, midia_url, midia_tipo, midia_mime, midia_nome)
+         values ($1, '', 'Ana', $2, $3, $4, $5) returning id`, [conversa, ...PDF])));
+      const id = gravar.rows?.[0]?.id;
+      ok("106c quem atende grava uma nota que é só o documento (o texto vazio vale)", !gravar.erro && Boolean(id),
+         JSON.stringify(gravar.erro || gravar.rows));
+      const lida = id ? (await comoQuemAtende(c, () => c.query(
+        "select texto, midia_url, midia_tipo, midia_mime, midia_nome from public.notas where id = $1", [id]))).rows[0] : null;
+      ok("106c e lê o documento de volta, com o nome como a pessoa escolheu",
+         lida && lida.texto === "" && lida.midia_url === PDF[0] && lida.midia_tipo === "documento"
+         && lida.midia_nome === "0001.01 - Procuração.pdf", JSON.stringify(lida));
+      const comTexto = await guardado(() => comoQuemAtende(c, () => c.query(
+        `insert into public.notas (conversa_id, texto, autor, midia_url, midia_tipo, midia_mime, midia_nome)
+         values ($1, 'Comprovante que ele mandou por e-mail', 'Ana', $2, 'imagem', 'image/png', 'print.png') returning id`,
+        [conversa, PDF[0]])));
+      ok("106c e a nota com texto e imagem", !comTexto.erro && comTexto.rows?.length === 1, JSON.stringify(comTexto.erro || comTexto.rows));
+
+      // ---- 106d. as duas regras ----
+      const tipoErrado = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.notas (conversa_id, texto, midia_url, midia_tipo) values ($1, 'y', 'u', 'planilha')", [conversa])));
+      ok("106d um tipo que o painel não desenha é recusado (23514)", tipoErrado.codigo === "23514", JSON.stringify(tipoErrado));
+      const semTipo = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.notas (conversa_id, texto, midia_url) values ($1, 'y', 'u')", [conversa])));
+      ok("106d o endereço sem o tipo é recusado (23514)", semTipo.codigo === "23514", JSON.stringify(semTipo));
+      const semEndereco = await guardado(() => comoQuemAtende(c, () => c.query(
+        "insert into public.notas (conversa_id, texto, midia_tipo) values ($1, 'y', 'documento')", [conversa])));
+      ok("106d e o tipo sem o endereço também (23514)", semEndereco.codigo === "23514", JSON.stringify(semEndereco));
+      for (const tipo of ["imagem", "video", "audio", "documento"]) {
+        const r = await guardado(() => comoQuemAtende(c, () => c.query(
+          "insert into public.notas (conversa_id, texto, midia_url, midia_tipo) values ($1, 'y', 'u', $2) returning id",
+          [conversa, tipo])));
+        ok(`106d o tipo "${tipo}" é aceito`, !r.erro && r.rows?.length === 1, JSON.stringify(r.erro || r.rows));
+      }
+
+      // ---- 106e. a nota de antes não mudou ----
+      const velha = (await c.query("select texto, midia_url, midia_tipo from public.notas where autor = 'Ana' and texto = 'Cliente vai mandar o RG'")).rows[0];
+      ok("106e a nota de antes continua igual, sem anexo", velha && velha.midia_url === null && velha.midia_tipo === null,
+         JSON.stringify(velha));
+
+      // ---- 106f. o 053 de novo ----
+      const contarAnexos = async () => (await c.query("select count(*)::int n from public.notas where midia_url is not null")).rows[0].n;
+      const anexosAntes = await contarAnexos();
+      const deNovo = await guardado(() => aplicar(c, S053));
+      ok("106f rodar o 053 de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo), JSON.stringify(deNovo));
+      ok("106f e não dobra as regras", (await c.query(
+        "select count(*)::int n from pg_constraint where conrelid = 'public.notas'::regclass and contype = 'c'")).rows[0].n === 2);
+      ok("106f nem mexe nos anexos que já estão lá", (await contarAnexos()) === anexosAntes && anexosAntes === 6,
+         `${anexosAntes} antes, ${await contarAnexos()} depois`);
+      ok("106f e a conferência conta as notas com anexo", item(deNovo, /notas com anexo/) === String(anexosAntes),
+         JSON.stringify(item(deNovo, /notas com anexo/)));
+
+      // ---- 106g. sem as notas no tempo real, a conferência diz ----
+      await c.query("alter publication supabase_realtime drop table public.notas");
+      const semTempoReal = await guardado(() => aplicar(c, S053));
+      ok("106g com as notas fora do tempo real, a conferência diz NÃO (false)",
+         Array.isArray(semTempoReal) && item(semTempoReal, /tempo real/) === "false", JSON.stringify(semTempoReal));
+      await c.query("alter publication supabase_realtime add table public.notas");
+
+      // ---- 106h. num banco sem o Zorvin, desiste em silêncio ----
+      const limpo = await bancoNovo();
+      const vazio = await guardado(() => aplicar(limpo, S053));
+      ok("106h num banco sem o Zorvin, o 053 desiste sem estourar", Array.isArray(vazio)
+         && item(vazio, /sem as tabelas do Zorvin/) === "nada a fazer aqui", JSON.stringify(vazio));
+    } catch (e) {
+      ok("a seção 106 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
+// ==================================================================
+//  107. A NOTA COM ANEXO NA FICHA DO VANTORO E NA IA (05/11)
+//
+//  O documento da nota fica no Zorvin. O que a ponte faz com ele:
+//    - na ficha do Vantoro, a nota sobe com a linha "📎 Anexo no Zorvin:
+//      <nome>" — pela nota GRAVADA, e não pelo que o navegador disser; a nota
+//      que é só o documento não sobe vazia;
+//    - o mesmo no retroativo, que sobe as notas antigas;
+//    - quando o Vantoro devolve a nota, a linha sai antes de gravar: no Zorvin
+//      o anexo é desenhado pela nota, e a linha voltaria dobrada;
+//    - a nota sem anexo continua exatamente como era;
+//    - para a IA (o resumo e o funil), o anexo é dito como nas mensagens, e a
+//      nota que é só o documento entra.
+// ==================================================================
+console.log("\n107. A nota com anexo na ficha do Vantoro e na IA");
+{
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const LINHA = "📎 Anexo no Zorvin: ";
+  const PROC = "0001.01 - Procuração.pdf";
+  const notasDaCena = () => ([
+    { id: "n-com", conversa_id: "cv-1", texto: "Comprovante conferido", autor: "Ana", criado_em: haMin(30),
+      atualizado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null,
+      midia_url: "https://x/anexos/notas/cv-1/1-a-Procuracao.pdf", midia_tipo: "documento",
+      midia_mime: "application/pdf", midia_nome: PROC },
+    { id: "n-so", conversa_id: "cv-1", texto: "", autor: "Davi", criado_em: haMin(20),
+      atualizado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null,
+      midia_url: "https://x/anexos/notas/cv-1/2-b-print.png", midia_tipo: "imagem",
+      midia_mime: "image/png", midia_nome: "print.png" },
+    { id: "n-sem", conversa_id: "cv-1", texto: "Sem anexo nenhum", autor: "Ana", criado_em: haMin(10),
+      atualizado_em: "2026-01-01T10:00:00Z", vantoro_atividade_id: null, apagada_em: null },
+  ]);
+  const tabelas = () => ({
+    contatos: [{ id: "ct-1", numero: "5511900001111", nome: "Cliente", vantoro_cliente_id: "v-1" }],
+    conversas: [{ id: "cv-1", contato_id: "ct-1", advogado_id: TELEFONE.id }],
+    mensagens: [
+      { id: 901, conversa_id: "cv-1", origem: "contato", tipo: "texto", texto: "Mandei a procuração assinada por e-mail", criado_em: haMin(40) },
+      { id: 902, conversa_id: "cv-1", origem: "advogado", tipo: "texto", texto: "Recebemos, obrigada!", enviado_por: "Ana", criado_em: haMin(5) },
+    ],
+    notas: notasDaCena(),
+    usuarios: [{ id: "u1", nome: "Rodrigo", admin: false }],
+  });
+  const mandarNota = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/vantoro/cliente/7/nota`, {
+    method: "POST",
+    headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  });
+  const ultimaNoVantoro = (t) => [...t.van.recebidas].reverse().find((x) => /\/nota$/.test(x.caminho));
+
+  // ---- 107a. a nota nova sobe com a linha do anexo ----
+  {
+    const t = await subirTudo({}, { tabelas: tabelas(), vantoro: {} });
+    const r1 = await mandarNota(t, { id: "n-com", texto: "Comprovante conferido" });
+    ok("107a a nota com documento sobe (200)", r1.status === 200, `veio ${r1.status}`);
+    ok("107a com o texto e, embaixo, a linha do anexo",
+       ultimaNoVantoro(t)?.corpo?.texto === `Comprovante conferido\n\n${LINHA}${PROC}`,
+       JSON.stringify(ultimaNoVantoro(t)?.corpo?.texto));
+    await mandarNota(t, { id: "n-so", texto: "" });
+    ok("107a a nota que é só o documento não sobe vazia: sobe a linha do anexo",
+       ultimaNoVantoro(t)?.corpo?.texto === `${LINHA}print.png`, JSON.stringify(ultimaNoVantoro(t)?.corpo?.texto));
+    await mandarNota(t, { id: "n-sem", texto: "Sem anexo nenhum" });
+    ok("107a a nota sem anexo sobe exatamente como era",
+       ultimaNoVantoro(t)?.corpo?.texto === "Sem anexo nenhum", JSON.stringify(ultimaNoVantoro(t)?.corpo?.texto));
+    // PELA NOTA GRAVADA, e não pelo navegador: o que ele disser sobre anexo não
+    // vale. A nota "n-sem" não tem anexo no banco.
+    await mandarNota(t, { id: "n-sem", texto: "Sem anexo nenhum", midia_nome: "inventado.pdf", midia_url: "https://x/y.pdf" });
+    ok("107a o anexo que o navegador inventa não vira linha: vale a nota gravada",
+       ultimaNoVantoro(t)?.corpo?.texto === "Sem anexo nenhum", JSON.stringify(ultimaNoVantoro(t)?.corpo?.texto));
+    const leu = t.sb.chamadas.find((c) => c.metodo === "GET" && /\/notas$/.test(c.caminho) && /id=eq\.n-com/.test(c.busca));
+    ok("107a a ponte pergunta a nota inteira (`*`), que num banco sem o 053 não estoura",
+       leu && /select=\*/.test(decodeURIComponent(leu.busca)), leu && leu.busca);
+    // COMO QUEM PEDIU: o id vem do navegador, e com a chave da ponte qualquer
+    // pessoa logada poria na ficha o nome do anexo de uma nota que não enxerga.
+    ok("107a e a lê como quem pediu (o bilhete dela), e não com a chave da ponte",
+       leu && leu.autorizacao === "Bearer jwt-bom", leu && leu.autorizacao);
+    await t.parar();
+  }
+
+  // ---- 107b. sem conseguir ler a nota, ela sobe assim mesmo ----
+  {
+    const t = await subirTudo({}, { tabelas: tabelas(), vantoro: {},
+      quebrar: (metodo, tabela) => (metodo === "GET" && tabela === "notas" ? "o banco tossiu" : null) });
+    const r = await mandarNota(t, { id: "n-com", texto: "Comprovante conferido" });
+    ok("107b sem conseguir ler se a nota tem anexo, ela sobe assim mesmo (200)", r.status === 200, `veio ${r.status}`);
+    ok("107b com o texto como veio, sem a linha", ultimaNoVantoro(t)?.corpo?.texto === "Comprovante conferido",
+       JSON.stringify(ultimaNoVantoro(t)?.corpo?.texto));
+    ok("107b e o log diz que subiu sem a linha", /sobe sem a linha do anexo/.test(t.registro.join("")), t.registro.join("").slice(-400));
+    await t.parar();
+  }
+
+  // ---- 107c. o retroativo também diz o anexo ----
+  {
+    const t = await subirTudo({}, { tabelas: tabelas(), vantoro: {} });
+    const r = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/contato/ct-1/subir-notas`,
+      { method: "POST", headers: { Authorization: "Bearer jwt-bom" } })).json();
+    ok("107c o retroativo sobe as três", r.subiram === 3, JSON.stringify(r));
+    const textos = t.van.recebidas.filter((x) => /\/nota$/.test(x.caminho)).map((x) => x.corpo?.texto);
+    ok("107c com a linha do anexo em cada uma que tem, e a de sem anexo como era",
+       textos[0] === `Comprovante conferido\n\n${LINHA}${PROC}` && textos[1] === `${LINHA}print.png`
+       && textos[2] === "Sem anexo nenhum", JSON.stringify(textos));
+    await t.parar();
+  }
+
+  // ---- 107d. a volta do Vantoro tira a linha ----
+  {
+    const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEGREDO_VANTORO }, { tabelas: tabelas(), vantoro: {} });
+    const nota = (id) => t.sb.dados.notas.find((n) => n.id === id);
+    const r = await avisarQueMudou(t.porta, { nota_id: "n-com", texto: `Comprovante corrigido lá\n\n${LINHA}${PROC}\n`,
+      atualizado_em: "2026-06-01T10:00:00Z" });
+    ok("107d o Vantoro devolve a nota com anexo (200)", r.status === 200, `veio ${r.status}`);
+    ok("107d e a linha do anexo sai antes de gravar (com o espaço que o Vantoro deixou no fim)",
+       nota("n-com")?.texto === "Comprovante corrigido lá", JSON.stringify(nota("n-com")?.texto));
+    await avisarQueMudou(t.porta, { nota_id: "n-so", texto: `${LINHA}print.png`, atualizado_em: "2026-06-01T10:00:00Z" });
+    ok("107d a que é só o documento volta com o texto vazio, como é aqui",
+       nota("n-so")?.texto === "", JSON.stringify(nota("n-so")?.texto));
+    // A NOTA SEM ANEXO NÃO PERDE NADA: a linha só sai da nota que tem anexo.
+    await avisarQueMudou(t.porta, { nota_id: "n-sem", texto: `Escrevi ${LINHA}x.pdf`, atualizado_em: "2026-06-01T10:00:00Z" });
+    ok("107d na nota sem anexo, nada é tirado do texto", nota("n-sem")?.texto === `Escrevi ${LINHA}x.pdf`,
+       JSON.stringify(nota("n-sem")?.texto));
+    // SÓ A DO FIM: com outra linha depois, a de anexo foi escrita por alguém lá,
+    // e fica.
+    await avisarQueMudou(t.porta, { nota_id: "n-com", texto: `${LINHA}${PROC}\nmais uma linha`, atualizado_em: "2026-06-02T10:00:00Z" });
+    ok("107d a linha que não é a última fica (é texto de alguém)",
+       nota("n-com")?.texto === `${LINHA}${PROC}\nmais uma linha`, JSON.stringify(nota("n-com")?.texto));
+    await t.parar();
+  }
+
+  // ---- 107e. o resumo diz o anexo da nota ----
+  {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: JSON.stringify({ quer: "Mandar a procuração.", combinado: [], falta: [] }) }],
+        stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: `http://127.0.0.1:${srv.address().port}`,
+                                COPILOTO_MODELO: "" }, { tabelas: tabelas() });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/copiloto/resumir`, {
+      method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify({ conversa_id: "cv-1" }) }).then(async (x) => ({ status: x.status, corpo: await x.json() }));
+    const pedido = String(pedidos[0]?.messages?.[0]?.content || "");
+    ok("107e o resumo sai, e conta as três notas (a que é só o documento também)",
+       r.status === 200 && r.corpo.notas === 3, JSON.stringify(r.corpo));
+    ok("107e a nota com documento vai à IA dizendo o documento e o texto",
+       pedido.includes(`o cliente não viu: [documento: ${PROC}] Comprovante conferido`), pedido.slice(0, 1500));
+    ok("107e e a que é só a imagem vai como foto", pedido.includes("o cliente não viu: [foto: print.png]"), pedido.slice(0, 1500));
+    ok("107e e a sem anexo, como sempre", pedido.includes("o cliente não viu: Sem anexo nenhum"), pedido.slice(0, 1500));
+    await t.parar(); await new Promise((x) => srv.close(x));
+  }
+
+  // ---- 107f. o funil pela IA também lê a nota que é só o documento ----
+  {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: JSON.stringify({ etapa: "Novo contato", motivo: "Nada mudou." }) }],
+        stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const T0 = "2026-10-20T10:00:00.123456+00:00";
+    const extra = {
+      advogados: [{ ...TELEFONE, departamento_id: 1 }],
+      departamentos: [{ id: 1, nome: "Sucesso do Cliente", ordem: 1 }],
+      conversas: [{ id: "cv-1", contato_id: "ct-1", advogado_id: TELEFONE.id, ultima_atividade: haMin(5) }],
+      notas: notasDaCena().filter((n) => n.id === "n-so"),
+      zorvin_etapas: [
+        { id: "e1", departamento_id: 1, advogado_id: null, nome: "Novo contato", ordem: 10, ativo: true },
+        { id: "e2", departamento_id: 1, advogado_id: null, nome: "Em atendimento", ordem: 20, ativo: true },
+      ],
+      zorvin_cartoes: [{ id: "k1", contato_id: "ct-1", departamento_id: 1, advogado_id: null, etapa_id: "e1",
+        criado_em: T0, movido_em: T0, movido_por: null, ia_leu_ate: null, ia_motivo: null }],
+    };
+    let perguntas = 0;
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: `http://127.0.0.1:${srv.address().port}`,
+                                COPILOTO_MODELO: "", FUNIL_IA_PRIMEIRA_MS: "200", FUNIL_IA_INTERVALO_MS: "400" },
+      { tabelas: { ...tabelas(), ...extra },
+        rpcs: { zorvin_funil_para_a_ia: () => {
+          perguntas += 1;
+          return { corpo: perguntas === 1 ? [{ cartao_id: "k1", contato_id: "ct-1", departamento_id: 1, telefone_id: null,
+            etapa_id: "e1", movido_em: T0, pessoa_decidiu_em: null, ia_leu_ate: null, ia_motivo: null,
+            ultima: haMin(5), conversas: ["cv-1"] }] : [] };
+        } } });
+    const fim = Date.now() + 8000;
+    while (!pedidos.length && Date.now() < fim) await espera(80);
+    const pedido = String(pedidos[0]?.messages?.[0]?.content || "");
+    ok("107f a rodada do funil foi à IA", pedidos.length >= 1, `${pedidos.length} pedidos`);
+    ok("107f e a nota que é só a imagem foi junto, dita como foto",
+       pedido.includes("o cliente não viu: [foto: print.png]"), pedido.slice(0, 1500));
+    await t.parar(); await new Promise((x) => srv.close(x));
   }
 }
 

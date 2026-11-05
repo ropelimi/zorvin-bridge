@@ -81,6 +81,9 @@ export function valorDoCaminho(linha, chave) {
   return v;
 }
 
+/** As tabelas em que a leitura devolve só as colunas pedidas (ver o GET). */
+const COM_PROJECAO = new Set(["notas"]);
+
 /** As escolhas do `select` que são CAMINHO de JSON, com o nome que voltam:
  *  `mid:corpo->message->>messageid` volta como `mid`; sem apelido, como a
  *  última chave do caminho — que é o que o PostgREST faz. */
@@ -167,7 +170,9 @@ const COLUNAS_DO_BANCO = {
               // O AVISO AUTOMÁTICO (script 037).
               "automatica"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
-          "vantoro_atividade_id", "atualizado_em"],
+          "vantoro_atividade_id", "atualizado_em",
+          // O ANEXO DA NOTA (script 053).
+          "midia_url", "midia_tipo", "midia_mime", "midia_nome"],
   advogados: ["id", "nome", "numero", "departamento_id", "foto_url", "ativo", "token"],
   usuarios: ["id", "login", "email", "nome", "admin", "ativo", "foto_url"],
   permissoes: ["id", "usuario_id", "departamento_id", "telefone_id"],
@@ -526,6 +531,18 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
 
       if (req.method === "GET") {
         let saida = casam();
+        // AS TABELAS QUE RESPONDEM SÓ O QUE FOI PEDIDO, como o PostgREST.
+        // Aqui toda leitura devolvia a linha inteira, e uma consulta que pedisse
+        // `id, texto` recebia também `midia_url`: a ponte que lesse a nota pelas
+        // colunas de antes passava na prova e, em produção, não saberia que a
+        // nota tem anexo (05/11, a volta da nota do Vantoro). Só nas tabelas da
+        // lista, para não mudar o que as outras provas medem.
+        if (COM_PROJECAO.has(tabela) && sel.trim() !== "*") {
+          const pedidasAqui = colunasDoSelect(sel);
+          if (!pedidasAqui.includes("*")) {
+            saida = saida.map((l) => Object.fromEntries(pedidasAqui.filter((c) => c in l).map((c) => [c, l[c]])));
+          }
+        }
         if (ordem) saida = saida.slice().sort((a, b) => {
           const x = a[ordem.c], y = b[ordem.c];
           const cmp = x === y ? 0 : (x > y ? 1 : -1);

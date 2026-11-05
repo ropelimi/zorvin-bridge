@@ -4116,6 +4116,102 @@ em cópias e lidas uma a uma:
 - o script tirando de quem atende a permissão de gravar;
 - uma coluna a menos.
 
+## As notas internas com anexo (script 053, 05/11)
+
+Pedido do Rodrigo: *"Nas notas internas precisa ter a possibilidade de anexar
+documentos."* Até aqui a nota interna era só texto: o comprovante que o
+cliente mandou por e-mail, o print do sistema do banco, o contrato conferido
+não tinham onde ficar na conversa sem ir para o cliente.
+
+`sql/automaticos/053-as-notas-com-anexo.sql` acrescenta quatro colunas
+opcionais a `notas` (`midia_url`, `midia_tipo`, `midia_mime`, `midia_nome`) e
+as duas regras do 034: o tipo é um dos quatro que o painel desenha, e
+endereço e tipo andam juntos. **O texto continua obrigatório na coluna, e
+pode ser vazio**: a nota que é só o documento grava `texto = ''`. Uma regra
+"texto ou anexo" recusaria alguma nota antiga vazia, e o script pararia ali.
+
+**Nenhuma política nova.** Medido no banco do escritório em 05/11: as quatro
+políticas de `notas` são de quem entrou, em todas as linhas, e a permissão é
+da tabela inteira. A conferência confere isso no papel de quem atende, e
+também que `notas` continua no tempo real, que é por onde os colegas veem a
+nota com o documento.
+
+**O arquivo nunca passa pela fila de envio.** Ele sobe do painel para o
+depósito (`anexos/notas/…`) e fica na nota. A nota não vai ao WhatsApp, e o
+anexo dela também não.
+
+### O que a ponte faz com o anexo
+
+| onde | o quê |
+|---|---|
+| a nota que sobe para a ficha do Vantoro (`/vantoro/cliente/:id/nota`) | ganha uma linha no fim: *"📎 Anexo no Zorvin: <nome>"*. O documento fica no Zorvin; sem a linha, quem lê a ficha não saberia que ele existe, e a nota que é só o documento subiria vazia |
+| o retroativo (`subirNotas`) | a mesma linha |
+| a nota que o Vantoro devolve (`/vantoro/nota-mudou`) | a linha sai antes de gravar. No Zorvin o anexo é desenhado pela nota, e a linha no texto o diria duas vezes e voltaria dobrada na subida seguinte |
+| o resumo e o funil pela IA | o anexo é dito como nas mensagens (*"[documento: Procuração.pdf]"*, *"[foto: print.png]"*), e a nota que é só o documento entra |
+
+- **A linha sai da nota gravada, e não do que o navegador disser.** A ponte
+  lê a nota pelo id, **como quem pediu** (`bancoComo`): o id vem do
+  navegador, e com a chave da ponte qualquer pessoa logada poria na ficha o
+  nome do anexo de uma nota que não enxerga.
+- **Ela pede a nota inteira (`*`)**, e não as colunas pelo nome: num banco sem
+  o 053, pedir `midia_url` daria 42703. A volta do Vantoro também passou a
+  ler a nota inteira, pelo mesmo motivo.
+- **Sem conseguir ler a nota, ela sobe assim mesmo**, sem a linha, e o log
+  diz. Uma nota que não sobe por causa da linha do anexo é pior do que a
+  linha faltando.
+- **Só a linha do FIM sai na volta**, e só da nota que tem anexo. O espaço e
+  a quebra de linha que o Vantoro deixar no fim não contam. Uma linha igual
+  no meio do texto foi escrita por alguém, e fica.
+
+**A ponte não sobe o arquivo ao Vantoro**, e é decisão: a ficha recebe o
+nome, e o documento fica num lugar só. Subir o arquivo pediria uma rota de
+documento do lado de lá para cada nota, e dois lugares para manter.
+
+A tela está no CLAUDE.md do painel ("As notas internas com anexo").
+
+Provas: seção 106 (o 053 num Postgres de verdade, com a tabela como ela é no
+escritório, 24 conferências) e seção 107 (a ponte, 23).
+
+**29 sabotagens e 29 pegas**, rodadas em cópias e lidas uma a uma:
+
+- a ponte de antes inteira (12 reprovações);
+- **o 053:** sem a regra do tipo; sem a regra que junta endereço e tipo; a
+  regra que junta só de um lado; a coluna criada sem `if not exists`; a regra
+  criada sem a guarda (a segunda rodada estoura); o tipo `audio` fora da
+  lista; uma coluna a menos; o script tirando de quem atende a permissão de
+  gravar (14); sem a guarda do banco limpo; a tabela da conferência depois da
+  guarda; a conferência sem olhar o tempo real;
+- **a ficha:** sem a linha do anexo; a nota que é só o documento subindo
+  vazia; o anexo dito pelo navegador; a nota lida com a chave da ponte; a nota
+  lida pelas colunas do anexo (num banco sem o 053, 42703); a leitura que
+  falha derrubando a subida; o retroativo sem a linha;
+- **a volta:** sem tirar a linha; tirando a linha também da nota sem anexo;
+  tirando a linha que não é a última; sem relevar o espaço do fim; lendo só
+  as três colunas de antes;
+- **a IA:** sem o anexo da nota; a foto dita como documento; o resumo e o
+  funil sem a nota que é só o documento; a nota apagada voltando.
+
+**Duas vazaram na primeira rodada, e nenhuma era defeito da ponte:**
+
+- **a volta lendo só as três colunas de antes passava porque a bancada
+  mentia por omissão.** O Supabase de mentira devolvia a linha INTEIRA de
+  `notas`, qualquer que fosse a coluna pedida: a ponte que pedia
+  `id, texto, processo_id` recebia o anexo assim mesmo, e nunca no banco de
+  verdade. Hoje `notas` está em `COM_PROJECAO`, e a bancada devolve só o que
+  foi pedido. A mesma sabotagem é pega por duas conferências da 107d;
+- **a nota apagada voltando para a IA passava pelas seções 106 e 107**, que
+  são as que a rodada roda, porque o filtro é o mesmo de antes do anexo. Na
+  suíte inteira ela é pega pelas seções 87 (o resumo) e 92 (o funil), com
+  quatro reprovações.
+
+**E a suíte inteira da sabotagem 29 achou uma conferência minha de antes, da
+seção 102**, que lia o log no instante em que a nota era gravada. A ponte
+escreve a linha do log DEPOIS da gravação, e o que ela escreve chega à prova
+um instante depois. Com a máquina ocupada, *"e o log diz"* reprovou sem
+defeito nenhum. Hoje as duas conferências desse feitio esperam a linha (até 5
+segundos), e continuam reprovando se ela não vier. **Espere a ÚLTIMA coisa
+que o código faz, e não a primeira** — a régua de 26/10, outra vez.
+
 ## O que não entrava no histórico (26/10)
 
 Pedido do Rodrigo: *"Veja também se todos os históricos de conversas estão
