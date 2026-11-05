@@ -3416,7 +3416,11 @@ também ficaram: falam da conta da Anthropic, e não do assistente.
 painel não lê as frases, só as mostra na faixa.
 
 Prova: as conferências das seções 62, 87 e 101 que liam essas frases passaram
-a exigir o nome no começo de cada uma. RESULTADO_DAS_SABOTAGENS_DA_PONTE
+a exigir o nome no começo de cada uma. **3 sabotagens e 3 pegas**, todas
+limpas, rodadas em cópias e lidas uma a uma: a ponte de antes inteira (16
+reprovações, que são as frases de antes, e só elas: 2218 de 2234 passam); a
+recusa do resumo de volta para "A IA"; e a recusa da sugestão de volta para
+"sem o copiloto".
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
