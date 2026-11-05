@@ -3802,6 +3802,123 @@ sem isso, tirar `anon` do 041 não faria diferença ali, e faria lá.
 elas apagam os feriados e deixam o departamento aberto todo dia, das 00:00 às
 23:59. Sem isso, a seção reprovaria em todo feriado nacional.
 
+## O Painel de números que serve para cobrar (scripts 051 e 052, 05/11)
+
+Pedido do Rodrigo: *"A tela 'Painel' preciso de um dashboard de verdade, que
+seja inteligente e interativa. [...] Tem que fazer sentido também as
+informações que me ajudem a melhorar o atendimento, organizar a equipe e dar
+feedbacks e fazer cobranças de forma correta. Existe lá números sobre 'Há 3+
+dias', que na verdade deve ser 'Há +2 dias'."*
+
+A tela é do painel (ver o CLAUDE.md dele). Aqui ficam as duas contas novas do
+banco.
+
+### 051 — a carteira conta a partir de 2 dias
+
+`zorvin_relatorio_responsaveis` (011, com o conserto do 012) contava as
+atrasadas a partir de 3 dias. Desde 02/11 a tela "Esperando resposta" conta a
+partir de 2 (`DIAS_DAS_ATRASADAS`, no painel): a mesma pessoa tinha um número
+numa tela e outro na outra.
+
+- **Só a régua muda**: 2 dias de calendário, no fuso do escritório. A lista de
+  argumentos, as chaves e os recortes são os do 012;
+- **a resposta diz a régua** (`dias_atrasada`), e o rótulo da tela sai dela
+  ("Há +2 dias", a escrita do pedido). O banco sem o 051 não manda a chave, e
+  a tela diz "Há +3 dias", que é o que aquele banco contou;
+- **a conferência chama a função no papel de quem atende** (a regra 4), e
+  pergunta a régua.
+
+Medido em 05/11, só contando: 172 conversas com responsável esperavam há 3
+dias ou mais, e 197 há 2 ou mais; sem responsável, 349 e 350.
+
+### 052 — o prazo em horário de expediente
+
+**O 029 mede o tempo até a primeira resposta no RELÓGIO.** O cliente que
+escreve na sexta às 19h e é respondido na segunda às 8h05 entra com 61 horas.
+Medido em 05/11, só contando, nos protocolos que o cliente abriu nos últimos
+30 dias: a mediana no relógio era de 2 h 59 min, e boa parte dela é noite e
+fim de semana. Por essa conta, quem chega às 8h e responde a fila da noite
+parece a pessoa mais lenta da equipe.
+
+| peça | o quê |
+|---|---|
+| `zorvin_prazo_dos_protocolos(ids, agora)` | para cada protocolo que o CLIENTE abriu: os minutos de EXPEDIENTE até a primeira ação da equipe e até a primeira resposta, e o prazo do departamento |
+| `zorvin_relatorio_atendimentos` | a do 029, com a mesma lista de argumentos e as mesmas chaves, mais `prazo`, `antes.prazo`, `total.do_cliente`, a mediana e a média em expediente, `por_departamento`, `por_pessoa[].primeira_mediana_expediente`, `por_dia[].finalizados/no_prazo/prazo_julgados` e, em cada registro, o `prazo`, os `minutos_ate_acao` e o `limite` |
+
+- **A mesma régua do aviso de espera (041)**: o expediente é o da aba "Fora do
+  horário" (021, com os feriados), e o prazo é o da aba "Aviso de espera" (30
+  minutos se ninguém mudou). O aviso toca quando um cliente passa do prazo, e
+  o Painel conta quantos foram atendidos antes disso;
+- **"primeira ação" é a primeira resposta OU o Finalizar**, o que vier antes:
+  o "obrigado!" finalizado em 5 minutos foi atendido a tempo;
+- **quatro desfechos**: no prazo; atrasado (agiram depois do prazo); sem ação
+  fora do prazo; aguardando (ainda dentro dele). **No minuto em que chega ao
+  prazo, já é fora dele** (`>=`), como o aviso;
+- **uma conta só, feita de uma vez para todos**, e não um por um: medido em
+  produção, um por um, 724 protocolos levavam 530 ms. **A conferência compara
+  as duas escritas** (a de uma vez e a do 041), protocolo por protocolo, nos
+  dados de verdade dos últimos 30 dias. Em 05/11, em produção, só lendo: 419
+  protocolos, nenhuma diferença, 233 ms;
+- **o prazo é da EQUIPE, e não de uma pessoa** — e é decisão. Quando ninguém
+  agiu a tempo, quem finalmente responde não foi quem atrasou: quem pega a
+  conversa esquecida levaria a culpa de um atraso que é de todos. Com uma
+  pessoa escolhida, e para quem não administra, o prazo vem nulo;
+- **o período anterior compara o total e o prazo**, e não a mediana: o período
+  velho teve mais tempo para responder e finalizar os seus;
+- **`security invoker`**, como o 029: cada um vê só as conversas que vê.
+
+**A armadilha que a prova achou:** a contabilização chama a conta do prazo
+dentro de um `with`, e o banco não lê o lado de um `join` cujo outro lado veio
+vazio. Para quem não vê protocolo nenhum, a conta nem rodava, e uma conta
+quebrada (a leitura dos feriados tirada de quem atende) passava na
+conferência dizendo "sim". **A conferência chama a conta do prazo direto**, e
+é isso que a pega.
+
+Provas: seção 103 (o 051, 29 conferências) e seção 104 (o 052, 52), num
+Postgres de verdade, com a herança da Supabase e a chave da Uazapi fechada em
+`advogados`. A 104 confere as contas feitas à mão em 14 protocolos de outubro
+(o feriado de 12/10, o fuso de Manaus, o departamento sem semana, o
+departamento fechado), a borda do prazo, e as duas escritas da conta em 150
+protocolos sorteados, com semente fixa.
+
+**32 sabotagens: 30 pegas e 2 que vazam com razão**, rodadas em cópias e
+lidas uma a uma:
+
+- **o 051 (seção 103):** a régua de volta a 3 (16 reprovações); `>` no lugar
+  de `>=`; os dias contados em UTC, e não no fuso; sem dizer a régua; a
+  arquivada contando; o telefone desativado contando; o `to_jsonb` da linha do
+  telefone (21: a chave da Uazapi derruba a conta de quem atende); quem atende
+  vendo todos; sem tirar de `anon`; a conferência como dona do banco; sem a
+  guarda do 008; a ordem pelo nome;
+- **o 052 (seção 104):** `<=` no lugar de `<` (o de 30 minutos cravados
+  virando "no prazo"); `>` no lugar de `>=` (a borda do aviso); sem os
+  feriados; o fuso fixo; o departamento sem semana valendo zero; a ação só pela
+  resposta; o protocolo da equipe com prazo; o prazo para uma pessoa; o prazo
+  com poder de dono; sem tirar de `anon`; o "no prazo" do dia contando tudo; a
+  conferência sem chamar a conta direto; a mediana "em expediente" medida no
+  relógio; os registros sem o prazo; o período anterior sem o prazo; a
+  conferência sem a guarda de exceção (um fuso estranho desfaria o script); o
+  prazo padrão de 60; sem o teto dos 62 dias (10 de 150 protocolos sorteados
+  divergem do aviso);
+- **as duas que vazam, e por quê:**
+  - tirar o `grant` a quem entrou: o `create or replace` guarda as permissões
+    da função do 012, e numa função nova a herança da Supabase dá a quem
+    entrou. O `grant` é a segunda guarda, para um banco sem a herança;
+  - a conferência sem perguntar a régua: com o script certo, a função que ele
+    acabou de criar sempre responde 2. A pergunta existe para pegar o script
+    editado, e pega: com a régua de volta a 3, ela diz `false` (a sabotagem
+    da régua reprova ali).
+
+**Faltavam duas conferências, e as duas eram da prova:**
+
+- **a borda do prazo não tinha cena**, e foi achada ao montar a lista de
+  sabotagens, antes da rodada: o cliente que chega exatamente ao prazo (30 de
+  30 minutos) já é "sem ação", como no aviso. Entrou na 104g;
+- **a ordem pelo nome passava**, e foi a rodada que mostrou: na cena, a ordem
+  alfabética (Ana, Bia, Rodrigo) coincidia com a das atrasadas. Entrou o Aldo,
+  que vem antes no alfabeto e não tem nenhuma atrasada, e as 14 sabotagens do
+  051 foram rodadas de novo sobre a cena nova.
+
 ## Quem não entrou não alcança nada (script 032, 22/10)
 
 Pedido do Rodrigo, depois de ler comigo os avisos de segurança da Supabase:
