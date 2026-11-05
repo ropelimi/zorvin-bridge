@@ -9396,6 +9396,17 @@ setInterval(() => { transcreverOsQueChegaram().catch(() => {}); }, TRANSCRICAO_I
 // ============================================================
 const ANTHROPIC_URL = (process.env.ANTHROPIC_API_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
 const COPILOTO_MODELO = String(process.env.COPILOTO_MODELO || '').trim() || 'claude-haiku-5-5';
+// O NOME DO ASSISTENTE (05/11): o copiloto ganhou nome e rosto. Ele é o
+// QUAZAR, o assistente oficial do Zorvin, um pato malandro de óculos escuros
+// (o "quá" foi o primeiro som de aviso do Zorvin). O nome vai nas frases que
+// a TELA mostra, e mora aqui, num lugar só. O painel tem o dele
+// (src/assistente.js): trocar o nome é trocar os dois, e as frases dizem "o"
+// (um nome feminino pede trocar o artigo junto).
+// O que NÃO muda com o nome: as rotas (/copiloto/...), as tabelas
+// (zorvin_copiloto*), as variáveis (COPILOTO_*), o log e o que se pede à IA.
+// O nome é para a equipe: a sugestão sai como se fosse a atendente, e um
+// cliente nunca lê "Quazar".
+const NOME_DO_ASSISTENTE = 'Quazar';
 // QUANTAS MENSAGENS O COPILOTO LÊ: quarenta cobrem o vaivém de um atendimento.
 // A conversa de dois anos inteira custaria mais e diria menos sobre a próxima
 // resposta.
@@ -9790,11 +9801,11 @@ async function sugerirResposta(jwt, conversaId) {
   }
   if (r.corpo && r.corpo.stop_reason === 'refusal') {
     return { status: 502, corpo: { ok: false,
-      erro: 'A IA preferiu não sugerir uma resposta para esta conversa. Escreva a resposta sem o copiloto.' } };
+      erro: `O ${NOME_DO_ASSISTENTE} preferiu não sugerir uma resposta para esta conversa. Escreva a resposta sem ele.` } };
   }
   const sugestao = textoDaSugestao(r.corpo);
   if (!sugestao) {
-    return { status: 502, corpo: { ok: false, erro: 'A IA não devolveu sugestão desta vez. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não devolveu sugestão desta vez. Tente de novo.` } };
   }
   // SÓ NÚMEROS NO LOG: o que o cliente escreveu e o que a IA sugeriu não vão
   // para lá (a régua da mídia recebida).
@@ -9826,12 +9837,12 @@ async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
   if (manual.erro) {
     console.error('copiloto: não consegui ler o manual', manual.erro.message);
     return { falha: { status: 502, corpo: { ok: false,
-      erro: `Não consegui ler o manual do copiloto${manual.erro.code ? ` (código ${manual.erro.code})` : ''}. Tente de novo.` } } };
+      erro: `Não consegui ler o manual do ${NOME_DO_ASSISTENTE}${manual.erro.code ? ` (código ${manual.erro.code})` : ''}. Tente de novo.` } } };
   }
   if (licoes.erro) {
     console.error('copiloto: não consegui ler as lições', licoes.erro.message);
     return { falha: { status: 502, corpo: { ok: false,
-      erro: `Não consegui ler as lições do copiloto${licoes.erro.code ? ` (código ${licoes.erro.code})` : ''}. Tente de novo.` } } };
+      erro: `Não consegui ler as lições do ${NOME_DO_ASSISTENTE}${licoes.erro.code ? ` (código ${licoes.erro.code})` : ''}. Tente de novo.` } } };
   }
   // A MAIS NOVA VEIO PRIMEIRO (são as quarenta últimas); o modelo lê na ordem
   // em que a conversa aconteceu.
@@ -9942,10 +9953,10 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   }
   if (r.corpo && r.corpo.stop_reason === 'refusal') {
     return { status: 502, corpo: { ok: false,
-      erro: 'A IA preferiu não mudar esta mensagem. Faça a mudança à mão.' } };
+      erro: `O ${NOME_DO_ASSISTENTE} preferiu não mudar esta mensagem. Faça a mudança à mão.` } };
   }
   if (r.corpo && r.corpo.stop_reason === 'max_tokens') {
-    return { status: 502, corpo: { ok: false, erro: 'A IA não terminou de responder desta vez. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não terminou de responder desta vez. Tente de novo.` } };
   }
   let ajuste;
   try {
@@ -9953,10 +9964,10 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   } catch (e) {
     // SÓ O NOME DO ERRO: a mensagem do JSON.parse cita o texto da IA.
     console.error(`copiloto: a IA devolveu um formato que não entendi (${(e && e.name) || 'erro'}).`);
-    return { status: 502, corpo: { ok: false, erro: 'A IA devolveu uma resposta que não entendi. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} devolveu uma resposta num formato que o Zorvin não entendeu. Tente de novo.` } };
   }
   if (!ajuste.sugestao) {
-    return { status: 502, corpo: { ok: false, erro: 'A IA não devolveu a mensagem desta vez. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não devolveu a mensagem desta vez. Tente de novo.` } };
   }
 
   let licao = null;
@@ -10025,7 +10036,7 @@ app.post('/copiloto/sugerir', async (req, res) => {
     if (!conversaId) return res.status(400).json({ ok: false, erro: 'Informe a conversa.' });
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({ ok: false, erro:
-        'O copiloto ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).' });
+        `O ${NOME_DO_ASSISTENTE} ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).` });
     }
     const jwt = String(req.headers.authorization || '').slice(7).trim();
     const chave = `${usuario.id}:${conversaId}`;
@@ -10039,7 +10050,7 @@ app.post('/copiloto/sugerir', async (req, res) => {
   } catch (e) {
     const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
       ? 'A Anthropic demorou demais para responder. Tente de novo.'
-      : `O copiloto não conseguiu sugerir: ${String((e && e.message) || e).slice(0, 160)}`;
+      : `O ${NOME_DO_ASSISTENTE} não conseguiu sugerir: ${String((e && e.message) || e).slice(0, 160)}`;
     console.error('copiloto:', (e && e.message) || e);
     return res.status(502).json({ ok: false, erro: motivo });
   }
@@ -10054,7 +10065,7 @@ app.post('/copiloto/ajustar', async (req, res) => {
     const pedido = String((req.body && req.body.pedido) || '').trim();
     const mensagemDeAgora = String((req.body && req.body.sugestao) || '').trim();
     if (!conversaId) return res.status(400).json({ ok: false, erro: 'Informe a conversa.' });
-    if (!pedido) return res.status(400).json({ ok: false, erro: 'Escreva o que o copiloto deve mudar.' });
+    if (!pedido) return res.status(400).json({ ok: false, erro: `Escreva o que o ${NOME_DO_ASSISTENTE} deve mudar.` });
     if (pedido.length > COPILOTO_TETO_PEDIDO) {
       return res.status(400).json({ ok: false, erro: `O pedido passa de ${COPILOTO_TETO_PEDIDO} caracteres: escreva mais curto.` });
     }
@@ -10063,7 +10074,7 @@ app.post('/copiloto/ajustar', async (req, res) => {
     }
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({ ok: false, erro:
-        'O copiloto ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).' });
+        `O ${NOME_DO_ASSISTENTE} ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).` });
     }
     const jwt = String(req.headers.authorization || '').slice(7).trim();
     // O MESMO PEDIDO DUAS VEZES (o duplo clique) é uma ida só; outro pedido,
@@ -10079,7 +10090,7 @@ app.post('/copiloto/ajustar', async (req, res) => {
   } catch (e) {
     const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
       ? 'A Anthropic demorou demais para responder. Tente de novo.'
-      : `O copiloto não conseguiu mudar a mensagem: ${String((e && e.message) || e).slice(0, 160)}`;
+      : `O ${NOME_DO_ASSISTENTE} não conseguiu mudar a mensagem: ${String((e && e.message) || e).slice(0, 160)}`;
     console.error('copiloto:', (e && e.message) || e);
     return res.status(502).json({ ok: false, erro: motivo });
   }
@@ -10635,10 +10646,10 @@ async function resumirConversa(jwt, conversaId) {
     return { status: 502, corpo: { ok: false, erro: explicarFalhaDaAnthropic(r.status, r.corpo) } };
   }
   if (r.corpo && r.corpo.stop_reason === 'refusal') {
-    return { status: 502, corpo: { ok: false, erro: 'A IA preferiu não resumir esta conversa. Leia as últimas mensagens.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} preferiu não resumir esta conversa. Leia as últimas mensagens.` } };
   }
   if (r.corpo && r.corpo.stop_reason === 'max_tokens') {
-    return { status: 502, corpo: { ok: false, erro: 'O resumo não coube na resposta da IA desta vez. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O resumo não coube na resposta do ${NOME_DO_ASSISTENTE} desta vez. Tente de novo.` } };
   }
   let resumo;
   try {
@@ -10648,10 +10659,10 @@ async function resumirConversa(jwt, conversaId) {
     // devolveu, e ele fala do cliente.
     console.error(`resumo: a IA devolveu um formato que não entendi (${(e && e.name) || 'erro'}).`);
     return { status: 502, corpo: { ok: false,
-      erro: 'A IA devolveu o resumo num formato que o Zorvin não entendeu. Tente de novo.' } };
+      erro: `O ${NOME_DO_ASSISTENTE} devolveu o resumo num formato que o Zorvin não entendeu. Tente de novo.` } };
   }
   if (!resumo.quer && !resumo.combinado.length && !resumo.falta.length) {
-    return { status: 502, corpo: { ok: false, erro: 'A IA não devolveu resumo desta vez. Tente de novo.' } };
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não devolveu resumo desta vez. Tente de novo.` } };
   }
   // SÓ NÚMEROS NO LOG, a régua do copiloto: nem o que o cliente escreveu, nem
   // o que a IA resumiu.
@@ -10674,7 +10685,7 @@ app.post('/copiloto/resumir', async (req, res) => {
     if (!conversaId) return res.status(400).json({ ok: false, erro: 'Informe a conversa.' });
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(503).json({ ok: false, erro:
-        'O resumo ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).' });
+        `O ${NOME_DO_ASSISTENTE} ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).` });
     }
     const jwt = String(req.headers.authorization || '').slice(7).trim();
     const chave = `${usuario.id}:${conversaId}`;

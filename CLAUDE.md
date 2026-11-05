@@ -3385,6 +3385,39 @@ refeita inteira.
 planejadas não teriam o que pegar: a resposta cortada no teto, a chave
 recusada e o teto das notas.
 
+### O assistente se chama Quazar (05/11)
+
+Pedido do Rodrigo: o copiloto ganhou nome e rosto, como o mascote e o
+assistente oficial do Zorvin. É o **Quazar**, um pato malandro de óculos
+escuros (o "quá" foi o primeiro som de aviso do Zorvin). A tela está no
+CLAUDE.md do painel ("O Quazar — o assistente oficial do Zorvin").
+
+**Aqui mudaram só as frases que a ponte manda para a tela.** As de falha do
+"Sugerir resposta", do "Pedir uma mudança" e do "Resumir" diziam "a IA" ou "o
+copiloto", e passaram a dizer o nome: *"O Quazar preferiu não sugerir uma
+resposta para esta conversa. Escreva a resposta sem ele."*, *"O Quazar ainda
+não está ligado: falta a variável ANTHROPIC_API_KEY…"*, *"Não consegui ler o
+manual do Quazar…"*. A da mensagem refeita que vem num formato estranho dizia
+*"que não entendi"*, e passou a dizer *"num formato que o Zorvin não
+entendeu"*, como a do resumo.
+
+**O nome mora num lugar só** (`NOME_DO_ASSISTENTE`, ao lado de
+`COPILOTO_MODELO`). O painel tem o dele: trocar o nome é trocar os dois, e as
+frases dizem "o" (um nome feminino pede o artigo junto).
+
+**O que NÃO muda:** as rotas (`/copiloto/...`), as tabelas, as variáveis
+(`COPILOTO_*`), o log (que continua dizendo "copiloto:") e **o que se pede à
+IA**. O pedido continua dizendo "Você é o copiloto de uma equipe…": a
+sugestão sai como se fosse a atendente, e um cliente nunca pode ler "Quazar"
+numa mensagem. As frases de falha da Anthropic (a chave, o crédito, o modelo)
+também ficaram: falam da conta da Anthropic, e não do assistente.
+
+**A ponte de antes e o painel de agora convivem, e o contrário também**: o
+painel não lê as frases, só as mostra na faixa.
+
+Prova: as conferências das seções 62, 87 e 101 que liam essas frases passaram
+a exigir o nome no começo de cada uma. RESULTADO_DAS_SABOTAGENS_DA_PONTE
+
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
 Pedido do Rodrigo: o que o DataCrazy faz nas conversas, *"para facilitar a
