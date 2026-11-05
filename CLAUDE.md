@@ -3822,9 +3822,9 @@ numa tela e outro na outra.
 
 - **Só a régua muda**: 2 dias de calendário, no fuso do escritório. A lista de
   argumentos, as chaves e os recortes são os do 012;
-- **a resposta diz a régua** (`dias_atrasada`), e o rótulo da tela sai dela. O
-  banco sem o 051 não manda a chave, e a tela continua dizendo "Há 3+ dias",
-  que é o que aquele banco contou;
+- **a resposta diz a régua** (`dias_atrasada`), e o rótulo da tela sai dela
+  ("Há +2 dias", a escrita do pedido). O banco sem o 051 não manda a chave, e
+  a tela diz "Há +3 dias", que é o que aquele banco contou;
 - **a conferência chama a função no papel de quem atende** (a regra 4), e
   pergunta a régua.
 
