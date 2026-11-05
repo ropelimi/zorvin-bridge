@@ -46,6 +46,11 @@ Variáveis de ambiente (no Render):
   resposta da época mandava procurar erro de digitação num token que estava certo.
 - `VANTORO_LENTA_MS` — a partir de quantos milissegundos uma ida ao Vantoro merece
   uma linha no log. **Opcional**, padrão 3000. Ver "Quanto o Vantoro demora" abaixo.
+- `VANTORO_429_ESPERA_MS`, `VANTORO_429_TETO_MS` e `VANTORO_PAUSA_MS` — quanto
+  esperar quando a hospedagem do Vantoro pede uma pausa sem dizer quanto (padrão
+  2 s), acima de quanto não esperar (8 s) e quanto as rodadas automáticas ficam
+  paradas depois (1 min). **Opcionais**, para a bancada. Ver "O Vantoro pediu uma
+  pausa (429, 05/11)" abaixo.
 - `VANTORO_ACORDADO_DE`, `VANTORO_ACORDADO_ATE`, `VANTORO_ACORDADO_SABADO` e
   `VANTORO_ACORDADO_DOMINGO` — a janela em que a ponte mantém o Vantoro
   acordado (padrão: das 7h às 20h, sábado sim, domingo não). **Opcionais.** Ver
@@ -129,6 +134,76 @@ Duas coisas que valem lembrar antes de mexer nisso:
   mesmas duas reprovações, com os mesmos números. Hoje o servidor fica de pé
   até o fim da cena, derrubando cada conexão. **Porta "livre" que a prova solta
   não é de ninguém — é de quem pegar primeiro.**
+
+## O Vantoro pediu uma pausa (429, 05/11)
+
+Relato do Rodrigo, com a foto da ficha: *"Quando clico em Ficha no Vantoro,
+está apresentando esse erro"* — **"O Vantoro respondeu 429 com uma página
+HTML, em vez dos dados."** Voltou sozinho, e voltou a acontecer às 18:10.
+
+**Quem devolve esse 429 não é o Vantoro.** Lido no código dele em 05/11: o único
+429 do Django é o do limite de tentativas de senha (`autenticar`, em
+`core/api.py`), e ele vem em JSON. Uma PÁGINA com 429 é a hospedagem: a Render
+limita os pedidos que chegam a cada serviço, e o limite do plano gratuito, onde
+o Vantoro está, é bem mais baixo que o dos pagos. Todo pedido do Zorvin ao
+Vantoro sai da ponte, de um endereço só: as fichas de oito pessoas, as buscas e
+as rodadas automáticas somam ali. **Não deu para conferir na fonte**: a página
+de limites da Render e o painel do Vantoro não abrem desta sessão (o proxy
+recusa os dois), e o pedido que levou o 429 não fica guardado em lugar nenhum.
+
+| o caso | a ponte |
+|---|---|
+| leitura (GET) com 429 em página | espera o que a hospedagem pediu (`Retry-After`), ou 2 s sem ele, e tenta **uma** vez |
+| a hospedagem pede mais de 8 s | não espera: quem está olhando a ficha não espera tanto, e a frase diz o que fazer |
+| gravação (POST, PATCH, DELETE) | não repete: o 429 é recusa antes de processar, mas a régua da gravação é a do sono, logo abaixo — quem pediu decide |
+| o 429 de novo | a frase: *"O Vantoro está recebendo pedidos demais agora, e a hospedagem dele pediu uma pausa (429). Espere um minuto e tente de novo…"* |
+| o 429 em JSON (o da senha) | passa como veio: não espera, não tenta, não pausa nada |
+
+**As rodadas automáticas ficam paradas** depois de um 429 (`vantoroEmPausa`):
+a da equipe e das permissões, a dos avisos de audiência, a das respostas a
+eles e a batida que mantém o Vantoro acordado. Por um minuto, ou pelo que a
+hospedagem pediu, se for mais. O que é de quem está atendendo passa na frente:
+a ficha continua sendo perguntada na pausa. **O 429 dos avisos de audiência
+também pausa**: é o mesmo serviço.
+
+**O log diz quem recusou**, uma linha por minuto no máximo: o caminho (sem os
+valores da consulta: ela leva telefone, CPF e nome), o `retry-after`, o
+`server`, o `cf-ray`, o tipo e o título da página. Sem isso, a próxima vez seria
+outra investigação às cegas. **A janela `/vantoro/tempos` conta os pedidos de
+pausa** e diz até quando as rodadas estão paradas.
+
+**O conserto que não depende disto é pago, e é decisão do Rodrigo:** o
+Vantoro num plano pago da Render, que tem o limite mais alto e não dorme. Esta
+mudança faz o Zorvin pedir menos e se refazer sozinho do soluço; ela não muda o
+limite.
+
+**Fica de fora da prova, e é decisão:** a pausa nas respostas aos avisos e na
+batida que acorda o Vantoro. É a mesma pergunta de uma linha das outras duas
+rodadas, e a cena de cada uma pediria um aviso plantado e esperado ou uma
+janela de dez minutos.
+
+Prova: seção 105, 30 conferências, com o Vantoro de mentira devolvendo a página
+da Render (`recusaAsPrimeiras`, `recusaRetryAfter`, `recusaSo`).
+
+**18 sabotagens e 18 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma:
+
+- a ponte de antes inteira (19 reprovações — é o relato reproduzido);
+- **a espera:** sem esperar e tentar de novo; sem o `Retry-After`; tentando
+  uma segunda vez (o laço); sem o teto de 8 s; repetindo também a gravação;
+- **a frase:** sem a frase do 429 (volta "uma página HTML, em vez dos
+  dados"); o 429 em JSON tratado como pausa da hospedagem;
+- **a pausa:** sem pausar as rodadas; a pausa sem o que a hospedagem pediu;
+  sem a guarda na rodada da equipe; sem a guarda nos avisos; os avisos sem
+  anotar o 429;
+- **o log e a janela:** o log com a consulta inteira (o telefone procurado
+  ia junto); sem o freio de um minuto; sem a pista de quem recusou; a janela
+  dos tempos sem as recusas, em texto e em JSON.
+
+**A primeira escrita da cena 105h contava a rodada que já estava no meio**
+quando o 429 chegou, e reprovou uma vez em três. A pausa vale para a rodada
+seguinte, e não para a que já começou: hoje a cena conta depois de a rodada em
+voo terminar, e passou três vezes seguidas antes das sabotagens.
 
 ## A entrada (login) — e por que ela tem dois caminhos
 

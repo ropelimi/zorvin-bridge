@@ -6186,6 +6186,86 @@ function desdeQuandoEmPortugues(desde = CRONOMETRO_DESDE, agora = new Date()) {
   return `${horas}h${String(minutos % 60).padStart(2, '0')}`;
 }
 
+// ------------------------------------------------------------
+//  O VANTORO PEDIU UMA PAUSA (429) — esperar, tentar UMA vez, e anotar
+//
+//  Relato do Rodrigo em 05/11, com a foto da ficha: "O Vantoro respondeu 429
+//  com uma página HTML, em vez dos dados." Voltou sozinho minutos depois, e
+//  voltou a acontecer às 18:10.
+//
+//  QUEM DEVOLVE ESSE 429 NÃO É O VANTORO. Lido no código dele em 05/11: o
+//  único 429 do Django é o do limite de tentativas de senha (`autenticar`, em
+//  core/api.py), e ele vem em JSON. Uma PÁGINA com 429 é a hospedagem: a
+//  Render limita o tráfego que chega a cada serviço, e o limite do plano
+//  gratuito, onde o Vantoro está, é bem mais baixo. Todo pedido do Zorvin ao
+//  Vantoro sai da ponte, de um endereço só — a ficha de oito pessoas e as
+//  rodadas automáticas somam ali.
+//
+//  O QUE A PONTE FAZ, e cada parte tem um porquê:
+//
+//    * a leitura (GET) espera o que a hospedagem pediu (`Retry-After`, ou 2 s
+//      sem ele) e tenta UMA vez. É seguro: o 429 é uma recusa ANTES de o
+//      Vantoro processar, e ler duas vezes não muda nada. Se a hospedagem
+//      pedir mais de 8 s, não se tenta: quem está olhando a ficha não espera
+//      tanto, e a frase de volta diz o que fazer;
+//    * a gravação (POST, PUT, DELETE) não é repetida aqui, pela régua do sono
+//      logo abaixo: quem pediu decide;
+//    * as rodadas automáticas que falam com o Vantoro (os avisos de audiência,
+//      as respostas a eles, as permissões, a batida que o mantém acordado)
+//      ficam paradas por um minuto (ou o que a hospedagem pedir, se for mais):
+//      o que é de quem está atendendo vem primeiro;
+//    * o log diz quem recusou — o `server`, o `cf-ray`, o `Retry-After` e o
+//      título da página —, uma linha por minuto no máximo. Sem isso, a próxima
+//      vez seria outra investigação às cegas. Nunca a consulta do endereço:
+//      ela leva telefone, CPF e nome.
+// ------------------------------------------------------------
+const VANTORO_429_ESPERA_MS = Number(process.env.VANTORO_429_ESPERA_MS) || 2000;
+const VANTORO_429_TETO_MS = Number(process.env.VANTORO_429_TETO_MS) || 8000;
+const VANTORO_PAUSA_MS = Number(process.env.VANTORO_PAUSA_MS) || 60 * 1000;
+let vantoroEmPausaAte = 0;
+const recusasDoVantoro = { total: 0, ultima: null, calados: 0, ultimoLog: 0 };
+
+/** Quanto a hospedagem pediu para esperar, em ms — ou null, se não disse. */
+function esperaPedida(valor, agora = Date.now()) {
+  const texto = String(valor == null ? '' : valor).trim();
+  if (!texto) return null;
+  if (/^\d+(\.\d+)?$/.test(texto)) return Math.round(Number(texto) * 1000);
+  const quando = Date.parse(texto);
+  return Number.isFinite(quando) ? Math.max(0, quando - agora) : null;
+}
+
+/** As rodadas automáticas perguntam isto antes de falar com o Vantoro. */
+function vantoroEmPausa(agora = Date.now()) {
+  return agora < vantoroEmPausaAte;
+}
+
+function anotarRecusaDoVantoro(r, texto, metodo, caminho) {
+  const agora = Date.now();
+  const espera = esperaPedida(r.headers.get('retry-after'), agora);
+  vantoroEmPausaAte = Math.max(vantoroEmPausaAte, agora + Math.max(VANTORO_PAUSA_MS, espera || 0));
+  recusasDoVantoro.total += 1;
+  recusasDoVantoro.ultima = new Date(agora).toISOString();
+  if (agora - recusasDoVantoro.ultimoLog < 60 * 1000) {
+    recusasDoVantoro.calados += 1;
+    return espera;
+  }
+  const titulo = (/<title[^>]*>([^<]{0,120})/i.exec(String(texto || '')) || [])[1];
+  const pista = [
+    `retry-after: ${r.headers.get('retry-after') || '—'}`,
+    `server: ${r.headers.get('server') || '—'}`,
+    `cf-ray: ${r.headers.get('cf-ray') || '—'}`,
+    `tipo: ${(r.headers.get('content-type') || '—').split(';')[0]}`,
+    `título: ${titulo ? `"${titulo.trim()}"` : '—'}`,
+  ].join('; ');
+  const calados = recusasDoVantoro.calados
+    ? ` (e mais ${recusasDoVantoro.calados} recusa(s) no último minuto)` : '';
+  console.warn(`Vantoro: 429 em ${chaveDoTempo('', metodo, caminho).trim()} — ${pista}${calados}. `
+    + `As rodadas automáticas ao Vantoro ficam paradas até ${new Date(vantoroEmPausaAte).toISOString()}.`);
+  recusasDoVantoro.ultimoLog = agora;
+  recusasDoVantoro.calados = 0;
+  return espera;
+}
+
 async function chamarVantoro(caminho, opcoes = {}) {
   if (!VANTORO_URL || !VANTORO_TOKEN) {
     return { status: 503, corpo: { ok: false, erro: 'Integração com o Vantoro não configurada (VANTORO_API_URL/VANTORO_API_TOKEN).' } };
@@ -6245,6 +6325,25 @@ async function chamarVantoro(caminho, opcoes = {}) {
         r = r2; texto0 = texto2;
       } catch (_e) { /* fica com a primeira resposta, que já explica o que houve */ }
     }
+
+    // O 429 SEM JSON: a hospedagem pediu uma pausa. Ver "O VANTORO PEDIU UMA
+    // PAUSA". O 429 em JSON é do próprio Vantoro (o das tentativas de senha), e
+    // passa como veio: esperar ali não muda a resposta.
+    const hospedagemPediuPausa = r.status === 429
+      && (() => { try { JSON.parse(texto0); return false; } catch (_e) { return true; } })();
+    if (hospedagemPediuPausa) {
+      const espera = anotarRecusaDoVantoro(r, texto0, metodo, caminho);
+      const ms = espera == null ? VANTORO_429_ESPERA_MS : espera;
+      if ((metodo === 'GET' || metodo === 'HEAD') && ms <= VANTORO_429_TETO_MS) {
+        await new Promise((ok) => setTimeout(ok, ms));
+        try {
+          const r2 = await uma();
+          const texto2 = await r2.text().catch(() => '');
+          r = r2; texto0 = texto2;
+          if (r.status === 429 && !/^\s*[{[]/.test(texto0)) anotarRecusaDoVantoro(r, texto0, metodo, caminho);
+        } catch (_e) { /* fica com a primeira resposta, que já diz o que houve */ }
+      }
+    }
   }
 
   // O CORPO SÓ PODE SER LIDO UMA VEZ. Chamar `r.json()` e, ao falhar, tentar
@@ -6286,6 +6385,16 @@ async function chamarVantoro(caminho, opcoes = {}) {
 function explicarRespostaNaoJson(status, cru) {
   const texto = String(cru || '').trim();
   const ehHtml = /^\s*<(!doctype|html|head|body)/i.test(texto);
+
+  // O 429 SEM JSON é a hospedagem do Vantoro pedindo uma pausa (o do próprio
+  // Vantoro, o das tentativas de senha, vem em JSON e nem chega aqui). A ponte
+  // já esperou e tentou uma vez, e a frase diz o que fazer: esperar. Ver "O
+  // VANTORO PEDIU UMA PAUSA", acima de `chamarVantoro`.
+  if (status === 429) {
+    return 'O Vantoro está recebendo pedidos demais agora, e a hospedagem dele pediu '
+         + 'uma pausa (429). Espere um minuto e tente de novo: não é a configuração '
+         + 'da ponte nem do Zorvin.';
+  }
 
   // O caso mais comum e o mais confundido: a hospedagem devolve uma página no
   // lugar do serviço. Serviço dormindo, fora do ar, suspenso por consumo, ou um
@@ -6409,7 +6518,9 @@ app.get('/vantoro/tempos', (req, res) => {
   if (String(req.query.formato || '') === 'json') {
     return res.json({ ok: true, desde: CRONOMETRO_DESDE.toISOString(),
                       de_pe_ha: desdeQuandoEmPortugues(),
-                      lenta_a_partir_de_ms: VANTORO_LENTA_MS, linhas });
+                      lenta_a_partir_de_ms: VANTORO_LENTA_MS, linhas,
+                      recusas_429: { total: recusasDoVantoro.total, ultima: recusasDoVantoro.ultima,
+                                     pausa_ate: vantoroEmPausa() ? new Date(vantoroEmPausaAte).toISOString() : null } });
   }
 
   const cabecalho = ['onde', 'chamadas', 'típico', '9 em 10', 'pior', 'lentas', 'falhas'];
@@ -6440,6 +6551,13 @@ app.get('/vantoro/tempos', (req, res) => {
     linhas.length ? alinhar(cabecalho) : 'Nenhuma chamada ao Vantoro desde que a ponte subiu.',
     ...(linhas.length ? [largura.map((n) => '-'.repeat(n)).join('  ')] : []),
     ...corpo.map(alinhar),
+    '',
+    // O 429 é dito à parte: é a hospedagem do Vantoro recusando, e não um
+    // tempo. Ver "O VANTORO PEDIU UMA PAUSA".
+    recusasDoVantoro.total
+      ? `Pedidos de pausa (429) da hospedagem do Vantoro: ${recusasDoVantoro.total}, o último em ${recusasDoVantoro.ultima}.`
+        + (vantoroEmPausa() ? ` As rodadas automáticas estão paradas até ${new Date(vantoroEmPausaAte).toISOString()}.` : '')
+      : 'Nenhum pedido de pausa (429) da hospedagem do Vantoro desde que a ponte subiu.',
   ].join('\n');
   res.type('text/plain; charset=utf-8').send(texto);
 });
@@ -8087,6 +8205,9 @@ let rodadaRodando = false;
 
 async function rodada() {
   if (desligando) return;   // saindo do ar: a próxima ponte faz esta rodada
+  // O Vantoro pediu uma pausa (429): a lista de gente fica para a próxima
+  // rodada, e a ficha de quem está atendendo passa na frente.
+  if (VANTORO_URL && vantoroEmPausa()) return;
   if (rodadaRodando) {
     console.log('Rodada: a anterior ainda está correndo — esta fica para o próximo intervalo.');
     return;
@@ -11835,8 +11956,12 @@ async function chamarAudiencias(caminho, opcoes = {}) {
       ...(opcoes.headers || {}),
     },
   }, 20000);
+  const texto = await r.text().catch(() => '');
+  // O 429 da hospedagem vale para os avisos também: o mesmo serviço, a mesma
+  // pausa. Aqui não se tenta de novo — quem chama já tenta na rodada seguinte.
+  if (r.status === 429 && !/^\s*[{[]/.test(texto)) anotarRecusaDoVantoro(r, texto, String(opcoes.method || 'GET').toUpperCase(), caminho);
   let corpo = null;
-  try { corpo = await r.json(); } catch (_e) { corpo = null; }
+  try { corpo = JSON.parse(texto); } catch (_e) { corpo = null; }
   return { status: r.status, corpo };
 }
 
@@ -11989,6 +12114,7 @@ async function contatoDoAviso(destino) {
 let avisosRodando = false;
 async function buscarAvisosDeAudiencia() {
   if (desligando) return;   // saindo do ar: os avisos continuam pendentes no Vantoro
+  if (vantoroEmPausa()) return;   // o Vantoro pediu uma pausa (429): os avisos esperam lá
   if (avisosRodando) return;
   avisosRodando = true;
   try {
@@ -12299,6 +12425,7 @@ async function lerRespostaComIA(aviso, resposta) {
 
 async function repassarRespostasDosAvisos() {
   if (desligando || respostasRodando || !VANTORO_AUDIENCIAS || !VANTORO_TOKEN) return;
+  if (vantoroEmPausa()) return;   // o Vantoro pediu uma pausa (429): as respostas esperam
   respostasRodando = true;
   try {
     const agora = Date.now();
@@ -12507,6 +12634,8 @@ function dentroDoHorarioDeTrabalho(agora = new Date()) {
 
 async function manterVantoroAcordado() {
   if (!VANTORO_URL || !dentroDoHorarioDeTrabalho()) return;
+  // Pedindo pausa, ele está acordado: a batida seria só mais um pedido.
+  if (vantoroEmPausa()) return;
   try {
     // O /ping do Vantoro não pede token: responde 200 vazio, sem banco e sem
     // sessão. Mandar o token aqui seria expô-lo numa chamada que não precisa.
