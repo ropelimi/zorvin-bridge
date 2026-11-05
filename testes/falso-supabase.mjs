@@ -684,7 +684,13 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     desfechosQueFalham = 0,
                                     // A FICHA que `GET /clientes/:id` devolve — é dela que a ponte
                                     // lê o "antes" de uma edição do cadastro.
-                                    ficha = null } = {}) {
+                                    ficha = null,
+                                    // A HOSPEDAGEM PEDINDO PAUSA (05/11): as primeiras N chamadas
+                                    // (só as do caminho que casar com `recusaSo`, se vier) levam o
+                                    // 429 em PÁGINA que a Render devolve, com o `Retry-After` que
+                                    // a cena escolher. O 429 do próprio Vantoro vem em JSON, e é
+                                    // outra coisa: o da senha.
+                                    recusaAsPrimeiras = 0, recusaRetryAfter = null, recusaSo = null } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -705,6 +711,14 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     recebidas.push({ metodo: req.method, caminho: url.pathname, corpo: json,
                      busca: url.search || "", autorizacao: req.headers.authorization || null });
     if (demora) await new Promise((r) => setTimeout(r, demora));
+    if (recusaAsPrimeiras > 0 && (!recusaSo || recusaSo.test(url.pathname))) {
+      recusaAsPrimeiras -= 1;
+      const cab = { "Content-Type": "text/html; charset=utf-8", server: "cloudflare", "cf-ray": "falso-429-GRU" };
+      if (recusaRetryAfter != null) cab["Retry-After"] = String(recusaRetryAfter);
+      res.writeHead(429, cab);
+      return res.end("<!DOCTYPE html><html><head><title>Too Many Requests</title></head>"
+        + "<body>Too many requests</body></html>");
+    }
     if (aindaDormindo > 0) {
       aindaDormindo -= 1;
       res.writeHead(502, { "Content-Type": "text/html" });

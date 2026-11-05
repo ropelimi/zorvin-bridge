@@ -21192,5 +21192,222 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
   }
 }
 
+// ==================================================================
+//  105. O VANTORO PEDIU UMA PAUSA (429) — esperar, tentar uma vez, anotar
+// ==================================================================
+//
+//  Relato do Rodrigo em 05/11, com a foto da ficha: "O Vantoro respondeu 429
+//  com uma página HTML, em vez dos dados." Voltou sozinho, e voltou às 18:10.
+//  O 429 em PÁGINA é a hospedagem do Vantoro (a Render) limitando os pedidos;
+//  o do próprio Vantoro, o da senha, vem em JSON. O Vantoro de mentira devolve
+//  a página que a Render devolve, com o `Retry-After` que a cena escolher.
+{
+  console.log("\n105. O Vantoro pediu uma pausa (429)");
+  const SENHA = "senha-dos-tempos";
+  const FICHA = "/vantoro/cliente?telefone=5511977776666";
+  const pedir = (t, caminho = FICHA, opcoes = {}) => fetch(`http://127.0.0.1:${t.porta}${caminho}`,
+    { ...opcoes, headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json", ...(opcoes.headers || {}) } });
+  const buscas = (t) => t.van.recebidas.filter((x) => x.caminho === "/clientes/buscar").length;
+  const ler = async (r) => { try { return await r.json(); } catch (_) { return {}; } };
+  // As rodadas automáticas ficam para daqui a uma hora, menos nas cenas que as
+  // medem: a conta de pedidos ao Vantoro é o assunto de cada cena.
+  const QUIETO = { AVISOS_INTERVALO_MS: "3600000", PERMISSOES_PRIMEIRA_MS: "3600000",
+                   PERMISSOES_INTERVALO_MS: "3600000", VANTORO_ACORDADO_ATE: "0" };
+
+  // 105a — com o Retry-After, a ponte espera o que a hospedagem pediu e tenta uma vez.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "100" },
+      { vantoro: { recusaAsPrimeiras: 1, recusaRetryAfter: 1 } });
+    try {
+      const comecou = Date.now();
+      const r = await pedir(t);
+      const levou = Date.now() - comecou;
+      ok("105a a ficha que levou um 429 chega assim mesmo, na segunda tentativa", r.status === 200, `veio ${r.status}`);
+      ok("105a o Vantoro foi perguntado duas vezes, e não uma ou três", buscas(t) === 2, `${buscas(t)} buscas`);
+      ok("105a e a ponte esperou o segundo que a hospedagem pediu (Retry-After), e não os 100 ms do padrão",
+         levou >= 950, `levou ${levou} ms`);
+    } finally { await t.parar(); }
+  }
+
+  // 105b — sem o Retry-After, vale a espera padrão.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "600" },
+      { vantoro: { recusaAsPrimeiras: 1 } });
+    try {
+      const comecou = Date.now();
+      const r = await pedir(t);
+      const levou = Date.now() - comecou;
+      ok("105b sem o Retry-After, a ponte espera o padrão e a ficha chega", r.status === 200 && buscas(t) === 2,
+         `veio ${r.status}, ${buscas(t)} buscas`);
+      ok("105b a espera foi a do padrão (600 ms)", levou >= 550, `levou ${levou} ms`);
+    } finally { await t.parar(); }
+  }
+
+  // 105c — dois 429 seguidos: uma tentativa só, e a frase de esperar.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "100" },
+      { vantoro: { recusaAsPrimeiras: 5, recusaRetryAfter: 0 } });
+    try {
+      const r = await pedir(t);
+      const c = await ler(r);
+      ok("105c com o 429 de novo, a ponte tenta UMA vez só, e não fica em laço", buscas(t) === 2, `${buscas(t)} buscas`);
+      ok("105c a ficha diz que o Vantoro pediu uma pausa, com o 429",
+         r.status === 429 && /pedidos demais/.test(c.erro || "") && /429/.test(c.erro || ""), `${r.status} ${c.erro}`);
+      ok("105c e diz o que fazer: esperar um minuto", /Espere um minuto/.test(c.erro || ""), c.erro);
+      ok("105c e não diz \"página HTML em vez dos dados\", que não diz o que fazer",
+         !/em vez dos dados/.test(c.erro || ""), c.erro);
+    } finally { await t.parar(); }
+  }
+
+  // 105d — a hospedagem pede mais do que o teto: a ponte não segura quem está olhando.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_TETO_MS: "2000", VANTORO_PAUSA_MS: "1000", IMPORT_TOKEN: SENHA },
+      { vantoro: { recusaAsPrimeiras: 5, recusaRetryAfter: 30 } });
+    try {
+      const comecou = Date.now();
+      const r = await pedir(t);
+      const levou = Date.now() - comecou;
+      const c = await ler(r);
+      ok("105d pedindo 30 s, acima do teto, a ponte não espera nem tenta de novo",
+         buscas(t) === 1 && levou < 1500, `${buscas(t)} buscas, levou ${levou} ms`);
+      ok("105d e devolve a frase de esperar na hora", /Espere um minuto/.test(c.erro || ""), c.erro);
+      // A PAUSA DAS RODADAS DURA O QUE A HOSPEDAGEM PEDIU, quando é mais que o
+      // padrão: aqui o padrão é 1 s, e ela pediu 30.
+      const j = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}&formato=json`)).json();
+      const falta = j?.recusas_429?.pausa_ate ? Date.parse(j.recusas_429.pausa_ate) - Date.now() : -1;
+      ok("105d e as rodadas automáticas ficam paradas pelos 30 s pedidos, e não pelo 1 s do padrão",
+         falta > 25000 && falta <= 30500, `faltam ${falta} ms`);
+    } finally { await t.parar(); }
+  }
+
+  // 105e — uma gravação não é repetida: o cadastro poderia nascer duas vezes.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "100" },
+      { vantoro: { recusaAsPrimeiras: 1, recusaRetryAfter: 0 } });
+    try {
+      const r = await pedir(t, "/vantoro/cliente", { method: "POST", body: JSON.stringify({ nome: "PRE CADASTRO" }) });
+      const c = await ler(r);
+      const posts = t.van.recebidas.filter((x) => x.metodo === "POST" && x.caminho === "/clientes").length;
+      ok("105e o pré-cadastro que levou 429 NÃO é mandado de novo", posts === 1, `${posts} pedidos`);
+      ok("105e e a frase diz para esperar", /Espere um minuto/.test(c.erro || ""), c.erro);
+    } finally { await t.parar(); }
+  }
+
+  // 105f — o log diz quem recusou, e não o que foi perguntado.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "100" },
+      { vantoro: { recusaAsPrimeiras: 2, recusaRetryAfter: 0 } });
+    try {
+      await pedir(t);
+      await espera(200);
+      const log = t.registro.join("");
+      const linha = log.split("\n").find((l) => /Vantoro: 429/.test(l)) || "";
+      ok("105f o log diz o 429 com o caminho, o servidor, o cf-ray, o Retry-After e o título da página",
+         /\/clientes\/buscar\?telefone/.test(linha) && /server: cloudflare/.test(linha) && /cf-ray: falso-429-GRU/.test(linha)
+         && /retry-after: 0/.test(linha) && /"Too Many Requests"/.test(linha), linha);
+      ok("105f e não leva o telefone que foi procurado", !/5511977776666/.test(log), linha);
+      const linhas = log.split("\n").filter((l) => /Vantoro: 429/.test(l)).length;
+      ok("105f os dois 429 do mesmo minuto são UMA linha no log", linhas === 1, `${linhas} linhas`);
+    } finally { await t.parar(); }
+  }
+
+  // 105g — as rodadas automáticas param durante a pausa, e voltam depois dela.
+  //
+  // O contraste vem primeiro: SEM 429, na mesma janela, a ponte pergunta pelos
+  // avisos e pela lista de gente. Sem ele, uma ponte que nunca roda as rodadas
+  // passaria pela cena.
+  {
+    const RODADAS = { AVISOS_INTERVALO_MS: "400", PERMISSOES_PRIMEIRA_MS: "300", PERMISSOES_INTERVALO_MS: "400",
+                      VANTORO_ACORDADO_ATE: "0", VANTORO_429_ESPERA_MS: "100", VANTORO_PAUSA_MS: "4000" };
+    const rodadasEntre = (t, de, ate) => t.van.recebidas.slice(de, ate)
+      .filter((x) => /\/avisos\/pendentes$/.test(x.caminho) || x.caminho === "/usuarios").length;
+    {
+      const t = await subirTudo(RODADAS, { vantoro: {} });
+      try {
+        await espera(6500);   // a primeira rodada dos avisos sai 4 s depois de subir
+        const n = t.van.recebidas.length;
+        await espera(1500);
+        ok("105g sem 429, as rodadas perguntam pelos avisos e pela equipe a cada 400 ms (o contraste)",
+           rodadasEntre(t, n) >= 3, `${rodadasEntre(t, n)} rodadas em 1,5 s`);
+      } finally { await t.parar(); }
+    }
+    {
+      const t = await subirTudo(RODADAS, { vantoro: { recusaAsPrimeiras: 2, recusaRetryAfter: 0, recusaSo: /^\/clientes\/buscar$/ } });
+      try {
+        await espera(6500);
+        await pedir(t);                       // os dois 429 da ficha: a pausa começa aqui
+        const n = t.van.recebidas.length;
+        await espera(2500);
+        ok("105g depois do 429 da ficha, nenhuma rodada automática fala com o Vantoro na pausa",
+           rodadasEntre(t, n) === 0, `${rodadasEntre(t, n)} rodadas na pausa`);
+        const r = await pedir(t);
+        ok("105g e a ficha de quem está atendendo continua passando na pausa", r.status === 200, `veio ${r.status}`);
+        const m = t.van.recebidas.length;
+        await espera(3000);
+        ok("105g passada a pausa, as rodadas voltam", rodadasEntre(t, m) >= 2, `${rodadasEntre(t, m)} rodadas depois`);
+      } finally { await t.parar(); }
+    }
+  }
+
+  // 105h — o 429 dos avisos de audiência também pausa as outras rodadas.
+  //
+  // A rodada da equipe roda de 400 em 400 ms desde que a ponte sobe: antes do
+  // 429 ela pergunta (o contraste), e depois dele, até o fim da pausa, não.
+  {
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "3600000", PERMISSOES_PRIMEIRA_MS: "300",
+                                PERMISSOES_INTERVALO_MS: "400", VANTORO_ACORDADO_ATE: "0", VANTORO_PAUSA_MS: "3000" },
+      { vantoro: { recusaAsPrimeiras: 1, recusaRetryAfter: 0, recusaSo: /\/avisos\/pendentes$/ } });
+    try {
+      await espera(4600);   // a rodada dos avisos sai aos 4 s, e leva o 429
+      const lista = t.van.recebidas;
+      const i429 = lista.findIndex((x) => /\/avisos\/pendentes$/.test(x.caminho));
+      const equipeAntes = lista.slice(0, Math.max(0, i429)).filter((x) => x.caminho === "/usuarios").length;
+      // A RODADA QUE JÁ ESTAVA NO MEIO termina: a pausa vale para a seguinte.
+      // Contar desde o 429 pegaria a dela, um passo depois. Aqui já se
+      // passaram uns 600 ms dele, e o Vantoro de mentira responde na hora.
+      const n0 = lista.length;
+      await espera(2000);
+      const equipeNaPausa = lista.slice(n0).filter((x) => x.caminho === "/usuarios").length;
+      ok("105h a rodada dos avisos levou o 429", i429 >= 0 && lista.filter((x) => /\/avisos\/pendentes$/.test(x.caminho)).length === 1,
+         `índice ${i429}`);
+      ok("105h antes do 429, a rodada da equipe perguntava ao Vantoro (o contraste)", equipeAntes >= 3, `${equipeAntes} pedidos`);
+      ok("105h e depois dele, na pausa, não pergunta mais", i429 >= 0 && equipeNaPausa === 0, `${equipeNaPausa} pedidos na pausa`);
+      const n = lista.length;
+      await espera(2500);
+      const depois = lista.slice(n).filter((x) => x.caminho === "/usuarios").length;
+      ok("105h passada a pausa, a rodada da equipe volta", depois >= 1, `${depois} pedidos`);
+    } finally { await t.parar(); }
+  }
+
+  // 105i — a janela dos tempos conta os pedidos de pausa.
+  {
+    const t = await subirTudo({ ...QUIETO, IMPORT_TOKEN: SENHA, VANTORO_429_ESPERA_MS: "100", VANTORO_PAUSA_MS: "60000" },
+      { vantoro: { recusaAsPrimeiras: 1, recusaRetryAfter: 0 } });
+    try {
+      const antes = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}`)).text();
+      ok("105i antes de qualquer 429, a janela diz que não houve nenhum", /Nenhum pedido de pausa \(429\)/.test(antes), antes.slice(-200));
+      await pedir(t);
+      const texto = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}`)).text();
+      ok("105i depois, ela conta o pedido de pausa e diz até quando as rodadas param",
+         /Pedidos de pausa \(429\) da hospedagem do Vantoro: 1/.test(texto) && /paradas até/.test(texto), texto.slice(-300));
+      const j = await (await fetch(`http://127.0.0.1:${t.porta}/vantoro/tempos?token=${SENHA}&formato=json`)).json();
+      ok("105i e em JSON também", j?.recusas_429?.total === 1 && !!j?.recusas_429?.pausa_ate, JSON.stringify(j?.recusas_429));
+    } finally { await t.parar(); }
+  }
+
+  // 105j — o 429 do PRÓPRIO Vantoro vem em JSON, e passa como veio.
+  {
+    const t = await subirTudo({ ...QUIETO, VANTORO_429_ESPERA_MS: "100" },
+      { vantoro: { naoJson: { status: 429, tipo: "application/json", corpo: JSON.stringify({ ok: false, erro: "Muitas tentativas. Aguarde." }) } } });
+    try {
+      const r = await pedir(t);
+      const c = await ler(r);
+      ok("105j o 429 em JSON do Vantoro chega com a frase dele", /Muitas tentativas/.test(c.erro || ""), c.erro);
+      ok("105j e não é tentado de novo nem anotado como pausa da hospedagem",
+         buscas(t) === 1 && !/Vantoro: 429/.test(t.registro.join("")), `${buscas(t)} buscas`);
+    } finally { await t.parar(); }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
