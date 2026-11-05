@@ -20456,5 +20456,741 @@ console.log("\n102. O copiloto aprende com as conversas — a rodada da ponte");
   }
 }
 
+// ============================================================
+//  103. A CARTEIRA CONTA A PARTIR DE 2 DIAS (051), num Postgres de verdade
+//
+//  O 051 troca a régua das atrasadas da carteira de cada responsável (a
+//  função do 011/012, no Painel de números) de 3 para 2 dias de calendário —
+//  a mesma da tela "Esperando resposta" desde 02/11 — e diz a régua na
+//  resposta (`dias_atrasada`). A seção guarda:
+//    - antes do 051, a função conta a partir de 3 e não diz a régua (é o
+//      defeito reproduzido); depois, a partir de 2, e diz;
+//    - dias de CALENDÁRIO no fuso do escritório: quem escreveu anteontem às
+//      23h entra hoje, e quem escreveu ontem à 0h30 não;
+//    - o resto do 012, igual: arquivada e telefone desativado fora, a linha
+//      sem dono, quem não administra vê a própria carteira e a fila sem dono,
+//      os filtros de telefone e de departamento — com a chave da Uazapi
+//      FECHADA em `advogados`, como em produção;
+//    - quem não entrou não chama, e a função roda no olho de quem pergunta;
+//    - rodar de novo não acusa nada, e a conferência diz NÃO quando a função
+//      quebra só para quem atende;
+//    - sem o 008, a função diz qual script falta.
+// ============================================================
+{
+  console.log("\n103. A carteira conta a partir de 2 dias (051), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 051 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S004 = ler("004-a-espera-comeca-na-primeira.sql"), S005 = ler("005-ja-tratei.sql"),
+          S006 = ler("006-a-espera-nao-comeca-no-rabicho.sql"), S008 = ler("008-o-responsavel-pela-conversa.sql"),
+          S011 = ler("011-o-relatorio-por-responsavel.sql"),
+          S012 = ler("012-o-relatorio-por-responsavel-sem-ler-a-chave.sql"),
+          S020 = ler("020-a-auditoria-do-banco.sql"), S051 = ler("051-a-carteira-conta-a-partir-de-2-dias.sql");
+    // O ZORVIN MÍNIMO DA SEÇÃO 68 (a vista `equipe` e a chave da Uazapi
+    // FECHADA em `advogados`), com a herança da Supabase também nas funções:
+    // é nela que se vê se o 051 tira a função de quem não entrou.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+create view equipe as select id, nome from usuarios;
+revoke all on equipe from anon;
+grant select on equipe to authenticated;
+revoke all on advogados from authenticated;
+grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    // O ALDO vem antes de todos na ordem alfabética, e não tem nenhuma
+    // atrasada: é ele que separa "quem tem mais atrasada primeiro" de "pelo
+    // nome" (sem ele, as duas ordens davam Ana, Bia, Rodrigo, e a sabotagem
+    // que ordena pelo nome passava).
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b",
+                rod: "00000000-0000-0000-0000-000000000011", aldo: "00000000-0000-0000-0000-00000000000c" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const SP = "America/Sao_Paulo";
+
+    async function zorvin(scripts = [S004, S005, S006, S008, S020, S011, S012]) {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of scripts) await c.query(s);
+      await c.query("insert into departamentos (nome) values ('SAC'), ('SDC')");
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U.ana}', 'Ana', false), ('${U.bia}', 'Bia', false), ('${U.rod}', 'Rodrigo', true), ('${U.aldo}', 'Aldo', false)`);
+      const tel = async (nome, dep, ativo = true) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id, ativo) values ($1, $2, $3, $4) returning id", [nome, nome, dep, ativo])).rows[0]?.id;
+      c.F = { sac: await tel("SAC", 1), sdc: await tel("SDC", 2), velho: await tel("SAC antigo", 1, false) };
+      // Ana e Bia veem o SAC; o Rodrigo administra e vê tudo.
+      await c.query("insert into permissoes (usuario_id, departamento_id) values ($1, 1), ($2, 1), ($3, 1)", [U.ana, U.bia, U.aldo]);
+      c.n = 0;
+      // UMA CONVERSA ESPERANDO DESDE "N dias atrás, à hora H" no calendário
+      // de São Paulo: o banco faz a conta, para a data ser a dele.
+      c.esperando = async ({ t = c.F.sac, resp = null, dias = null, hora = "10:00", nao_lidas = 0, arquivada = false } = {}) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+          [`5511${String(++c.n).padStart(8, "0")}`, `Cliente ${c.n}`])).rows[0]?.id;
+        const conv = (await c.query("insert into conversas (advogado_id, contato_id, nao_lidas, arquivada) values ($1, $2, $3, $4) returning id",
+          [t, ct, nao_lidas, arquivada])).rows[0]?.id;
+        await c.query(`update conversas set responsavel_id = $2,
+                         esperando_desde = case when $3::int is null then null
+                           else ((now() at time zone '${SP}')::date - $3::int + $4::time) at time zone '${SP}' end
+                        where id = $1`, [conv, resp, dias, hora]);
+        return conv;
+      };
+      return c;
+    }
+    const carteira = (c, uid, a = {}) => guardado(() => comoPessoa(c, uid, async () => (await c.query(
+      "select zorvin_relatorio_responsaveis($1, $2, $3) r", [a.telefone ?? null, a.departamento ?? null, a.fuso ?? SP])).rows[0]?.r));
+    const linha = (r, id) => (r?.linhas || []).find((x) => x.id === id);
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 103a. a cena, com a função de antes (011 + 012) ----
+      const c = await zorvin();
+      // A carteira da Ana: hoje, ontem às 0h30, anteontem às 23h, 3 dias e 5
+      // dias; e uma sem espera. A da Bia: anteontem às 10h. Sem dono: 2 dias.
+      // Fora de tudo: a arquivada e a do telefone desativado, de 5 dias.
+      const K = {
+        hoje: await c.esperando({ resp: U.ana, dias: 0, hora: "00:05", nao_lidas: 1 }),
+        ontem: await c.esperando({ resp: U.ana, dias: 1, hora: "00:30", nao_lidas: 2 }),
+        anteontem23h: await c.esperando({ resp: U.ana, dias: 2, hora: "23:00" }),
+        tres: await c.esperando({ resp: U.ana, dias: 3, hora: "10:00", nao_lidas: 4 }),
+        cinco: await c.esperando({ resp: U.ana, dias: 5, hora: "10:00" }),
+        respondida: await c.esperando({ resp: U.ana }),
+        daBia: await c.esperando({ resp: U.bia, dias: 2, hora: "10:00" }),
+        semDono: await c.esperando({ dias: 2, hora: "10:00", nao_lidas: 3 }),
+        semDonoHoje: await c.esperando({ dias: 0, hora: "00:05" }),
+        sdc: await c.esperando({ t: c.F.sdc, resp: U.rod, dias: 2, hora: "10:00" }),
+        doAldo: await c.esperando({ resp: U.aldo, dias: 0, hora: "00:05" }),
+        arquivada: await c.esperando({ resp: U.ana, dias: 5, arquivada: true }),
+        desativado: await c.esperando({ t: c.F.velho, resp: U.ana, dias: 5 }),
+      };
+      const antes = await carteira(c, U.rod);
+      ok("103a (antes do 051, a função do 012 responde)", Boolean(antes?.linhas) && !antes?.erro, JSON.stringify(antes));
+      ok("103a antes do 051, a Ana tem 2 atrasadas (a régua de 3 dias) e a resposta não diz a régua — é o defeito",
+         linha(antes, U.ana)?.atrasadas === 2 && !("dias_atrasada" in (antes || {})), JSON.stringify(linha(antes, U.ana)));
+
+      // ---- 103b. o 051 ----
+      const conf = await guardado(() => aplicar(c, S051));
+      ok("103b o 051 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("103b a conferência chama a função como quem atende, e lê a régua de 2 dias",
+         item(conf, /responde para quem atende/) === "sim" && item(conf, /a partir de 2 dias/) === "true", JSON.stringify(conf));
+      const versoes = (await c.query("select count(*)::int n from pg_proc where proname = 'zorvin_relatorio_responsaveis'")).rows[0]?.n;
+      ok("103b a função continua uma só (a mesma lista de argumentos do 012)", versoes === 1, String(versoes));
+
+      // ---- 103c. quem administra ----
+      const adm = await carteira(c, U.rod);
+      const ana = linha(adm, U.ana), bia = linha(adm, U.bia), rod = linha(adm, U.rod), semDono = adm?.sem_responsavel || {};
+      ok("103c a resposta diz a régua: 2 dias", adm?.dias_atrasada === 2, JSON.stringify(adm?.erro || adm?.dias_atrasada));
+      ok("103c a Ana: 6 conversas, 5 esperando, 3 atrasadas (anteontem às 23h, 3 e 5 dias)",
+         ana?.conversas === 6 && ana?.esperando === 5 && ana?.atrasadas === 3, JSON.stringify(ana));
+      ok("103c dias de calendário: anteontem às 23h conta, e ontem à 0h30 não (sem ele, seriam 3 e não 2 os de menos de 2 dias)",
+         ana?.atrasadas === 3 && ana?.esperando - ana?.atrasadas === 2, JSON.stringify(ana));
+      ok("103c a espera mais antiga da Ana é a de 5 dias, e as não lidas somam 7",
+         ana && new Date(ana.mais_antiga).getTime() < Date.now() - 4 * 86400e3 && ana.nao_lidas === 7, JSON.stringify(ana));
+      ok("103c a arquivada e a do telefone desativado ficam fora (a Ana teria 8)", ana?.conversas === 6, JSON.stringify(ana));
+      ok("103c a Bia: 1 conversa, de 2 dias, atrasada", bia?.conversas === 1 && bia?.atrasadas === 1, JSON.stringify(bia));
+      ok("103c o Rodrigo, no SDC: 1 atrasada", rod?.atrasadas === 1, JSON.stringify(rod));
+      ok("103c a fila sem dono: 2 esperando, 1 atrasada, 3 não lidas",
+         semDono.conversas === 2 && semDono.esperando === 2 && semDono.atrasadas === 1 && semDono.nao_lidas === 3, JSON.stringify(semDono));
+      ok("103c o total: 6 atrasadas no escritório", adm?.total?.atrasadas === 6 && adm?.total?.conversas === 11, JSON.stringify(adm?.total));
+      ok("103c quem tem mais atrasada vem primeiro, e o Aldo, sem nenhuma, por último (e não pelo nome)",
+         (adm?.linhas || []).map((x) => x.nome).join(",") === "Ana,Bia,Rodrigo,Aldo",
+         (adm?.linhas || []).map((x) => x.nome).join(","));
+      ok("103c quem administra não está recortado", adm?.so_meu === false, JSON.stringify(adm?.so_meu));
+
+      // ---- 103d. os filtros, com a chave da Uazapi fechada ----
+      const doSdc = await carteira(c, U.rod, { telefone: c.F.sdc });
+      ok("103d o filtro de telefone recorta: só o SDC", (doSdc?.linhas || []).length === 1 && linha(doSdc, U.rod)?.atrasadas === 1
+         && doSdc?.total?.conversas === 1, JSON.stringify(doSdc?.erro || doSdc));
+      const doSac = await carteira(c, U.rod, { departamento: 1 });
+      ok("103d o filtro de departamento recorta: o SAC tem 5 atrasadas", doSac?.total?.atrasadas === 5 && !linha(doSac, U.rod),
+         JSON.stringify(doSac?.erro || doSac?.total));
+      const errado = await carteira(c, U.rod, { fuso: "Lugar/Nenhum" });
+      ok("103d fuso que não existe não derruba a conta", Boolean(errado?.total) && !errado?.erro, JSON.stringify(errado?.erro || errado?.total));
+
+      // ---- 103e. quem atende ----
+      const daAna = await carteira(c, U.ana);
+      ok("103e quem atende vê a própria carteira e a fila sem dono, e não a da Bia",
+         daAna?.so_meu === true && linha(daAna, U.ana)?.atrasadas === 3 && !linha(daAna, U.bia) && daAna?.sem_responsavel?.atrasadas === 1,
+         JSON.stringify(daAna?.erro || daAna));
+      ok("103e e nada do SDC, que ela não atende", !linha(daAna, U.rod) && daAna?.total?.conversas === 8, JSON.stringify(daAna?.total));
+      const anaDep = await carteira(c, U.ana, { departamento: 1 });
+      ok("103e o filtro de departamento funciona para quem atende, com a chave da Uazapi fechada",
+         !anaDep?.erro && linha(anaDep, U.ana)?.atrasadas === 3, JSON.stringify(anaDep?.erro || anaDep?.total));
+      ok("103e e a régua vai na resposta dela também", daAna?.dias_atrasada === 2, JSON.stringify(daAna?.dias_atrasada));
+
+      // ---- 103f. quem alcança a função ----
+      const priv = (await c.query(`select has_function_privilege('anon', 'zorvin_relatorio_responsaveis(uuid, bigint, text)', 'execute') a,
+                                          has_function_privilege('authenticated', 'zorvin_relatorio_responsaveis(uuid, bigint, text)', 'execute') b,
+                                          (select prosecdef from pg_proc where proname = 'zorvin_relatorio_responsaveis') d`)).rows[0];
+      ok("103f quem não entrou não chama; quem entrou chama; e ela roda no olho de quem pergunta",
+         priv?.a === false && priv?.b === true && priv?.d === false, JSON.stringify(priv));
+
+      // ---- 103g. rodar de novo, e a conferência que pega a função quebrada ----
+      const de2 = await guardado(() => aplicar(c, S051));
+      ok("103g rodar de novo aplica sem acusar nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      await c.query("revoke select on equipe from authenticated");
+      const quebrada = await guardado(() => aplicar(c, S051));
+      ok("103g sem a leitura dos nomes, a conferência diz NÃO, com o motivo",
+         Array.isArray(quebrada) && /^NÃO — permission denied/.test(String(item(quebrada, /responde para quem atende/))),
+         JSON.stringify(quebrada));
+      await c.query("grant select on equipe to authenticated");
+
+      // ---- 103h. sem o 008, e num banco sem o Zorvin ----
+      const sem008 = await zorvin([S004, S005, S006, S020]);
+      const r8 = await guardado(() => aplicar(sem008, S051));
+      ok("103h sem o 008, a conferência manda rodar o 008", Array.isArray(r8) && /rode o script 008/.test(String(item(r8, /sem a coluna/))),
+         JSON.stringify(r8));
+      const f8 = await guardado(async () => (await sem008.query("select zorvin_relatorio_responsaveis() r")).rows[0]?.r);
+      ok("103h e a função diz qual script falta, em vez de uma lista vazia", f8?.falta === "008" && !f8?.linhas, JSON.stringify(f8));
+      const limpo = await bancoNovo();
+      const rl = await guardado(() => aplicar(limpo, S051));
+      ok("103h num banco sem o Zorvin, aplica sem estourar", Array.isArray(rl) && item(rl, /função da carteira existe/) === "true",
+         JSON.stringify(rl));
+    } catch (e) {
+      ok("a seção 103 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
+// ============================================================
+//  104. O PRAZO EM HORÁRIO DE EXPEDIENTE (052), num Postgres de verdade
+//
+//  O 052 cria `zorvin_prazo_dos_protocolos` (os minutos de EXPEDIENTE até a
+//  primeira ação da equipe, de uma vez para todos os protocolos) e uma
+//  versão nova da contabilização do 029, com o prazo. A seção guarda:
+//    - a conta feita de uma vez dá o MESMO que a do aviso de espera
+//      (`zorvin_minutos_no_expediente`, do 041), protocolo por protocolo,
+//      em 150 protocolos sorteados por quatro departamentos (São Paulo,
+//      Manaus, sem semana e semana toda fechada), com fins de semana,
+//      feriados e o teto de 62 dias;
+//    - uma semana de protocolos com as contas feitas à mão: o cliente da
+//      sexta às 17h50 respondido na terça às 8h15, com a segunda de feriado,
+//      está no prazo (25 minutos de expediente, 86 horas no relógio); 30
+//      minutos já é fora (a régua do aviso: ele toca aos 30); o fuso de
+//      Manaus; o prazo de 60 do SDC; o departamento sem semana conta o
+//      relógio; o finalizado sem resposta foi atendido a tempo; o que a
+//      equipe começou não é julgado; o sem ação passa do prazo;
+//    - o prazo é da equipe: com uma pessoa (quem não administra), nulo;
+//    - o período anterior julga do mesmo jeito; o que ainda está no prazo é
+//      "aguardando";
+//    - por departamento, por dia e por pessoa (a mediana no expediente);
+//    - a versão nova devolve TUDO o que a do 029 devolvia, igual;
+//    - quem não entrou não chama nenhuma das duas, e as duas rodam no olho
+//      de quem pergunta;
+//    - a conferência compara as duas contas nos dados de verdade, e diz NÃO
+//      quando elas discordam ou quando a função quebra para quem atende;
+//    - sem o 028, o 021 ou o 041, não mexe em nada e diz qual falta.
+// ============================================================
+{
+  console.log("\n104. O prazo em horário de expediente (052), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 052 (obrigatório na integração contínua)",
+       false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S004 = ler("004-a-espera-comeca-na-primeira.sql"), S005 = ler("005-ja-tratei.sql"),
+          S006 = ler("006-a-espera-nao-comeca-no-rabicho.sql"), S008 = ler("008-o-responsavel-pela-conversa.sql"),
+          S020 = ler("020-a-auditoria-do-banco.sql"), S021 = ler("021-a-resposta-fora-do-horario.sql"),
+          S028 = ler("028-aguardando-em-aberto-e-finalizados.sql"),
+          S029 = ler("029-a-contabilizacao-dos-atendimentos.sql"), S041 = ler("041-quem-esta-esperando-demais.sql"),
+          S052 = ler("052-o-prazo-em-horario-de-expediente.sql");
+    // O ZORVIN MÍNIMO DA SEÇÃO 68 (quem mandou cada mensagem, a vista `equipe`
+    // e a chave da Uazapi FECHADA em `advogados`), com a herança da Supabase
+    // também nas funções.
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+alter table mensagens enable row level security;
+create policy mensagens_ver on mensagens for select to authenticated using (exists (select 1 from conversas c where c.id = mensagens.conversa_id));
+create view equipe as select id, nome from usuarios;
+revoke all on equipe from anon;
+grant select on equipe to authenticated;
+revoke all on advogados from authenticated;
+grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b",
+                rod: "00000000-0000-0000-0000-000000000011" };
+    const NOME = { [U.ana]: "Ana", [U.bia]: "Bia", [U.rod]: "Rodrigo" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const atras = (min) => new Date(Date.now() - min * 60e3).toISOString();
+    // UMA HORA DE OUTUBRO DE 2026, no relógio de Brasília. 05/10 é segunda;
+    // 12/10 é feriado (Nossa Senhora Aparecida, semeado pelo 021).
+    const L = (dia, hora) => `2026-${dia.length > 2 ? dia : `10-${dia}`}T${hora.length === 5 ? `${hora}:00` : hora}-03:00`;
+    const NUNCA = JSON.stringify(Object.fromEntries(["seg", "ter", "qua", "qui", "sex", "sab", "dom"].map((d) => [d, null])));
+
+    async function zorvin(scripts = [S004, S005, S006, S008, S020, S021, S028, S029, S041]) {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      for (const s of scripts) await c.query(s);
+      await c.query("insert into departamentos (nome) values ('SAC'), ('SDC'), ('Interno'), ('Fechado')");
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U.ana}', 'Ana', false), ('${U.bia}', 'Bia', false), ('${U.rod}', 'Rodrigo', true)`);
+      const tel = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $2, $3) returning id", [nome, nome, dep])).rows[0]?.id;
+      c.F = { sac: await tel("SAC", 1), sdc: await tel("SDC", 2), interno: await tel("Interno", 3), fechado: await tel("Fechado", 4) };
+      // Ana e Bia veem o SAC; o Rodrigo administra e vê tudo.
+      await c.query("insert into permissoes (usuario_id, departamento_id) values ($1, 1), ($2, 1)", [U.ana, U.bia]);
+      if (scripts.includes(S021)) {
+        // O SAC na semana de sempre (seg a sex, das 8h às 18h, em São Paulo),
+        // o SDC na mesma semana em Manaus, o Interno sem semana escrita (conta
+        // o relógio), e o "Fechado" com todos os dias fechados.
+        await c.query("insert into zorvin_fora_do_horario (departamento_id) values (1)");
+        await c.query("insert into zorvin_fora_do_horario (departamento_id, fuso) values (2, 'America/Manaus')");
+        await c.query("insert into zorvin_fora_do_horario (departamento_id, semana) values (4, $1::jsonb)", [NUNCA]);
+      }
+      if (scripts.includes(S041)) await c.query("insert into zorvin_aviso_de_espera (departamento_id, minutos) values (2, 60)");
+      c.n = 0;
+      c.conversa = async (t = c.F.sac) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+                                  [`5511${String(++c.n).padStart(8, "0")}`, `Cliente ${c.n}`])).rows[0]?.id;
+        return (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [t, ct])).rows[0]?.id;
+      };
+      c.msg = (conv, origem, quando, por) => c.query(
+        `insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em, enviado_por_id, enviado_por)
+         values ($1, $2, 'x', $3, $4, $5, $6)`,
+        [conv, origem, crypto.randomBytes(6).toString("hex"), quando, NOME[por] ? por : null, NOME[por] || por || null]);
+      c.assunto = (await c.query("select id from zorvin_assuntos order by ordem limit 1")).rows[0]?.id;
+      c.clique = (conv, quem, quando) => c.query(
+        "insert into zorvin_tratamentos (conversa_id, assunto_id, quem, quando) values ($1, $2, $3, $4)", [conv, c.assunto, quem, quando]);
+      c.protocolo = async (conv) => (await c.query(
+        "select id from zorvin_atendimentos where conversa_id = $1 order by aberto_em limit 1", [conv])).rows[0]?.id;
+      return c;
+    }
+    // A RESPOSTA NOVA CONTÉM A DE ANTES: cada chave e cada valor que o 029
+    // devolvia, no mesmo lugar. Devolve o primeiro caminho que diverge.
+    const contem = (novo, velho, caminho = "") => {
+      if (velho === null || typeof velho !== "object") {
+        if (typeof velho === "number" && typeof novo === "number") return Math.abs(novo - velho) < 1e-6 ? null : caminho;
+        return JSON.stringify(novo) === JSON.stringify(velho) ? null : `${caminho} (${JSON.stringify(velho)} → ${JSON.stringify(novo)})`;
+      }
+      if (Array.isArray(velho)) {
+        if (!Array.isArray(novo) || novo.length !== velho.length) return `${caminho} (o tamanho mudou)`;
+        for (let i = 0; i < velho.length; i++) { const d = contem(novo[i], velho[i], `${caminho}[${i}]`); if (d) return d; }
+        return null;
+      }
+      if (!novo || typeof novo !== "object" || Array.isArray(novo)) return `${caminho} (deixou de ser objeto)`;
+      for (const k of Object.keys(velho)) { const d = contem(novo[k], velho[k], `${caminho}.${k}`); if (d) return d; }
+      return null;
+    };
+    const DESDE = L("05", "00:00"), ATE = L("12", "00:00");
+    const rel = (c, uid, a = {}) => guardado(() => comoPessoa(c, uid, async () => (await c.query(
+      "select zorvin_relatorio_atendimentos($1, $2, $3, $4, $5, $6, $7) r",
+      ["desde" in a ? a.desde : DESDE, "ate" in a ? a.ate : ATE, a.quem ?? null, a.fuso ?? "America/Sao_Paulo",
+       a.telefone ?? null, a.departamento ?? null, a.limite ?? 500])).rows[0]?.r));
+    const perto = (a, b) => a != null && Math.abs(Number(a) - b) < 0.5;
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 104a. as guardas ----
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S052));
+        ok("104a num banco sem o Zorvin, não faz nada e diz isso",
+           Array.isArray(r0) && /nada a fazer/.test(String(item(r0, /sem as tabelas/)))
+           && (await limpo.query("select to_regprocedure('public.zorvin_prazo_dos_protocolos(uuid[],timestamptz)') is null as n")).rows[0].n,
+           JSON.stringify(r0));
+        const sem028 = await zorvin([S004, S005, S006, S008, S020, S021]);
+        const r1 = await guardado(() => aplicar(sem028, S052));
+        ok("104a sem o 028, manda rodar o 028", Array.isArray(r1) && /rode o script 028/.test(String(item(r1, /028/))), JSON.stringify(r1));
+        const sem041 = await zorvin([S004, S005, S006, S008, S020, S021, S028, S029]);
+        const r2 = await guardado(() => aplicar(sem041, S052));
+        ok("104a sem o 041, manda rodar o 041, e a contabilização do 029 fica como estava",
+           Array.isArray(r2) && /rode o script 041/.test(String(item(r2, /041/)))
+           && !("prazo" in ((await sem041.query("select zorvin_relatorio_atendimentos() r")).rows[0]?.r || { prazo: 1 })),
+           JSON.stringify(r2));
+        const sem021 = await zorvin([S004, S005, S006, S008, S020, S028, S029]);
+        const r3 = await guardado(() => aplicar(sem021, S052));
+        ok("104a sem o 021, manda rodar o 021", Array.isArray(r3) && /rode o script 021/.test(String(item(r3, /021/))), JSON.stringify(r3));
+      }
+
+      // ---- 104b. a cena: uma semana de outubro, com as contas feitas à mão ----
+      const c = await zorvin();
+      const Q = {};
+      // SAC (São Paulo, 8h–18h, prazo de 30)
+      Q.q1 = await c.conversa(); await c.msg(Q.q1, "contato", L("05", "10:00")); await c.msg(Q.q1, "advogado", L("05", "10:20"), U.ana);
+      Q.q2 = await c.conversa(); await c.msg(Q.q2, "contato", L("09", "17:50")); await c.msg(Q.q2, "advogado", L("13", "08:15"), U.bia);
+      Q.q3 = await c.conversa(); await c.msg(Q.q3, "contato", L("05", "11:00")); await c.msg(Q.q3, "advogado", L("05", "12:00"), U.ana);
+      await c.clique(Q.q3, U.ana, L("05", "12:30"));
+      Q.q4 = await c.conversa(); await c.msg(Q.q4, "contato", L("06", "19:00")); await c.msg(Q.q4, "advogado", L("07", "08:10"), U.ana);
+      Q.q5 = await c.conversa(); await c.msg(Q.q5, "contato", L("07", "09:00")); await c.clique(Q.q5, U.ana, L("07", "09:05"));
+      Q.q6 = await c.conversa(); await c.msg(Q.q6, "contato", L("08", "14:00"));
+      Q.q7 = await c.conversa(); await c.msg(Q.q7, "advogado", L("08", "15:00"), U.ana); await c.msg(Q.q7, "contato", L("08", "15:10"));
+      Q.q11 = await c.conversa(); await c.msg(Q.q11, "contato", L("05", "14:00")); await c.msg(Q.q11, "advogado", L("05", "14:30"), U.ana);
+      Q.q12 = await c.conversa(); await c.msg(Q.q12, "contato", L("05", "14:00")); await c.msg(Q.q12, "advogado", L("05", "14:29:30"), U.ana);
+      // SDC (Manaus, 8h–18h de lá, prazo de 60)
+      Q.q8 = await c.conversa(c.F.sdc); await c.msg(Q.q8, "contato", L("05", "08:30")); await c.msg(Q.q8, "advogado", L("05", "09:50"), U.rod);
+      // Interno (sem semana: conta o relógio, prazo de 30)
+      Q.q9 = await c.conversa(c.F.interno); await c.msg(Q.q9, "contato", L("10", "10:00")); await c.msg(Q.q9, "advogado", L("10", "10:20"), U.rod);
+      Q.q10 = await c.conversa(c.F.interno); await c.msg(Q.q10, "contato", L("10", "11:00")); await c.msg(Q.q10, "advogado", L("10", "11:45"), U.rod);
+      // O período anterior, de 28/09 a 05/10
+      Q.q13 = await c.conversa(); await c.msg(Q.q13, "contato", L("09-30", "10:00")); await c.msg(Q.q13, "advogado", L("09-30", "10:10"), U.ana);
+      Q.q14 = await c.conversa(); await c.msg(Q.q14, "contato", L("09-30", "11:00"));
+      const n = (await c.query("select count(*)::int n from zorvin_atendimentos")).rows[0]?.n;
+      ok("104b (a cena tem os 14 protocolos)", n === 14, String(n));
+
+      // A RESPOSTA DO 029, antes do 052, para comparar depois.
+      const velhoAdm = await rel(c, U.rod), velhoAna = await rel(c, U.ana), velhoTudo = await rel(c, U.rod, { desde: null }),
+            velhoSdc = await rel(c, U.rod, { telefone: c.F.sdc });
+      ok("104b (o 029 responde antes do 052, sem o prazo)", Boolean(velhoAdm?.total) && !("prazo" in velhoAdm), JSON.stringify(velhoAdm?.erro || Object.keys(velhoAdm || {})));
+
+      const conf = await guardado(() => aplicar(c, S052));
+      ok("104b o 052 aplica, e a conferência não acusa nada", Array.isArray(conf) && !defeito(conf), JSON.stringify(conf));
+      ok("104b a conferência chama a função como quem atende", item(conf, /responde para quem atende/) === "sim"
+         && item(conf, /traz os departamentos/) === "true", JSON.stringify(conf));
+      ok("104b e como quem administra, que vê os dados de verdade, com o prazo",
+         item(conf, /responde para quem administra/) === "sim", JSON.stringify(conf));
+
+      // ---- 104c. a conta de cada protocolo ----
+      const ids = {};
+      for (const k of Object.keys(Q)) ids[k] = await c.protocolo(Q[k]);
+      const prazo = async (k, agora = null) => (await c.query(
+        "select * from zorvin_prazo_dos_protocolos($1::uuid[], coalesce($2::timestamptz, now()))", [[ids[k]], agora])).rows[0] || null;
+      const p2 = await prazo("q2");
+      ok("104c o cliente da sexta às 17h50, respondido na terça às 8h15 com a segunda de feriado: 25 minutos de expediente",
+         p2?.min_acao === 25 && p2?.min_resposta === 25 && p2?.limite === 30, JSON.stringify(p2));
+      const p4 = await prazo("q4");
+      ok("104c o da terça às 19h, respondido na quarta às 8h10: 10 minutos (a noite não conta)", p4?.min_acao === 10, JSON.stringify(p4));
+      const p8 = await prazo("q8");
+      ok("104c no SDC, em Manaus: das 8h30 às 9h50 de Brasília são 50 minutos (lá abre às 9h de Brasília), com o prazo de 60",
+         p8?.min_acao === 50 && p8?.limite === 60, JSON.stringify(p8));
+      const p9 = await prazo("q9");
+      ok("104c no Interno, sem semana escrita, conta o relógio: 20 minutos num sábado", p9?.min_acao === 20, JSON.stringify(p9));
+      const p5 = await prazo("q5");
+      ok("104c o finalizado sem resposta: a ação é o Finalizar, 5 minutos, e não há tempo de resposta",
+         p5?.min_acao === 5 && p5?.min_resposta === null, JSON.stringify(p5));
+      const p12 = await prazo("q12");
+      ok("104c os segundos não arredondam para cima: 29 min 30 s são 29", p12?.min_acao === 29, JSON.stringify(p12));
+      ok("104c o sem ação conta até agora: às 14h20 da quinta, 20 minutos",
+         (await prazo("q6", L("08", "14:20")))?.min_acao === 20, JSON.stringify(await prazo("q6", L("08", "14:20"))));
+      ok("104c e na sexta às 9h, 300 (as 4 horas da quinta e a primeira da sexta)",
+         (await prazo("q6", L("09", "09:00")))?.min_acao === 300, JSON.stringify(await prazo("q6", L("09", "09:00"))));
+      ok("104c o protocolo que a equipe abriu não é medido", (await prazo("q7")) === null, JSON.stringify(await prazo("q7")));
+
+      // ---- 104d. a contabilização com o prazo, para quem administra ----
+      const adm = await rel(c, U.rod);
+      ok("104d a função responde sem erro", Boolean(adm?.total) && !adm?.erro, JSON.stringify(adm?.erro || adm));
+      ok("104d o prazo da equipe: 7 no prazo, 3 atrasados, 1 sem ação, nenhum aguardando, com o prazo de 30 a 60",
+         adm?.prazo?.no_prazo === 7 && adm?.prazo?.atrasados === 3 && adm?.prazo?.sem_acao === 1 && adm?.prazo?.aguardando === 0
+         && adm?.prazo?.limite_min === 30 && adm?.prazo?.limite_max === 60, JSON.stringify(adm?.prazo));
+      ok("104d os julgados são os 11 que o cliente abriu (o da equipe fica fora)",
+         adm?.total?.do_cliente === 11 && adm.prazo.no_prazo + adm.prazo.atrasados + adm.prazo.sem_acao + adm.prazo.aguardando === 11,
+         JSON.stringify(adm?.total));
+      const pr = adm?.tempos?.primeira_resposta || {};
+      ok("104d a mediana até a primeira resposta: 45 min no relógio, 29 min no expediente (em 9 protocolos)",
+         perto(pr.mediana, 2700) && perto(pr.mediana_expediente, 1740) && pr.quantos === 9, JSON.stringify(pr));
+      ok("104d e a média no expediente: 32 min 7 s, contra 11 h 35 min no relógio",
+         perto(pr.media_expediente, 1926.667) && perto(pr.media, 41730), JSON.stringify(pr));
+      ok("104d o período anterior é julgado do mesmo jeito: 1 no prazo e 1 sem ação",
+         adm?.antes?.prazo?.no_prazo === 1 && adm?.antes?.prazo?.sem_acao === 1 && adm?.antes?.prazo?.atrasados === 0
+         && adm?.antes?.atendimentos === 1, JSON.stringify(adm?.antes));
+      const dep = (r, nome) => (r?.por_departamento || []).find((x) => x.nome === nome);
+      const sac = dep(adm, "SAC"), sdc = dep(adm, "SDC"), interno = dep(adm, "Interno");
+      ok("104d por departamento, o SAC: 8 atendimentos, 6 em atendimento, 2 finalizados, 1 esperando; 5 no prazo, 2 atrasados, 1 sem ação",
+         sac?.atendimentos === 8 && sac?.em_atendimento === 6 && sac?.finalizados === 2 && sac?.sem_resposta === 1
+         && sac?.prazo?.no_prazo === 5 && sac?.prazo?.atrasados === 2 && sac?.prazo?.sem_acao === 1 && sac?.prazo?.limite === 30,
+         JSON.stringify(sac));
+      ok("104d e a mediana do SAC no expediente: 27 min", perto(sac?.primeira_mediana_expediente, 1620), JSON.stringify(sac));
+      ok("104d o SDC com o prazo dele (60), e o Interno contando o relógio",
+         sdc?.atendimentos === 1 && sdc?.prazo?.no_prazo === 1 && sdc?.prazo?.limite === 60 && perto(sdc?.primeira_mediana_expediente, 3000)
+         && interno?.atendimentos === 2 && interno?.prazo?.no_prazo === 1 && interno?.prazo?.atrasados === 1
+         && perto(interno?.primeira_mediana_expediente, 1950), JSON.stringify([sdc, interno]));
+      ok("104d os departamentos vêm do que tem mais atendimento para o que tem menos",
+         (adm?.por_departamento || []).map((x) => x.nome).join(",") === "SAC,Interno,SDC",
+         (adm?.por_departamento || []).map((x) => x.nome).join(","));
+      const dia = (r) => (r?.por_dia || []).map((x) => `${String(x.quando).slice(5)}:${x.atendimentos}/${x.sem_resposta}/${x.finalizados}/${x.no_prazo}/${x.prazo_julgados}`).join(" ");
+      ok("104d por dia: os finalizados, os no prazo e os julgados",
+         dia(adm) === "10-05:5/0/1/3/5 10-06:1/0/0/1/1 10-07:1/0/1/1/1 10-08:1/1/0/0/1 10-09:1/0/0/1/1 10-10:2/0/0/1/2", dia(adm));
+      const pessoa = (r, nome) => (r?.por_pessoa || []).find((x) => x.nome === nome);
+      ok("104d por pessoa, a mediana no expediente: Ana 29 min (5 respostas), Bia 25 min, Rodrigo 45 min",
+         perto(pessoa(adm, "Ana")?.primeira_mediana_expediente, 1740) && pessoa(adm, "Ana")?.primeiras === 5
+         && perto(pessoa(adm, "Bia")?.primeira_mediana_expediente, 1500)
+         && perto(pessoa(adm, "Rodrigo")?.primeira_mediana_expediente, 2700), JSON.stringify(adm?.por_pessoa));
+      const reg = (r, conv) => (r?.registros || []).find((x) => x.conversa_id === conv) || {};
+      ok("104d cada protocolo diz o prazo dele: o da sexta no prazo com 25 minutos; o de 30 minutos atrasado; o da equipe sem prazo",
+         reg(adm, Q.q2).prazo === "no_prazo" && reg(adm, Q.q2).minutos_ate_acao === 25 && reg(adm, Q.q2).limite === 30
+         && reg(adm, Q.q11).prazo === "atrasado" && reg(adm, Q.q11).minutos_ate_acao === 30
+         && reg(adm, Q.q7).prazo === null && reg(adm, Q.q7).minutos_ate_acao === null,
+         JSON.stringify([reg(adm, Q.q2), reg(adm, Q.q11), reg(adm, Q.q7)].map((x) => [x.prazo, x.minutos_ate_acao, x.limite])));
+      ok("104d e o sem ação passou do prazo, contado até agora", reg(adm, Q.q6).prazo === "sem_acao" && reg(adm, Q.q6).minutos_ate_acao >= 30,
+         JSON.stringify(reg(adm, Q.q6)));
+
+      // ---- 104e. o prazo é da equipe ----
+      const daAna = await rel(c, U.ana);
+      ok("104e quem não administra recebe os seus, e o prazo vem nulo (é da equipe)",
+         daAna?.so_meu === true && daAna?.prazo === null && daAna?.antes?.prazo === null && daAna?.total?.do_cliente === null,
+         JSON.stringify(daAna?.erro || [daAna?.prazo, daAna?.antes]));
+      ok("104e o prazo também some por departamento e por dia",
+         (daAna?.por_departamento || []).length > 0 && daAna.por_departamento.every((x) => x.prazo === null)
+         && (daAna?.por_dia || []).length > 0 && daAna.por_dia.every((x) => x.no_prazo === null && x.prazo_julgados === null),
+         JSON.stringify([daAna?.por_departamento, daAna?.por_dia]));
+      ok("104e e a mediana no expediente é a das respostas dela: 29 min, em 5",
+         perto(daAna?.tempos?.primeira_resposta?.mediana_expediente, 1740) && daAna?.tempos?.primeira_resposta?.quantos === 5,
+         JSON.stringify(daAna?.tempos));
+      const admAna = await rel(c, U.rod, { quem: U.ana });
+      ok("104e quem administra e escolhe a Ana também recebe o prazo nulo", admAna?.so_meu === true && admAna?.prazo === null,
+         JSON.stringify(admAna?.erro || admAna?.prazo));
+      const anaVeSdc = await guardado(() => comoPessoa(c, U.ana, async () => (await c.query(
+        "select * from zorvin_prazo_dos_protocolos($1::uuid[])", [[ids.q8, ids.q1]])).rows));
+      ok("104e a conta roda no olho de quem pergunta: a Ana não mede o protocolo do SDC",
+         Array.isArray(anaVeSdc) && anaVeSdc.length === 1 && anaVeSdc[0].id === ids.q1, JSON.stringify(anaVeSdc));
+
+      // ---- 104f. a resposta nova contém a de antes ----
+      const novoAdm = await rel(c, U.rod), novoAna = await rel(c, U.ana), novoTudo = await rel(c, U.rod, { desde: null }),
+            novoSdc = await rel(c, U.rod, { telefone: c.F.sdc });
+      for (const [nome, novo, velho] of [["para quem administra", novoAdm, velhoAdm], ["para quem atende", novoAna, velhoAna],
+                                          ["sem começo (todo o tempo)", novoTudo, velhoTudo], ["com um telefone", novoSdc, velhoSdc]]) {
+        const d = novo?.erro ? `erro: ${novo.erro}` : contem(novo, velho);
+        ok(`104f ${nome}, a versão nova devolve tudo o que a do 029 devolvia, igual`, d === null, String(d));
+      }
+
+      // ---- 104g. o que ainda está no prazo, e a borda ----
+      // O Interno conta o relógio inteiro (sem semana), com o prazo de sempre,
+      // 30. A BORDA é a régua do aviso (041): ele toca quando os minutos
+      // CHEGAM ao prazo. O cliente de 30 minutos e 12 segundos atrás tem 30
+      // minutos contados, e já é "sem ação" — e não "aguardando".
+      Q.agora = await c.conversa(c.F.interno); await c.msg(Q.agora, "contato", atras(5));
+      Q.borda = await c.conversa(c.F.interno); await c.msg(Q.borda, "contato", atras(30.2));
+      const recente = await rel(c, U.rod, { desde: atras(60), ate: null });
+      ok("104g o cliente de 5 minutos atrás ainda está no prazo: aguardando, e não sem ação",
+         recente?.prazo?.aguardando === 1 && reg(recente, Q.agora).prazo === "aguardando",
+         JSON.stringify(recente?.erro || recente?.prazo));
+      ok("104g e o que chegou ao prazo agora (30 de 30 minutos) já é sem ação: a régua do aviso",
+         recente?.prazo?.sem_acao === 1 && reg(recente, Q.borda).prazo === "sem_acao"
+         && reg(recente, Q.borda).minutos_ate_acao === 30 && reg(recente, Q.borda).limite === 30,
+         JSON.stringify(recente?.erro || [recente?.prazo, reg(recente, Q.borda)]));
+
+      // ---- 104h. quem alcança as funções ----
+      const priv = (await c.query(`select
+          has_function_privilege('anon', 'zorvin_prazo_dos_protocolos(uuid[], timestamptz)', 'execute') a1,
+          has_function_privilege('anon', 'zorvin_relatorio_atendimentos(timestamptz, timestamptz, uuid, text, uuid, bigint, integer)', 'execute') a2,
+          has_function_privilege('authenticated', 'zorvin_prazo_dos_protocolos(uuid[], timestamptz)', 'execute') b1,
+          has_function_privilege('authenticated', 'zorvin_relatorio_atendimentos(timestamptz, timestamptz, uuid, text, uuid, bigint, integer)', 'execute') b2,
+          (select bool_or(prosecdef) from pg_proc where proname in ('zorvin_prazo_dos_protocolos', 'zorvin_relatorio_atendimentos')) d,
+          (select count(*)::int from pg_proc where proname = 'zorvin_relatorio_atendimentos') v`)).rows[0];
+      ok("104h quem não entrou não chama nenhuma das duas; quem entrou chama; as duas no olho de quem pergunta; e a contabilização continua uma só",
+         priv?.a1 === false && priv?.a2 === false && priv?.b1 === true && priv?.b2 === true && priv?.d === false && priv?.v === 1,
+         JSON.stringify(priv));
+
+      // ---- 104i. rodar de novo, e a conferência que pega a função quebrada ----
+      const de2 = await guardado(() => aplicar(c, S052));
+      ok("104i rodar de novo aplica sem acusar nada", Array.isArray(de2) && !defeito(de2), JSON.stringify(de2));
+      await c.query("revoke select on zorvin_feriados from authenticated");
+      const quebrada = await guardado(() => aplicar(c, S052));
+      ok("104i sem a leitura dos feriados, a conferência diz NÃO, com o motivo",
+         Array.isArray(quebrada) && /^NÃO — permission denied/.test(String(item(quebrada, /responde para quem atende/))), JSON.stringify(quebrada));
+      await c.query("grant select on zorvin_feriados to authenticated");
+
+      // ---- 104j. as duas contas dão o mesmo, em 150 protocolos sorteados ----
+      {
+        const d = await zorvin();
+        // O SORTEIO É SEMPRE O MESMO (um gerador com semente): a prova que
+        // reprova num dia reprova igual no seguinte.
+        let semente = 20261105;
+        const sorte = () => { semente = (semente * 1103515245 + 12345) % 2147483648; return semente / 2147483648; };
+        const tels = [d.F.sac, d.F.sdc, d.F.interno, d.F.fechado];
+        const agoraMs = Date.now();
+        let comResposta = 0, finalizados = 0, semAcao = 0, antigos = 0;
+        for (let i = 0; i < 150; i++) {
+          const conv = await d.conversa(tels[i % 4]);
+          // Até 120 dias atrás: os de mais de 62 passam pelo teto da conta.
+          const aberto = agoraMs - Math.floor(sorte() * 120 * 1440) * 60e3 - Math.floor(sorte() * 60) * 1e3;
+          if (agoraMs - aberto > 63 * 86400e3) antigos++;
+          await d.msg(conv, "contato", new Date(aberto).toISOString());
+          const r = sorte();
+          const depois = Math.min(aberto + Math.floor(1 + sorte() * 6000) * 60e3 + Math.floor(sorte() * 60) * 1e3, agoraMs - 60e3);
+          if (depois <= aberto) { semAcao++; continue; }
+          if (r < 0.55) { await d.msg(conv, "advogado", new Date(depois).toISOString(), U.ana); comResposta++; }
+          else if (r < 0.8) { await d.clique(conv, U.ana, new Date(depois).toISOString()); finalizados++; }
+          else semAcao++;
+        }
+        ok("104j (o sorteio tem respostas, finalizações, sem ação e protocolos de mais de 62 dias)",
+           comResposta > 30 && finalizados > 15 && semAcao > 10 && antigos > 20, JSON.stringify({ comResposta, finalizados, semAcao, antigos }));
+        const confD = await guardado(() => aplicar(d, S052));
+        ok("104j a conferência compara as duas nos últimos 30 dias, e diz que batem",
+           Array.isArray(confD) && item(confD, /bate com a do aviso/) === "true"
+           && /^[1-9]\d* abertos pelo cliente/.test(String(item(confD, /^protocolos dos últimos 30 dias/))), JSON.stringify(confD));
+        const iguais = (await d.query(`
+          with p as (
+            select p.*, z.aberto_em, z.primeira_resposta_em, f.semana, f.fuso
+              from zorvin_prazo_dos_protocolos((select array_agg(id) from zorvin_atendimentos), now()) p
+              join zorvin_atendimentos z on z.id = p.id
+              join conversas c on c.id = z.conversa_id
+              left join advogados a on a.id = c.advogado_id
+              left join zorvin_fora_do_horario f on f.departamento_id = a.departamento_id)
+          select count(*)::int as quantos,
+                 count(*) filter (where p.min_acao is distinct from zorvin_minutos_no_expediente(p.semana, p.fuso, p.aberto_em, coalesce(p.acao_em, now()))
+                                     or (p.primeira_resposta_em is not null and p.min_resposta is distinct from
+                                           zorvin_minutos_no_expediente(p.semana, p.fuso, p.aberto_em, p.primeira_resposta_em)))::int as diferentes,
+                 count(*) filter (where p.min_acao > 0)::int as com_minutos
+            from p`)).rows[0];
+        ok("104j a conta feita de uma vez dá o mesmo que a do aviso de espera, nos 150 protocolos",
+           iguais?.quantos === 150 && iguais?.diferentes === 0 && iguais?.com_minutos > 50, JSON.stringify(iguais));
+        // A CONFERÊNCIA QUE PEGA AS DUAS DISCORDANDO: a do aviso com um minuto
+        // a mais. O 041 de novo põe a de verdade de volta.
+        await d.query(`create or replace function zorvin_minutos_no_expediente(p_semana jsonb, p_fuso text, p_desde timestamptz, p_ate timestamptz default now())
+          returns integer language sql stable as $f$ select 1 + floor(extract(epoch from coalesce(p_ate, now()) - p_desde) / 60)::int $f$`);
+        const torta = await guardado(() => aplicar(d, S052));
+        ok("104j com as duas contas discordando, a conferência diz NÃO, e quantos",
+           Array.isArray(torta) && /^NÃO — \d+ de \d+ protocolos diferem/.test(String(item(torta, /bate com a do aviso/))), JSON.stringify(torta));
+        await d.query(S041);
+        const voltou = await guardado(() => aplicar(d, S052));
+        ok("104j e com a do aviso de volta, batem de novo", Array.isArray(voltou) && item(voltou, /bate com a do aviso/) === "true",
+           JSON.stringify(voltou));
+        // UM DADO ESTRANHO NÃO DERRUBA O SCRIPT: um fuso que não existe, posto
+        // por fora do gatilho do 021, faz a conta estourar — e a conferência
+        // diz o erro, em vez de desfazer o script inteiro.
+        await d.query("set session_replication_role = replica");
+        await d.query("update zorvin_fora_do_horario set fuso = 'Lugar/Nenhum' where departamento_id = 1");
+        await d.query("set session_replication_role = origin");
+        const estranho = await guardado(() => aplicar(d, S052));
+        ok("104j com um fuso que não existe, o script aplica assim mesmo, e a conferência diz o erro",
+           Array.isArray(estranho) && /^NÃO — .*time zone/.test(String(item(estranho, /bate com a do aviso/)))
+           && item(estranho, /a conta do prazo existe/) === "true", JSON.stringify(estranho));
+        await d.query("set session_replication_role = replica");
+        await d.query("update zorvin_fora_do_horario set fuso = 'America/Sao_Paulo' where departamento_id = 1");
+        await d.query("set session_replication_role = origin");
+      }
+    } catch (e) {
+      ok("a seção 104 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
