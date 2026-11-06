@@ -6754,6 +6754,80 @@ app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
   chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/documentos`,
     { method: 'POST', body: JSON.stringify(req.body || {}) })));
 
+// ============================================================
+//  AS NOTAS INTERNAS COM ANEXO (script 053, 05/11)
+//
+//  Pedido do Rodrigo: "Nas notas internas precisa ter a possibilidade de
+//  anexar documentos." O documento sobe do painel para o depósito
+//  (`anexos/notas/…`) e fica na nota (`midia_url`, `midia_tipo`, `midia_mime`,
+//  `midia_nome`). NADA disso passa pela fila de envio: a nota não vai ao
+//  WhatsApp, e o anexo dela também não.
+//
+//  O QUE A PONTE FAZ COM ELE, num lugar só:
+//
+//    - na ficha do Vantoro a nota sobe com uma linha a mais, "📎 Anexo no
+//      Zorvin: <nome>". O documento fica no Zorvin; sem a linha, quem lê a
+//      ficha não saberia que ele existe, e a nota que é só o documento subiria
+//      VAZIA;
+//    - a linha é TIRADA quando o Vantoro devolve a nota (`/vantoro/nota-mudou`):
+//      senão ela voltaria para o texto da nota no Zorvin, que já desenha o
+//      anexo, e a próxima subida a escreveria de novo;
+//    - para a IA (o resumo e o funil), o anexo é dito como nas mensagens
+//      ("[documento: Procuração.pdf]"), e a nota que é só o anexo entra.
+// ============================================================
+const MARCA_DO_ANEXO_NO_VANTORO = '📎 Anexo no Zorvin: ';
+
+/** O nome do anexo de uma nota, numa linha, ou nulo se ela não tem anexo. */
+function nomeDoAnexoDaNota(n) {
+  if (!n || !n.midia_url) return null;
+  return String(n.midia_nome || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim() || 'arquivo sem nome';
+}
+
+/** O texto que a ficha do Vantoro recebe: o da nota, e a linha do anexo
+ *  embaixo. Sem anexo, o texto como sempre foi. */
+function textoDaNotaParaOVantoro(texto, nomeDoAnexo) {
+  const t = String(texto || '');
+  if (!nomeDoAnexo) return t;
+  const linha = MARCA_DO_ANEXO_NO_VANTORO + nomeDoAnexo;
+  return t.trim() ? `${t.replace(/\s+$/, '')}\n\n${linha}` : linha;
+}
+
+/** O texto que o Vantoro devolveu, sem a linha do anexo que a ponte pôs. Só
+ *  a do FIM: é lá que a ponte a escreve. */
+function semAMarcaDoAnexo(texto) {
+  const t = String(texto || '');
+  const onde = t.lastIndexOf(MARCA_DO_ANEXO_NO_VANTORO);
+  // O espaço e a quebra de linha que o Vantoro deixar no fim não contam.
+  if (onde < 0 || t.slice(onde).replace(/\s+$/, '').includes('\n')) return t;
+  return t.slice(0, onde).replace(/\s+$/, '');
+}
+
+/** O anexo da nota para a IA, como as mensagens o dizem ("[documento: …]"). */
+function anexoDaNotaParaAIA(n) {
+  const nome = nomeDoAnexoDaNota(n);
+  if (!nome) return '';
+  const tipo = { imagem: 'foto', video: 'vídeo', audio: 'áudio' }[n.midia_tipo] || 'documento';
+  return `[${tipo}: ${cortarTexto(semAEtiqueta(nome), 120)}]`;
+}
+
+/** O nome do anexo da nota pelo id, lido do banco — e não do navegador: é a
+ *  linha gravada que diz se a nota tem anexo. LIDA COMO QUEM PEDIU
+ *  (`bancoComo`): o id vem do navegador, e com a chave da ponte qualquer
+ *  pessoa logada poria na ficha o nome do anexo de uma nota que ela não
+ *  enxerga. `select('*')`: num banco sem o 053, pedir as colunas pelo nome
+ *  daria 42703. Falhando, a nota sobe sem a linha, e o log diz. */
+async function nomeDoAnexoPeloId(req, id) {
+  if (!id) return null;
+  const jwt = String((req && req.headers && req.headers.authorization) || '').slice(7).trim();
+  if (!jwt) return null;
+  const { data, error } = await bancoComo(jwt).from('notas').select('*').eq('id', id).maybeSingle();
+  if (error) {
+    console.warn(`Nota ${id}: não consegui ler se ela tem anexo — sobe sem a linha do anexo: ${error.message}`);
+    return null;
+  }
+  return nomeDoAnexoDaNota(data);
+}
+
 // A NOTA INTERNA SOBE PARA O HISTÓRICO DO CLIENTE — e do processo, quando tem.
 //
 // A equipe escreve a nota dentro da conversa, que é onde ela está quando
@@ -6773,11 +6847,14 @@ app.post('/vantoro/cliente/:id/documento', rotaVantoro(async (req) =>
 app.post('/vantoro/cliente/:id/nota', rotaVantoro(async (req, usuario) => {
   const corpo = req.body || {};
   const nome = (usuario && usuario.user_metadata && usuario.user_metadata.nome) || '';
+  // A LINHA DO ANEXO (053), pela nota gravada: ver "AS NOTAS INTERNAS COM
+  // ANEXO", logo acima.
+  const anexo = await nomeDoAnexoPeloId(req, corpo.id);
   const resposta = await chamarVantoro(`/clientes/${encodeURIComponent(req.params.id)}/nota`, {
     method: 'POST',
     body: JSON.stringify({
       id: corpo.id,
-      texto: corpo.texto,
+      texto: textoDaNotaParaOVantoro(corpo.texto, anexo),
       processo_id: corpo.processo_id ?? null,
       apagada: !!corpo.apagada,
       // Sobrescreve o que veio do navegador, e não completa: aceitar o nome
@@ -6886,7 +6963,9 @@ app.post('/vantoro/nota-mudou', async (req, res) => {
   if (!notaId) return res.status(400).json({ ok: false, erro: 'Falta o nota_id.' });
 
   const { data: nota, error } = await supabase
-    .from('notas').select('id, texto, atualizado_em').eq('id', notaId).maybeSingle();
+    // TUDO, e não as três colunas de antes: é a linha que diz se a nota tem
+    // anexo (053), e pedir `midia_url` pelo nome num banco sem ela daria 42703.
+    .from('notas').select('*').eq('id', notaId).maybeSingle();
   if (error) return res.status(502).json({ ok: false, erro: error.message });
   if (!nota) {
     // NÃO É ERRO NOSSO. A nota pode ter sido apagada aqui, ou a atividade do
@@ -6909,7 +6988,10 @@ app.post('/vantoro/nota-mudou', async (req, res) => {
   }
 
   const mudanca = {
-    texto: corpo.texto || '',
+    // SEM A LINHA DO ANEXO que a ponte pôs ao subir (053): no Zorvin o anexo é
+    // desenhado pela nota, e a linha no texto o diria duas vezes — e voltaria
+    // dobrada na próxima subida.
+    texto: nota.midia_url ? semAMarcaDoAnexo(corpo.texto || '') : (corpo.texto || ''),
     // O CARIMBO QUE CHEGOU, e não `now()`. Gravar a hora de agora faria esta
     // linha parecer mais nova do que a versão do Vantoro que ela ACABOU de
     // copiar — e no próximo aviso ela ganharia dele, desfazendo a cópia.
@@ -7171,7 +7253,8 @@ async function subirNotas(clienteId, notas, { simular = false } = {}) {
         method: 'POST',
         body: JSON.stringify({
           id: n.id,
-          texto: n.texto || '',
+          // A LINHA DO ANEXO (053), como na rota da nota nova.
+          texto: textoDaNotaParaOVantoro(n.texto, nomeDoAnexoDaNota(n)),
           // SEM PROCESSO, e de propósito: é tudo passado, e adivinhar de qual
           // ação era cada nota poria informação no histórico do processo errado.
           processo_id: null,
@@ -10633,8 +10716,14 @@ function sistemaDoResumo(manual) {
 function linhaDaNotaParaOResumo(n) {
   const autor = String(n.autor || '').replace(/[\r\n]+/g, ' ').trim();
   const texto = cortarTexto(semAEtiqueta(n.texto), COPILOTO_TETO_TEXTO);
-  return `[${quandoCurto(n.criado_em)}] Nota interna da equipe${autor ? ` (${cortarTexto(semAEtiqueta(autor), 60)})` : ''}, o cliente não viu: ${texto}`;
+  // O ANEXO DA NOTA (053) é dito como o das mensagens, antes do texto.
+  const conteudo = [anexoDaNotaParaAIA(n), texto].filter(Boolean).join(' ');
+  return `[${quandoCurto(n.criado_em)}] Nota interna da equipe${autor ? ` (${cortarTexto(semAEtiqueta(autor), 60)})` : ''}, o cliente não viu: ${conteudo}`;
 }
+
+/** A nota que a IA lê: não apagada, e com texto OU anexo (053) — a nota que é
+ *  só o documento também diz alguma coisa do caso. */
+const notaQueAIALe = (n) => !n.apagada_em && Boolean(String(n.texto || '').trim() || n.midia_url);
 
 function pedidoDoResumo({ linhas, departamento, grupo, cortou }) {
   const partes = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
@@ -10711,7 +10800,7 @@ async function resumirConversa(jwt, conversaId) {
         + 'o resumo saiu só das mensagens.');
     }
   } else {
-    notas = (notasLidas.data || []).filter((n) => !n.apagada_em && String(n.texto || '').trim());
+    notas = (notasLidas.data || []).filter(notaQueAIALe);
   }
   if (manual.erro) console.error('resumo: não consegui ler o manual — o resumo sai sem ele', manual.erro.message);
 
@@ -11048,7 +11137,7 @@ async function moverUmCartaoComAIA(k, nomes, manual) {
       console.error('funil pela IA: não consegui ler as notas internas — a decisão sai só das mensagens', notasLidas.error.message);
     }
   } else {
-    notas = (notasLidas.data || []).filter((n) => !n.apagada_em && String(n.texto || '').trim());
+    notas = (notasLidas.data || []).filter(notaQueAIALe);
   }
   // A NOTA DE ANTES DA MAIS VELHA LIDA fica de fora (a régua do resumo).
   const maisAntigaLida = instante(mensagens[mensagens.length - 1].criado_em);
