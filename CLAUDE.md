@@ -102,6 +102,11 @@ Variáveis de ambiente (no Render):
   `ANTHROPIC_API_KEY`). `COPILOTO_APRENDER_INTERVALO_MS` (padrão 1 min),
   `COPILOTO_APRENDER_PRIMEIRA_MS` (3 min) e `COPILOTO_APRENDER_MINIMO` (150)
   são para a bancada. Ver "O copiloto aprende (script 050, 05/11)".
+- `QUAZAR_NOITE` — `desligado` faz o Quazar não escrever as respostas da
+  noite. **Opcional: sem ela, ele escreve nos departamentos em ensaio** (e só
+  com `ANTHROPIC_API_KEY`). `QUAZAR_NOITE_INTERVALO_MS` (padrão 30 s),
+  `QUAZAR_NOITE_PRIMEIRA_MS` (90 s) e `QUAZAR_NOITE_QUIETO_S` (90) são para a
+  bancada. Ver "O Quazar à noite, em ensaio (script 055, 06/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -3659,6 +3664,151 @@ uma (e a cópia sem sabotagem passou inteira):
   essa troca era a mais nova, e ganhava da Audiências pela data, e a fonte sem
   peso passou a passar na 108d. A rodada foi refeita inteira sobre a prova
   final.
+
+### O Quazar à noite, em ensaio (script 055, 06/11)
+
+Pedido do Rodrigo: *"você mencionou que podíamos ativar a IA para responder os
+clientes que enviam mensagens após o horário de expediente, ao invés de
+usarmos aquela mensagem pronta. Como agora temos o Quazar, o que acha de
+começarmos a testar isso?"* Decidido com ele, em três respostas:
+
+1. **começa pelo ensaio**: uma semana em que o cliente continua recebendo a
+   mensagem pronta, e o Quazar escreve a resposta que daria, **sem enviar**.
+   De manhã a equipe lê na conversa e marca "boa" ou "ruim";
+2. **sozinho, ele diz que é o assistente virtual do escritório**;
+3. **ele conversa**: responde cada vez que o cliente escreve, e não uma vez só
+   por noite.
+
+**Medido em 30 dias, até 06/11, só contando:** a mensagem pronta saiu 270
+vezes, todas no Sucesso do Cliente (umas 9 por noite). Depois dela, o cliente
+esperou em média 23 horas e meia até uma pessoa responder, e em 95 das 269 a
+equipe ainda não tinha escrito nada depois dela.
+
+**Este script é o do ensaio. Mandar de verdade é o próximo**, depois de a
+equipe ler as respostas. Ele vai precisar decidir o que este não decide: a
+mensagem que sai entra em `mensagens` (e como marcada, para não contar como a
+equipe agindo), e a mensagem pronta deixa de sair onde o Quazar responde.
+
+| peça | o quê |
+|---|---|
+| `zorvin_fora_do_horario.quazar` | por departamento: `desligado` ou `ensaio` (nenhum outro valor, por enquanto) |
+| `zorvin_quazar_noturno` | o que o Quazar escreveu (`pronta`), por que ficou calado (`calada`), e a avaliação da equipe |
+| `zorvin_quazar_noturno_pendentes(limite, quieto_s)` | quem está esperando o Quazar agora — só a ponte chama |
+| `quazarDaNoite`, no `index.js` | a rodada, de 30 em 30 segundos |
+
+**Quem está esperando** (o banco diz, e não a ponte):
+
+- o departamento em ensaio;
+- o escritório **fechado agora** (`zorvin_horario_de`, a conta do 021, com os
+  feriados), e a última mensagem da conversa é do **cliente**, escrita depois
+  do fechamento, há mais de **90 segundos** e há menos de 12 horas. Os 90
+  segundos fazem o "oi", o "bom dia" e a foto receberem uma resposta só;
+- **a equipe fora da conversa**: ninguém escreveu depois do fechamento, nem
+  nos 30 minutos antes do cliente, nem tem item na fila (a régua do 022, com a
+  carência da fila de espera). **Quando alguém da equipe responde, o Quazar
+  sai da conversa**;
+- sem grupo, sem linha desativada, e sem resposta do Quazar que já cubra
+  aquela mensagem. **O cliente que escreve de novo volta à lista**: é assim
+  que ele conversa.
+
+**O ensaio começou onde a mensagem pronta já sai** (Sucesso do Cliente e
+Comercial), uma vez só (a semente `quazar:ensaio-da-noite-055`): desligado
+pela tela, rodar a pasta de novo não religa.
+
+**A reserva da vez é da ponte**: ela grava a linha `pensando` com a chave
+(conversa, mensagem do cliente), e a outra ponte, numa publicação, esbarra na
+chave (`upsert` com `ignoreDuplicates`). A ponte que cai no meio deixa a linha
+`pensando`; passados 10 minutos, a rodada a apaga, e a conversa volta à lista.
+**A falha devolve a vez**: a linha sai, e a mesma mensagem é tentada de novo
+depois de 1, 5 e 30 minutos (a memória é da ponte). **O limite de uso (429)
+pausa a rodada** pelo `retry-after`, e a chave recusada, por meia hora.
+
+**O que ele lê** é o que a sugestão lê (`lerParaOCopiloto`: a conversa, o
+manual, as rápidas, as lições, as notas aprendidas e os exemplos de verdade),
+pela chave da ponte: ninguém pediu, e a lista do banco já é só do que ele pode
+responder. Mais:
+
+- quando a equipe volta, por extenso, no fuso do departamento;
+- o primeiro nome do cliente, da ficha, do nome que a equipe deu ou do
+  WhatsApp, nessa ordem, e arrumado ("ANDREIA" vira "Andreia"). A IA decide se
+  é nome de gente;
+- se é a primeira mensagem dele nesta noite (é quando ele se apresenta);
+- a mensagem pronta que o cliente recebeu, na conversa;
+- **as respostas do ensaio desta noite, como se tivessem saído**. É a conversa
+  que o ensaio quer medir, e o cliente não as viu: a resposta seguinte pode
+  falar de algo que ele não leu. No ensaio, aceito.
+
+**As regras são outras** (`QUAZAR_NOITE_REGRAS`, e não `COPILOTO_REGRAS`): lá
+a atendente lê antes de mandar; aqui ninguém lê. Ele se apresenta como o
+assistente virtual e diz quando a equipe volta, nunca usa nome de atendente,
+não diz o andamento do processo (não o enxerga), não promete prazo nem valor,
+**não pede senha nem código de confirmação** (o código vence em minutos, e a
+senha a equipe pede quando for usar; as lições que mandam pedir valem de dia),
+não dá orientação jurídica nova e não fala de honorários. Ele **não responde**
+robô, propaganda, cobrança de terceiros nem o "ok" e o "obrigado" do fim:
+fica `calada`, com o porquê, e isso também se avalia.
+
+**A resposta vem presa pelo formato** (`responder`, `mensagem`, `resumo`,
+`motivo`), com o teto e o esforço da sugestão (8000, médio). O resumo é para a
+equipe ler de manhã. **No log, só números.**
+
+**Sem o 055**, a função que falta desliga a rodada até reiniciar, com uma
+linha no log. **`QUAZAR_NOITE=desligado`** desliga sem mexer no código, e
+`/copiloto/estado` passou a dizer `noite` (falso assim).
+
+**O custo**, pela tabela do copiloto: umas 9 conversas por noite, e duas ou
+três respostas cada uma. No Haiku, centavos por mês; no Sonnet, uns poucos
+dólares.
+
+**Fica de fora, e é decisão:**
+
+- **a carência não é provada entre 00:00 e 01:00 de São Paulo**: a cena monta
+  um expediente que fechou há 20 minutos, e ele atravessaria a meia-noite. A
+  seção diz quando pula;
+- **a conversa arquivada não fica de fora**, como na mensagem pronta (021): o
+  cliente que escreve numa arquivada também está esperando.
+
+Provas: seção 110 (o 055 num Postgres de verdade, com um expediente montado
+para estar fechado a qualquer hora em que a prova rode, 22 conferências) e
+seção 111 (a rodada, com um Claude de mentira e a função do banco fingida com
+o mesmo contrato, 31).
+
+**44 sabotagens, 42 pegas e duas que vazam com razão**, todas rodadas em
+cópias e lidas uma a uma (e a cópia de controle passou inteira):
+
+- a ponte de antes inteira (26 reprovações);
+- **o 055:** sem a regra do quieto; o grupo; a linha desativada; sem o teto
+  de 12 horas; sem olhar o que o Quazar já cobriu; a equipe depois do
+  fechamento sem tirar o Quazar; sem a carência; sem a fila de envio; o
+  departamento desligado entrando; sem o limite; o ensaio ligado em toda
+  rodada; o ensaio também onde a pronta está desligada; a leitura para todos;
+  avaliar qualquer coluna; quem avaliou sem o gatilho; avaliar a que ainda
+  está sendo escrita; quem entrou chamando a lista; sem a guarda do banco
+  limpo; aceitar qualquer modo;
+- **a ponte:** as regras do copiloto na noite; sem dizer que é o assistente
+  virtual; pedindo senha à noite; sem dizer quando a equipe volta; o nome do
+  WhatsApp no lugar da ficha; o nome sem arrumar; sempre a primeira da noite;
+  sem o ensaio de antes na conversa; sem a mensagem pronta na conversa; sem o
+  formato; a calada guardada como pronta; a falha guardada, sem devolver a
+  vez; sem a espera depois de falhar; o limite sem pausa; sem tirar a linha
+  presa; tirando a linha presa sem o prazo; sem a reserva (escreve por cima
+  da outra ponte); sem o 055, perguntando sempre; desligada que não desliga;
+  sem a chave perguntando assim mesmo; o log com o texto da IA; o estado sem
+  a noite;
+- **e as que vazam:** tirar "a última mensagem é do cliente" e tirar "o
+  escritório fechado". A primeira é coberta pela regra da equipe (uma
+  mensagem nossa depois do fechamento já tira a conversa), e a segunda pelo
+  "quando abre" (com o escritório aberto, ele vem nulo). As duas guardas
+  ficam: dizem a regra por escrito, e não dependem da outra.
+
+**A primeira rodada ensinou duas coisas, as duas da prova:**
+
+- **a sabotagem do banco limpo estava mal montada**: tirava só a última linha
+  da guarda, e as de cima continuavam segurando o script. Refeita, tirando a
+  guarda inteira, ela é pega — a lição do 044, de novo;
+- **uma cópia estourou ao perguntar o estado da ponte** que não tinha subido
+  (a porta tomada por outra cópia). A pergunta passou a ser guardada
+  (`estadoDa`), e a sabotagem, rodada de novo, é pega limpa.
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
