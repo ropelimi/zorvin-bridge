@@ -5201,6 +5201,7 @@ async function confirmarPeloEco(item, eco, deQueEstado) {
   const erroHist = await gravarEnviadaNoHistorico(item, eco.idUazapi, eco.quando);
   // O AVISO DE AUDIÊNCIA também saiu, e o Vantoro tinha ouvido que falhou.
   if (item.aviso_vantoro_id) await confirmarAvisoNoVantoro(item.aviso_vantoro_id);
+  await passarAoAdvogadoDaAudiencia(item);
   console.log(`Eco do envio: o item ${item.id} (${deQueEstado}) SAIU — o WhatsApp confirmou com `
     + `${eco.idUazapi}. ${erroHist ? 'O histórico recusou a linha (ver acima)' : 'A mensagem entrou no histórico'}, `
     + 'e não será mandada de novo.');
@@ -5608,6 +5609,8 @@ async function processarFilaDeEnvio() {
         // na hora de enfileirar, faria o Vantoro achar que o cliente foi
         // avisado mesmo quando a Uazapi recusou.
         if (item.aviso_vantoro_id) await confirmarAvisoNoVantoro(item.aviso_vantoro_id);
+        // E A CONVERSA PASSA AO ADVOGADO NA AUDIÊNCIA (06/11), agora que saiu.
+        await passarAoAdvogadoDaAudiencia(item);
 
         // A EXCLUSÃO PARA AQUI. A bolha não sai do histórico do Zorvin: ela
         // vira "Esta mensagem foi apagada", como no WhatsApp. Apagar a linha
@@ -12228,6 +12231,84 @@ async function confirmarAvisoNoVantoro(id) {
   return false;
 }
 
+// ============================================================
+//  O ADVOGADO NA AUDIÊNCIA RESPONDE PELA CONVERSA DO AVISO (06/11)
+//
+//  "Esse advogado na audiência, após ser enviada a mensagem de aviso pelo
+//  Zorvin, essa conversa no Zorvin deve ter o advogado na audiência como
+//  responsável da conversa." O login é o mesmo no Vantoro e no Zorvin.
+//
+//  O Vantoro manda o login em `responsavel_da_conversa.login`; a ponte o
+//  guarda no item da fila e, quando a mensagem SAI (os dois pontos que
+//  confirmam o aviso no Vantoro), chama `zorvin_aviso_passa_ao_advogado`
+//  (script 055). A regra — achar a pessoa, ela ver a linha, trocar o dono —
+//  mora no banco; aqui só se chama e se diz no log o que aconteceu.
+//
+//  NADA DISTO SEGURA O AVISO. Sem o 055, sem login, com o banco tropeçando:
+//  a mensagem sai e o Vantoro é avisado como sempre; só a conversa fica com
+//  quem estava.
+// ============================================================
+function loginDoAdvogadoDaAudiencia(aviso) {
+  const quem = aviso && aviso.responsavel_da_conversa;
+  const login = quem && typeof quem === 'object' ? String(quem.login || '').trim() : '';
+  // Um login de verdade é curto e sem espaço; o resto não vai para o banco.
+  return login && login.length <= 150 && !/\s/.test(login) ? login : '';
+}
+
+function semAColunaDoLogin(erro) {
+  const texto = `${(erro && erro.message) || ''} ${(erro && erro.details) || ''}`;
+  return (erro && (erro.code === 'PGRST204' || erro.code === '42703')) || /responsavel_login/.test(texto);
+}
+
+let jaAvisouSem055 = false;
+function avisarUmaVezSem055() {
+  if (jaAvisouSem055) return;
+  jaAvisouSem055 = true;
+  console.warn('Avisos de audiência: o banco ainda não tem o script 055 '
+    + '(sql/automaticos/055-o-advogado-da-audiencia-responde-pela-conversa.sql). Os avisos saem, '
+    + 'mas a conversa não passa ao advogado da audiência.');
+}
+
+const MOTIVOS_DO_ADVOGADO = {
+  sem_login: 'sem login',
+  conversa_nao_achada: 'a conversa não foi achada',
+  login_nao_achado: 'o Zorvin não tem esse login',
+  login_repetido: 'duas contas do Zorvin têm esse login',
+  desativado: 'a conta está desativada no Zorvin',
+  nao_ve_a_linha: 'a pessoa não tem permissão para ver a linha desta conversa no Zorvin',
+  ja_era_dele: 'a conversa já era dele',
+};
+
+async function passarAoAdvogadoDaAudiencia(item) {
+  const login = item && item.responsavel_login ? String(item.responsavel_login).trim() : '';
+  if (!login || !item.conversa_id) return null;
+  try {
+    const { data, error } = await supabase.rpc('zorvin_aviso_passa_ao_advogado',
+      { p_conversa: item.conversa_id, p_login: login });
+    if (error) {
+      if (error.code === 'PGRST202' || /zorvin_aviso_passa_ao_advogado/.test(error.message || '')) {
+        avisarUmaVezSem055();
+      } else {
+        console.log(`Aviso (item ${item.id}): não consegui passar a conversa a ${login} (${error.message}). `
+          + 'A conversa fica com quem estava.');
+      }
+      return null;
+    }
+    const r = data || {};
+    if (r.passou) {
+      console.log(`Aviso (item ${item.id}): a conversa agora é de ${r.nome || login}, o advogado na audiência.`);
+    } else if (r.motivo !== 'ja_era_dele') {
+      console.log(`Aviso (item ${item.id}): a conversa não passou a ${login} — `
+        + `${MOTIVOS_DO_ADVOGADO[r.motivo] || r.motivo || 'sem motivo'}.`);
+    }
+    return r;
+  } catch (e) {
+    console.log(`Aviso (item ${item.id}): não consegui passar a conversa a ${login} `
+      + `(${(e && e.message) || e}). A conversa fica com quem estava.`);
+    return null;
+  }
+}
+
 // UM TROPEÇO DO BANCO NÃO É O DESFECHO DO AVISO (auditoria de 27/10). Ler os
 // telefones, achar o contato, abrir a conversa: qualquer falha nesses passos
 // virava "/erro" no Vantoro, e lá o erro é o fim — o aviso não volta para a
@@ -12430,10 +12511,24 @@ async function buscarAvisosDeAudiencia() {
       // aviso_vantoro_id tem índice único: se este ciclo repetir antes de a fila
       // ser processada, o banco recusa a segunda cópia e o cliente não recebe a
       // mesma mensagem duas vezes.
-      const { error: filaErro } = await supabase.from('fila_envio').insert({
+      //
+      // O ADVOGADO NA AUDIÊNCIA (06/11) vai junto, pelo login: quando a
+      // mensagem sair, ele passa a responder pela conversa. Ver
+      // `passarAoAdvogadoDaAudiencia`.
+      const linhaDaFila = {
         conversa_id: conversa.id, texto: aviso.texto,
         status: 'pendente', tipo: 'texto', aviso_vantoro_id: aviso.id,
-      });
+      };
+      const loginDoAdvogado = loginDoAdvogadoDaAudiencia(aviso);
+      if (loginDoAdvogado) linhaDaFila.responsavel_login = loginDoAdvogado;
+      let { error: filaErro } = await supabase.from('fila_envio').insert(linhaDaFila);
+      // UM BANCO SEM O SCRIPT 055 não tem a coluna. O aviso é o que importa: ele
+      // entra sem o login, e a conversa fica com quem estava.
+      if (filaErro && loginDoAdvogado && semAColunaDoLogin(filaErro)) {
+        avisarUmaVezSem055();
+        delete linhaDaFila.responsavel_login;
+        ({ error: filaErro } = await supabase.from('fila_envio').insert(linhaDaFila));
+      }
       if (filaErro) {
         // A CÓPIA RECUSADA é a outra ponte, nos segundos de uma publicação,
         // tendo enfileirado o mesmo aviso agora: ele está na fila, e é dela.
