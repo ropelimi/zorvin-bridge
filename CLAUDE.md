@@ -4525,6 +4525,46 @@ defeito nenhum. Hoje as duas conferências desse feitio esperam a linha (até 5
 segundos), e continuam reprovando se ela não vier. **Espere a ÚLTIMA coisa
 que o código faz, e não a primeira** — a régua de 26/10, outra vez.
 
+## O advogado na audiência responde pela conversa do aviso (script 056, 06/11)
+
+Pedido de 06/11, pelo Vantoro: *"Na tela de Audiências quando o usuário
+cadastra uma nova audiência, ele também informa quem será o advogado na
+audiência. Esse advogado na audiência, após ser enviada a mensagem de aviso
+pelo Zorvin, essa conversa no Zorvin deve ter o advogado na audiência como
+responsável da conversa."* E: *"O usuário do Vantoro é o mesmo usuário do
+Zorvin"* — o login é o mesmo nos dois (ex.: `willian.jones`).
+
+**O Vantoro diz QUEM.** Cada aviso de `/avisos/pendentes` traz
+`responsavel_da_conversa: { login, nome }`: o login do advogado na audiência
+(o ligado ao cadastro do advogado, ou a conta ativa com o mesmo nome
+completo). Vazio quando não há quem: sem advogado, o Correspondente, nome
+sem conta.
+
+**A ponte guarda e, quando sai, passa.** O login entra no item da fila
+(`fila_envio.responsavel_login`). Quando a mensagem SAI — nos dois pontos
+que confirmam o aviso no Vantoro (o envio e o eco) —, a ponte chama
+`zorvin_aviso_passa_ao_advogado(conversa, login)`. O aviso que a Uazapi
+recusou não passa a conversa a ninguém.
+
+**A regra mora no banco** (`sql/automaticos/056-…`). A função acha a pessoa
+pelo login, sem olhar caixa nem espaço, e a põe como responsável, com
+`responsavel_por` nulo (foi o sistema, como na distribuição do 023) e
+`responsavel_em` agora. **Troca quem estava**: o pedido é que o advogado da
+audiência seja o responsável. Não passa — e diz o motivo, que vai para o log
+em português — sem login, com login que o Zorvin não tem ou que duas contas
+têm, a quem saiu, e **a quem não vê a linha da conversa**
+(`zorvin_ve_o_telefone`): dar a conversa a quem não consegue abri-la seria o
+cliente sem ninguém, com cara de ter dono. Só a ponte alcança a função.
+
+**Nada disto segura o aviso.** Num banco sem o 056, o item entra sem o login
+(a coluna recusada vira uma segunda tentativa sem ela) e a função que não
+existe é avisada uma vez no log; a mensagem sai e o Vantoro é confirmado
+como sempre.
+
+Provas: seção 112 (o 056 num Postgres de verdade, com o 008 e o 023
+aplicados pelos próprios arquivos) e seção 113 (a ponte, pela porta de
+verdade).
+
 ## O que não entrava no histórico (26/10)
 
 Pedido do Rodrigo: *"Veja também se todos os históricos de conversas estão

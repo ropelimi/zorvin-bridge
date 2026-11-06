@@ -22332,7 +22332,7 @@ console.log("\n109. O Quazar imita a equipe: os exemplos de verdade e as regras"
     const pg = await import("pg");
     const fs = await import("node:fs");
     const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
-    const S021 = ler("021-a-resposta-fora-do-horario.sql"), S055 = ler("055-o-quazar-a-noite-em-ensaio.sql");
+    const S021 = ler("021-a-resposta-fora-do-horario.sql"), S056 = ler("055-o-quazar-a-noite-em-ensaio.sql");
     const ESQUEMA = `
 alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
 alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
@@ -22410,11 +22410,11 @@ create policy conversas_leitura on conversas for select using
       // ---- 110a. num banco limpo, e sem o 021 ----
       {
         const limpo = await bancoNovo();
-        const r = await guardado(() => aplicar(limpo, S055));
+        const r = await guardado(() => aplicar(limpo, S056));
         ok("110a num banco limpo, o 055 não faz nada e diz isso", /nada a fazer/.test(String(item(r, /sem as tabelas/))), JSON.stringify(r));
         const sem021 = await bancoNovo();
         await sem021.query(ESQUEMA);
-        const r2 = await guardado(() => aplicar(sem021, S055));
+        const r2 = await guardado(() => aplicar(sem021, S056));
         ok("e sem o 021, diz que falta", /rode o 021/.test(String(item(r2, /falta a resposta fora do horário/))), JSON.stringify(r2));
       }
 
@@ -22431,7 +22431,7 @@ create policy conversas_leitura on conversas for select using
                      (1, true, 'Recebemos sua mensagem.', $1::jsonb), (2, false, '', $1::jsonb),
                      (3, true, 'Fechado.', $1::jsonb), (4, true, 'Fechado.', $2::jsonb)`,
                     [JSON.stringify(FECHADA), JSON.stringify(ABERTA)]);
-      const conf = await aplicar(c, S055);
+      const conf = await aplicar(c, S056);
       ok("110b o 055 aplica, e a conferência não acusa defeito",
          lista(conf).length > 0 && !lista(conf).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta))), JSON.stringify(conf));
       const modos = async () => Object.fromEntries((await c.query("select departamento_id::int d, quazar from zorvin_fora_do_horario")).rows.map((x) => [x.d, x.quazar]));
@@ -22439,7 +22439,7 @@ create policy conversas_leitura on conversas for select using
       ok("o ensaio entra onde a mensagem pronta já sai, e não onde ela está desligada",
          m[1] === "ensaio" && m[3] === "ensaio" && m[4] === "ensaio" && m[2] === "desligado", JSON.stringify(m));
       await c.query("update zorvin_fora_do_horario set quazar = 'desligado' where departamento_id = 3");
-      await aplicar(c, S055);
+      await aplicar(c, S056);
       m = await modos();
       ok("rodar de novo não religa o ensaio que alguém desligou", m[3] === "desligado" && m[1] === "ensaio", JSON.stringify(m));
       const valorEstranho = await guardado(() => c.query("update zorvin_fora_do_horario set quazar = 'ligado' where departamento_id = 2"));
@@ -22755,6 +22755,388 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     ok("sem a chave da Anthropic, não roda", perguntas3 === 0, `${perguntas3} perguntas`);
     ok("e o estado da ponte diz que ela escreve à noite", (await estadoDa(t3)).noite === true);
     await t3.parar(); await claude.parar();
+  }
+}
+
+// ==================================================================
+//  112. O ADVOGADO NA AUDIÊNCIA RESPONDE PELA CONVERSA (056), NUM POSTGRES DE VERDADE
+//
+//  Pedido de 06/11: "Esse advogado na audiência, após ser enviada a mensagem
+//  de aviso pelo Zorvin, essa conversa no Zorvin deve ter o advogado na
+//  audiência como responsável da conversa." O login é o mesmo no Vantoro e no
+//  Zorvin. Com o 008 e o 023 aplicados pelos próprios arquivos:
+//    - sem o 008 ou o 023, o 056 não faz nada e manda rodá-los;
+//    - a fila ganha a coluna do login, a ponte alcança a função e quem atende não;
+//    - passa a quem vê a linha, sem olhar caixa nem espaço, trocando o dono que
+//      havia, com `responsavel_por` nulo e `responsavel_em` agora;
+//    - não passa sem login, com login que não existe ou que duas contas têm, a
+//      quem saiu, a quem não vê a linha, nem à conversa que não existe;
+//    - a conversa que já era dela fica como estava;
+//    - rodar de novo não muda nada.
+// ==================================================================
+{
+  console.log("\n112. O advogado na audiência responde pela conversa (056), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 056 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (caminho) => fs.readFileSync(new URL(`../sql/automaticos/${caminho}`, import.meta.url), "utf8");
+    const S008 = ler("008-o-responsavel-pela-conversa.sql");
+    const S023 = ler("023-a-distribuicao-das-conversas-novas.sql");
+    const S056 = ler("056-o-advogado-da-audiencia-responde-pela-conversa.sql");
+    const ultimas = (r) => (Array.isArray(r) ? r[r.length - 1] : r).rows;
+    const defeito = (linhas) => (linhas || []).some((l) => l.resposta === "false" || /^NÃO/.test(String(l.resposta))
+      || /rode o script/i.test(String(l.resposta)));
+    const item = (linhas, re) => ((linhas || []).find((l) => re.test(l.item)) || {}).resposta;
+    const PAPEIS = `do $$ begin
+      if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+      if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+    end $$;`;
+    const ESQUEMA = () => `
+      create schema if not exists auth;
+      create or replace function auth.uid() returns uuid language sql stable as $f$
+        select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+      grant usage on schema auth to anon, authenticated, service_role;
+      grant execute on function auth.uid() to anon, authenticated, service_role;
+      grant usage on schema public to anon, authenticated, service_role;
+      create table departamentos (id bigint generated always as identity primary key, nome text not null,
+        slug text, ativo boolean not null default true);
+      create table usuarios (id uuid primary key, login text, nome text not null default '',
+        admin boolean not null default false, ativo boolean not null default true, foto_url text);
+      create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text,
+        token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+      create table permissoes (id bigint generated always as identity primary key,
+        usuario_id uuid not null references usuarios(id) on delete cascade,
+        departamento_id bigint references departamentos(id) on delete cascade,
+        telefone_id uuid references advogados(id) on delete cascade,
+        check (departamento_id is not null or telefone_id is not null));
+      create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+      create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+        contato_id uuid references contatos(id),
+                unique (advogado_id, contato_id));
+      create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+        origem text, texto text, id_uazapi text, criado_em timestamptz not null default now(),
+        unique (conversa_id, id_uazapi));
+      create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+        texto text, status text not null default 'pendente', criado_em timestamptz not null default now(),
+        agendada_para timestamptz);
+      create or replace function zorvin_admin() returns boolean language sql stable security definer
+        set search_path = public, auth as $f$
+        select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+      create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean
+        language sql stable security definer set search_path = public, auth as $f$
+        select zorvin_admin() or exists (
+          select 1 from permissoes p join advogados a on a.id = p_telefone_id
+           where p.usuario_id = auth.uid()
+             and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+             and (p.telefone_id     is null or p.telefone_id     = p_telefone_id)) $f$;
+      grant execute on function zorvin_admin(), pode_ver_conversa(uuid) to authenticated;
+      grant select on usuarios, departamentos, contatos, conversas, mensagens to authenticated;
+      grant select (id, nome, numero, ativo, departamento_id) on advogados to authenticated;
+      grant all on all tables in schema public to service_role;`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false });
+    await raiz.connect();
+    const bancos = [];
+    const clientes = [];
+    const bancoNovo = async () => {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`);
+      bancos.push(nome);
+      const u = new URL(BANCO_BASE);
+      u.pathname = `/${nome}`;
+      u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false });
+      await cl.connect();
+      clientes.push(cl);
+      return cl;
+    };
+    try {
+      await raiz.query(PAPEIS);
+
+      // ---- 112a. sem o 008 e o 023, ele manda rodá-los e não cria nada ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA());
+        const r = ultimas(await c.query(S056));
+        ok("112a sem o 008 e o 023, o 056 manda rodá-los", defeito(r) && /rode o script 008 e o 023/.test(JSON.stringify(r)),
+           JSON.stringify(r));
+        const f = (await c.query("select to_regprocedure('public.zorvin_aviso_passa_ao_advogado(uuid,text)') f")).rows[0].f;
+        const col = (await c.query(`select count(*)::int n from information_schema.columns
+                                     where table_name = 'fila_envio' and column_name = 'responsavel_login'`)).rows[0].n;
+        ok("e não cria a função nem a coluna pela metade", f === null && col === 0, `${f} ${col}`);
+      }
+
+      // ---- 112a-bis. com o 008 mas sem o 023, também ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA());
+        await c.query(S008);
+        const r = ultimas(await c.query(S056));
+        const f = (await c.query("select to_regprocedure('public.zorvin_aviso_passa_ao_advogado(uuid,text)') f")).rows[0].f;
+        ok("112a com o 008 mas sem a regra de acesso do 023, o 056 também manda rodar e não cria a função",
+           defeito(r) && f === null, JSON.stringify(r));
+      }
+
+      // ---- 112b. o Zorvin com o 008 e o 023 ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA());
+      await c.query(S008);
+      await c.query(S023);
+      await c.query("insert into departamentos (nome, slug) values ('Audiências','aud'), ('Acordos','acordos')");
+      const linha = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $2, $3) returning id",
+        [nome, "55119" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0"), dep])).rows[0].id;
+      const AUD = await linha("Audiências", 1);
+      const ACO = await linha("Acordos", 2);
+      const U = {
+        willian: "00000000-0000-0000-0000-0000000000a1", ana: "00000000-0000-0000-0000-0000000000a2",
+        saiu: "00000000-0000-0000-0000-0000000000a3", outro: "00000000-0000-0000-0000-0000000000a4",
+        gemeo1: "00000000-0000-0000-0000-0000000000a5", gemeo2: "00000000-0000-0000-0000-0000000000a6",
+        admin: "00000000-0000-0000-0000-0000000000a7",
+      };
+      const pessoa = (id, login, nome, ativo = true, admin = false) => c.query(
+        "insert into usuarios (id, login, nome, ativo, admin) values ($1, $2, $3, $4, $5)", [id, login, nome, ativo, admin]);
+      await pessoa(U.willian, "willian.jones", "Willian Jones");
+      await pessoa(U.ana, "ana.atende", "Ana");
+      await pessoa(U.saiu, "eva.saiu", "Eva", false);
+      await pessoa(U.outro, "davi.acordos", "Davi");
+      await pessoa(U.gemeo1, "gemeo", "Gêmeo 1");
+      await pessoa(U.gemeo2, "GEMEO", "Gêmeo 2");
+      await pessoa(U.admin, "rodrigo.admin", "Rodrigo", true, true);
+      const perm = (u, dep) => c.query("insert into permissoes (usuario_id, departamento_id) values ($1, $2)", [u, dep]);
+      await perm(U.willian, 1); await perm(U.ana, 1); await perm(U.saiu, 1); await perm(U.outro, 2);
+      await perm(U.gemeo1, 1); await perm(U.gemeo2, 1);
+      const conversa = async (tel, dono = null) => {
+        const ct = (await c.query("insert into contatos (numero) values ($1) returning id",
+          ["55119" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0")])).rows[0].id;
+        return (await c.query(`insert into conversas (advogado_id, contato_id, responsavel_id, responsavel_em, responsavel_por)
+                               values ($1, $2, $3, case when $3::uuid is null then null else now() - interval '3 days' end, $3)
+                               returning id`, [tel, ct, dono])).rows[0].id;
+      };
+      const dono = async (id) => (await c.query(
+        "select responsavel_id, responsavel_por, responsavel_em > now() - interval '1 minute' as agora from conversas where id = $1", [id])).rows[0];
+      const passa = async (conv, login) => (await c.query(
+        "select public.zorvin_aviso_passa_ao_advogado($1, $2) r", [conv, login])).rows[0].r;
+
+      const conf = ultimas(await c.query(S056));
+      ok("112b o 056 aplica sobre o Zorvin, e a conferência não acusa defeito", !defeito(conf), JSON.stringify(conf));
+      ok("a fila ganha a coluna do login", item(conf, /fila guarda o login/) === "true", JSON.stringify(conf));
+      ok("a ponte alcança a função, e quem atende não",
+         item(conf, /ponte alcança/) === "true" && item(conf, /quem atende não alcança/) === "true", JSON.stringify(conf));
+
+      // ---- 112c. passa a quem vê a linha, trocando quem estava ----
+      {
+        const conv = await conversa(AUD, U.ana);
+        const r = await passa(conv, "  Willian.Jones ");
+        const d = await dono(conv);
+        ok("112c a conversa passa ao advogado da audiência, pelo login, sem olhar caixa nem espaço",
+           r.passou === true && r.para === U.willian && r.nome === "Willian Jones" && d.responsavel_id === U.willian,
+           JSON.stringify({ r, d }));
+        ok("quem estava com ela deixa de estar, e o log sabe quem era", r.antes === U.ana, JSON.stringify(r));
+        ok("foi o sistema (responsavel_por nulo), agora", d.responsavel_por === null && d.agora === true, JSON.stringify(d));
+        const de_novo = await passa(conv, "willian.jones");
+        const d2 = await dono(conv);
+        ok("a conversa que já era dele fica como estava", de_novo.passou === false && de_novo.motivo === "ja_era_dele"
+           && d2.responsavel_id === U.willian, JSON.stringify(de_novo));
+      }
+      {
+        const conv = await conversa(AUD);
+        const r = await passa(conv, "willian.jones");
+        ok("a conversa sem dono também passa", r.passou === true && (await dono(conv)).responsavel_id === U.willian,
+           JSON.stringify(r));
+      }
+      {
+        const conv = await conversa(AUD, U.ana);
+        const r = await passa(conv, "rodrigo.admin");
+        ok("quem administra vê toda linha, e recebe", r.passou === true, JSON.stringify(r));
+      }
+
+      // ---- 112d. o que não passa ----
+      const naoPassa = async (rotulo, conv, login, motivo) => {
+        const antes = (await dono(conv)).responsavel_id;
+        const r = await passa(conv, login);
+        const depois = (await dono(conv)).responsavel_id;
+        ok(`112d ${rotulo}`, r.passou === false && r.motivo === motivo && antes === depois, JSON.stringify({ r, antes, depois }));
+      };
+      await naoPassa("sem login, nada muda", await conversa(AUD, U.ana), "  ", "sem_login");
+      await naoPassa("login nulo, nada muda", await conversa(AUD, U.ana), null, "sem_login");
+      await naoPassa("login que o Zorvin não tem", await conversa(AUD, U.ana), "ninguem.assim", "login_nao_achado");
+      await naoPassa("login que duas contas têm", await conversa(AUD, U.ana), "gemeo", "login_repetido");
+      await naoPassa("quem saiu não recebe", await conversa(AUD, U.ana), "eva.saiu", "desativado");
+      await naoPassa("quem não vê a linha da conversa não recebe", await conversa(AUD, U.ana), "davi.acordos", "nao_ve_a_linha");
+      await naoPassa("nem a de outra linha que ele não vê", await conversa(ACO, U.outro), "willian.jones", "nao_ve_a_linha");
+      {
+        const r = await passa("00000000-0000-0000-0000-00000000ffff", "willian.jones");
+        ok("112d a conversa que não existe", r.passou === false && r.motivo === "conversa_nao_achada", JSON.stringify(r));
+      }
+
+      // ---- 112e. quem atende não alcança ----
+      {
+        const r = await c.query(`begin; set local role authenticated;
+          select has_function_privilege('public.zorvin_aviso_passa_ao_advogado(uuid, text)', 'execute') pode; commit;`);
+        const pode = ultimas([r[2]])[0].pode;
+        ok("112e quem atende não pode chamar a função", pode === false, String(pode));
+      }
+
+      // ---- 112f. rodar de novo não muda nada ----
+      {
+        const antes = (await c.query("select id, responsavel_id from conversas order by id")).rows;
+        const conf2 = ultimas(await c.query(S056));
+        const depois = (await c.query("select id, responsavel_id from conversas order by id")).rows;
+        ok("112f rodado de novo, o 056 não acusa nada e não mexe em conversa nenhuma",
+           !defeito(conf2) && JSON.stringify(antes) === JSON.stringify(depois), JSON.stringify(conf2));
+      }
+    } catch (e) {
+      ok("a seção 112 rodou até o fim", false, e.stack || e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
+// ==================================================================
+//  113. A PONTE PASSA A CONVERSA AO ADVOGADO NA AUDIÊNCIA, DEPOIS QUE O AVISO SAI
+//
+//  O Vantoro manda o login em `responsavel_da_conversa.login`:
+//    a. o login entra na fila, e a função é chamada com a conversa e o login
+//       DEPOIS de o aviso sair (o Vantoro já confirmado), uma vez, e o log diz;
+//    b. sem login, a fila não ganha a coluna e a função não é chamada;
+//    c. o aviso recusado pela Uazapi não passa a conversa a ninguém;
+//    d. o motivo de não passar vai para o log em português;
+//    e. num banco sem o 056 (a coluna recusada, a função que não existe) o
+//       aviso sai assim mesmo, e o log avisa uma vez;
+//    f. o login com espaço no meio não vai para o banco.
+// ==================================================================
+{
+  console.log("\n113. A ponte passa a conversa ao advogado na audiência, depois que o aviso sai");
+  const esperarAte = async (cond, ms = 8000) => {
+    for (let i = 0; i < ms / 100; i++) { if (cond()) return true; await espera(100); }
+    return Boolean(cond());
+  };
+  const aviso = (id, login, telefone = "77981545221") => ({
+    id, telefone, texto: `Sua audiência é amanhã às 14h. (${id})`, remetente: TELEFONE.numero, finalidade: "CLIENTE",
+    ...(login === undefined ? {} : { responsavel_da_conversa: { login, nome: "WILLIAN JONES" } }) });
+  const filaDe = (t, id) => (t.sb.dados.fila_envio || []).filter((f) => f.aviso_vantoro_id === id);
+  const desfechos = (t, id, qual) => t.van.recebidas.filter((r) => r.metodo === "POST" && r.caminho.endsWith(`/avisos/${id}/${qual}`));
+  const log = (t) => t.registro.join("");
+  const chamadas = [];
+  const rpcQuePassa = (resposta) => ({
+    zorvin_aviso_passa_ao_advogado: (corpo, dados) => {
+      chamadas.push({ corpo, saiu: (dados.fila_envio || []).some((f) => f.conversa_id === corpo.p_conversa && f.status === "enviada") });
+      return { corpo: resposta };
+    },
+  });
+
+  // ---- 113a. o login entra na fila e a conversa passa depois que sai ----
+  {
+    chamadas.length = 0;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-1", "willian.jones")], pendentesAteODesfecho: true },
+      rpcs: rpcQuePassa({ passou: true, para: "u-w", nome: "Willian Jones", antes: null }),
+    });
+    await esperarAte(() => desfechos(t, "R-1", "enviado").length > 0 && chamadas.length > 0, 10000);
+    await espera(600);
+    const f = filaDe(t, "R-1")[0] || {};
+    ok("113a o login do advogado na audiência entra no item da fila", f.responsavel_login === "willian.jones", JSON.stringify(f));
+    ok("a função é chamada com a conversa do aviso e o login, uma vez",
+       chamadas.length === 1 && chamadas[0].corpo.p_conversa === f.conversa_id && chamadas[0].corpo.p_login === "willian.jones",
+       JSON.stringify(chamadas));
+    ok("e só depois de a mensagem sair", chamadas[0] && chamadas[0].saiu === true, JSON.stringify(chamadas));
+    ok("o log diz de quem a conversa ficou", /a conversa agora é de Willian Jones, o advogado na audiência/.test(log(t)),
+       log(t).split("\n").filter((l) => /advogado|R-1/.test(l)).join(" | "));
+    await t.parar();
+  }
+
+  // ---- 113b. sem login ----
+  {
+    chamadas.length = 0;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-2"), aviso("R-3", "", "11990000001")], pendentesAteODesfecho: true },
+      rpcs: rpcQuePassa({ passou: true }),
+    });
+    await esperarAte(() => desfechos(t, "R-2", "enviado").length && desfechos(t, "R-3", "enviado").length, 10000);
+    await espera(600);
+    ok("113b sem login (ou com o login vazio), o item não ganha a coluna",
+       [...filaDe(t, "R-2"), ...filaDe(t, "R-3")].every((f) => !("responsavel_login" in f)),
+       JSON.stringify(t.sb.dados.fila_envio));
+    ok("e a conversa não é passada a ninguém", chamadas.length === 0, JSON.stringify(chamadas));
+    await t.parar();
+  }
+
+  // ---- 113c. o aviso recusado não passa a conversa ----
+  {
+    chamadas.length = 0;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-4", "willian.jones")], pendentesAteODesfecho: true },
+      uazapi: { falharEnvio: { status: 400, corpo: { error: "número não existe no WhatsApp" } } },
+      rpcs: rpcQuePassa({ passou: true }),
+    });
+    await esperarAte(() => desfechos(t, "R-4", "erro").length > 0, 10000);
+    await espera(600);
+    ok("113c o aviso que a Uazapi recusou não passa a conversa a ninguém",
+       desfechos(t, "R-4", "erro").length > 0 && chamadas.length === 0, JSON.stringify(chamadas));
+    await t.parar();
+  }
+
+  // ---- 113d. o motivo de não passar, em português ----
+  {
+    chamadas.length = 0;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-5", "davi.acordos")], pendentesAteODesfecho: true },
+      rpcs: rpcQuePassa({ passou: false, motivo: "nao_ve_a_linha", nome: "Davi" }),
+    });
+    await esperarAte(() => desfechos(t, "R-5", "enviado").length > 0 && chamadas.length > 0, 10000);
+    await espera(400);
+    ok("113d o aviso sai, e o log diz por que a conversa não passou",
+       /a conversa não passou a davi\.acordos — a pessoa não tem permissão para ver a linha desta conversa no Zorvin/.test(log(t)),
+       log(t).split("\n").filter((l) => /davi|R-5/.test(l)).join(" | "));
+    await t.parar();
+  }
+
+  // ---- 113e. num banco sem o 056 ----
+  {
+    let recusar = 1;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-6", "willian.jones"), aviso("R-7", "willian.jones", "11990000002")],
+                 pendentesAteODesfecho: true },
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "fila_envio" && recusar-- > 0
+        ? "Could not find the 'responsavel_login' column of 'fila_envio' in the schema cache" : null),
+      rpcs: { zorvin_aviso_passa_ao_advogado: () => ({ status: 404, corpo: { code: "PGRST202",
+        message: "Could not find the function public.zorvin_aviso_passa_ao_advogado(p_conversa, p_login) in the schema cache" } }) },
+    });
+    await esperarAte(() => desfechos(t, "R-6", "enviado").length && desfechos(t, "R-7", "enviado").length, 12000);
+    await espera(600);
+    ok("113e sem a coluna, o aviso entra na fila sem o login e sai assim mesmo",
+       filaDe(t, "R-6").length === 1 && desfechos(t, "R-6", "enviado").length === 1 && desfechos(t, "R-6", "erro").length === 0,
+       JSON.stringify(t.sb.dados.fila_envio));
+    ok("e entra já na mesma rodada, sem ficar para a seguinte", !/não consegui pôr o aviso na fila/.test(log(t)),
+       log(t).split("\n").filter((l) => /R-6/.test(l)).join(" | "));
+    ok("sem a função, os avisos saem e são confirmados", desfechos(t, "R-7", "enviado").length === 1);
+    ok("e o log avisa do 056 uma vez só", (log(t).match(/ainda não tem o script 056/g) || []).length === 1,
+       log(t).split("\n").filter((l) => /055/.test(l)).join(" | "));
+    await t.parar();
+  }
+
+  // ---- 113f. o login torto não vai para o banco ----
+  {
+    chamadas.length = 0;
+    const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
+      vantoro: { avisos: [aviso("R-8", "willian jones; drop")], pendentesAteODesfecho: true },
+      rpcs: rpcQuePassa({ passou: true }),
+    });
+    await esperarAte(() => desfechos(t, "R-8", "enviado").length > 0, 10000);
+    await espera(400);
+    ok("113f o login com espaço no meio não entra na fila nem vai à função",
+       !("responsavel_login" in (filaDe(t, "R-8")[0] || {})) && chamadas.length === 0, JSON.stringify(filaDe(t, "R-8")));
+    await t.parar();
   }
 }
 
