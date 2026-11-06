@@ -21965,8 +21965,11 @@ create policy departamentos_leitura on departamentos for select using (true);
       await msg(2, "advogado", "MENSAGEM-DEPOIS-DO-CLIENTE");
       // SAC 3: outra pergunta parecida, e um aviso automático antes da resposta de gente
       await msg(3, "contato", "Bom dia, como esta o andamento do processo?");
-      await msg(3, "advogado", "AVISO-AUTOMATICO de audiência", { automatica: true });
-      await msg(3, "advogado", "Bom dia, Pedro! Já confiro e te retorno.", { quem: U.sac });
+      // o aviso sai um minuto depois, e a pessoa responde meia hora depois dele:
+      // tomado como a resposta, o aviso deixaria o par sem a equipe (a janela de
+      // 15 minutos depois dele não tem gente), e o Pedro sumiria dos exemplos
+      await msg(3, "advogado", "AVISO-AUTOMATICO de audiência", { automatica: true, min: 8 });
+      await msg(3, "advogado", "Bom dia, Pedro! Já confiro e te retorno.", { quem: U.sac, min: 40 });
       // SAC 4: pergunta parecida, resposta depois de 30 horas (fora das 24)
       await msg(4, "contato", "Boa tarde como está o andamento do meu processo", { min: 100 });
       await msg(4, "advogado", "RESPOSTA-TARDE-DEMAIS", { min: 100 + 30 * 60 });
@@ -21987,7 +21990,11 @@ create policy departamentos_leitura on departamentos for select using (true);
       // Estratégico 12: pergunta parecida, de outro departamento
       await msg(12, "contato", "Boa tarde, como está o andamento do meu processo?");
       await msg(12, "advogado", "RESPOSTA-DE-OUTRO-DEPARTAMENTO", { quem: U.adm });
-      // as conversas de agora
+      // as conversas de agora; a do SAC já teve, antes de todas, a mesma pergunta
+      // respondida. Antes de todas: mais nova, ela ganharia da Audiências pela
+      // data, e a fonte sem peso passaria na 108d
+      await msg(1, "contato", "Boa tarde, como está o andamento do meu processo? (da semana passada)", { min: -2 });
+      await msg(1, "advogado", "RESPOSTA-DA-PROPRIA-CONVERSA", { min: -1 });
       await msg(1, "contato", "Boa tarde, como está o andamento do meu processo?");
       await msg(10, "contato", "Boa tarde, como está o andamento do meu processo?");
       await msg(11, "contato", "Prezados, segue a proposta de acordo");
@@ -22018,8 +22025,14 @@ create policy departamentos_leitura on departamentos for select using (true);
          lista(ex).some((x) => /Pedro! Já confiro/.test(x.equipe || "")) && !JSON.stringify(ex).includes("AVISO-AUTOMATICO"), JSON.stringify(ex));
       ok("a resposta de mais de 24 horas não vira par", !JSON.stringify(ex).includes("RESPOSTA-TARDE-DEMAIS"));
       ok("o grupo não entra", !JSON.stringify(ex).includes("RESPOSTA-NO-GRUPO"));
-      ok("a conversa de agora não é exemplo de si mesma", lista(ex).every((x) => x.cliente !== null));
+      ok("a conversa de agora não é exemplo de si mesma", lista(ex).length > 0 && !JSON.stringify(ex).includes("RESPOSTA-DA-PROPRIA-CONVERSA"),
+         JSON.stringify(lista(ex).map((x) => x.equipe)));
       ok("o outro departamento não entra", !JSON.stringify(ex).includes("RESPOSTA-DE-OUTRO-DEPARTAMENTO"));
+      // quem administra vê todos os telefones: é aí que o recorte do departamento
+      // tem de vir da função, e não da regra de leitura
+      const exAdm = await exemplos(c, U.adm, C(1), "Boa tarde, como está o andamento do meu processo?");
+      ok("nem para quem vê todos os telefones", lista(exAdm).length > 0 && !JSON.stringify(exAdm).includes("RESPOSTA-DE-OUTRO-DEPARTAMENTO"),
+         JSON.stringify(lista(exAdm).map((x) => x.telefone)));
       ok("as parecidas vêm antes das recentes (o comprovante entra no fim)",
          lista(ex).length >= 3 && /comprovante/.test(lista(ex)[lista(ex).length - 1].cliente || ""), JSON.stringify(lista(ex).map((x) => x.cliente)));
       ok("a pessoa do SAC não recebe a Audiências, que ela não vê", !JSON.stringify(ex).includes("RESPOSTA-DA-AUDIENCIAS"));

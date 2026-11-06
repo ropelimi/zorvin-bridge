@@ -3597,14 +3597,68 @@ uns US$ 2.
 do Cliente, o SAC é 26 mil das 39 mil mensagens), e é decisão: a fonte
 principal vale para os exemplos, que é onde o jeito de escrever pesa mais.
 
-**Fica de fora, e é decisão:** a troca do modelo. O Quazar continua no Haiku
-5.5 (`COPILOTO_MODELO`); um modelo maior escreve melhor e custa mais, e a
-escolha é do Rodrigo, na Render.
+**O manual foi reescrito no mesmo dia, a pedido do Rodrigo** (*"reveja tudo
+isso e melhore o manual também, mesmo que tenha que sobrepor o que eu
+escrevi"*), direto em `zorvin_copiloto.instrucoes`, com o OK dele no
+conector. Entraram três seções no alto: **"O jeito certo é o nosso"** (seguir
+os exemplos de verdade), **"Quem resolve"** (a atendente é a responsável; nada
+de "passar para o responsável"; "vou verificar" só quando é preciso olhar o
+processo) e **"O que pedimos ao cliente"** (a senha do gov.br e do Serasa, o
+código de confirmação e os documentos). O resto é o dele, com as frases
+defensivas trocadas pelo que se faz.
+
+**A troca do modelo é do Rodrigo, na Render** (`COPILOTO_MODELO`). Indicado a
+ele: o Sonnet 5.5, que imita melhor o jeito de escrever pelos exemplos, por
+uns US$ 0,02 a 0,03 por sugestão (estimado pela tabela de preços, e não
+medido). **Para a troca não cortar a resposta, a sugestão e o "Pedir uma
+mudança" levam o teto e o esforço escritos** (`PEDIDO_DA_SUGESTAO`: 8000 e
+médio): no Sonnet 5.5 o esforço padrão é alto, o "pensar antes" conta dentro
+do teto, e com os 2048 de antes ele pararia no meio. O médio é o que o Haiku
+já usava. O funil e a leitura das respostas aos avisos ganharam folga (4096 e
+2048). Nenhum pedido manda `temperature`, `top_p` ou `thinking: disabled`,
+que os modelos maiores recusam, e a seção 62 confere isso.
 
 Provas: seção 108 (o 054 num Postgres de verdade, com as regras de leitura de
-produção, 35 conferências) e seção 109 (a ponte: as regras, os exemplos no
+produção, 36 conferências) e seção 109 (a ponte: as regras, os exemplos no
 pedido, a limpeza, a falha, a demora, o "Pedir uma mudança" e a rodada
-seguida, 28).
+seguida, 28), e as conferências do teto nas seções 62 e 101.
+
+**36 sabotagens e 36 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma (e a cópia sem sabotagem passou inteira):
+
+- a ponte de antes inteira (22 reprovações);
+- **a ponte:** as regras de antes; sem os exemplos (13); lidos com a chave da
+  ponte; sem trocar o nome do cliente, nem o da atendente, nem com acento e
+  maiúscula; sem tirar CPF e telefone; o exemplo fechando o bloco por escrito;
+  o texto procurado sendo a última mensagem qualquer, e sem o áudio; sem o
+  prazo dos exemplos; os exemplos no sistema, e não no pedido (7); o ajuste
+  sem os exemplos; sem o aviso do 054 que falta; a releitura sem seguir; o
+  pedido de aprender de antes;
+- **o 054:** o grupo entrando; o aviso automático como resposta; sem a janela
+  de 24 horas; a equipe depois de o cliente responder; o cliente só com a
+  primeira mensagem; a fonte sem peso; as fontes ignoradas; outro departamento
+  entrando; `security definer`; a conversa de agora como exemplo; sem as
+  recentes; as recentes antes das parecidas; as notas zeradas sem guardar, e
+  em toda rodada; o SAC plantado em toda rodada; sem a prioridade na fila;
+  `anon` chamando os exemplos; quem atende escolhendo a fonte; as notas
+  guardadas legíveis pela tela.
+
+**A primeira rodada achou quatro furos, e os quatro eram da prova:**
+
+- **o aviso automático como resposta passava**: o aviso saía um minuto antes
+  da resposta de gente, e a janela de 15 minutos depois dele trazia a resposta
+  assim mesmo. Hoje a pessoa responde meia hora depois do aviso;
+- **outro departamento entrando passava**: a cena perguntava como quem só vê o
+  SAC, e a regra de leitura já tirava o outro departamento. Hoje ela pergunta
+  também como quem vê todos os telefones, que é onde o recorte tem de vir da
+  função;
+- **a conversa de agora como exemplo passava**: ela não tinha nenhuma troca
+  antiga, então nunca viraria par. Hoje ela tem a mesma pergunta respondida,
+  antes de todas;
+- **"antes de todas" ensinou na rodada seguinte**: posta depois das outras,
+  essa troca era a mais nova, e ganhava da Audiências pela data, e a fonte sem
+  peso passou a passar na 108d. A rodada foi refeita inteira sobre a prova
+  final.
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
