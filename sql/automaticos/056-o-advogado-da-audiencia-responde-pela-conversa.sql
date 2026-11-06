@@ -51,27 +51,27 @@
 --    008 (o responsável) e 023 (`zorvin_ve_o_telefone`)
 -- ============================================================
 
-do $s055$
+do $s056$
 begin
   -- A TABELA DA CONFERÊNCIA NASCE ANTES DA GUARDA (a lição do 006 e do 007).
-  drop table if exists zorvin_conferencia_055;
-  create temp table zorvin_conferencia_055 (item text, resposta text);
+  drop table if exists zorvin_conferencia_056;
+  create temp table zorvin_conferencia_056 (item text, resposta text);
 
   if to_regclass('public.conversas') is null
      or to_regclass('public.usuarios') is null
      or to_regclass('public.fila_envio') is null then
-    insert into zorvin_conferencia_055
+    insert into zorvin_conferencia_056
       values ('sem as tabelas do Zorvin', 'nada a fazer aqui');
-    raise notice 'Zorvin: sem as tabelas de conversas — script 055 não fez nada.';
+    raise notice 'Zorvin: sem as tabelas de conversas — script 056 não fez nada.';
     return;
   end if;
   if not exists (select 1 from information_schema.columns
                   where table_schema = 'public' and table_name = 'conversas'
                     and column_name = 'responsavel_id')
      or to_regprocedure('public.zorvin_ve_o_telefone(uuid, uuid)') is null then
-    insert into zorvin_conferencia_055
+    insert into zorvin_conferencia_056
       values ('o responsável (008) e a regra de acesso (023)', 'NÃO — rode o script 008 e o 023 antes');
-    raise notice 'Zorvin: sem o 008 ou o 023 — script 055 não fez nada.';
+    raise notice 'Zorvin: sem o 008 ou o 023 — script 056 não fez nada.';
     return;
   end if;
 
@@ -139,7 +139,7 @@ begin
   -- ----------------------------------------------------------
   --  A CONFERÊNCIA, na última linha (regra 6 do LEIA-ME).
   -- ----------------------------------------------------------
-  insert into zorvin_conferencia_055
+  insert into zorvin_conferencia_056
   select 'a fila guarda o login do advogado da audiência',
          exists (select 1 from information_schema.columns
                   where table_schema = 'public' and table_name = 'fila_envio'
@@ -154,7 +154,7 @@ begin
          (not exists (select 1 from pg_roles where rolname = 'authenticated')
           or not has_function_privilege('authenticated',
                'public.zorvin_aviso_passa_ao_advogado(uuid, text)', 'execute'))::text;
-end $s055$;
+end $s056$;
 
 -- A RESPOSTA DE "DEU CERTO?", na última linha, que é a que o editor mostra.
-select * from zorvin_conferencia_055;
+select * from zorvin_conferencia_056;
