@@ -333,7 +333,10 @@ gatilho dos arquivos mexe em `arquivada`.
 
 **A mensagem não se perde:**
 
-- ela entra na conversa como qualquer outra e soma nas não lidas;
+- ela entra na conversa como qualquer outra e soma nas não lidas. **Desde
+  06/11 ela não abre protocolo nem entra na fila de espera**: a arquivada fica
+  finalizada (ver "A conversa arquivada fica finalizada, e fora dos números
+  (script 057, 06/11)");
 - a linha "Arquivadas" do painel mostra quantas conversas de lá têm mensagem
   por ler;
 - o aviso de mensagem nova (som e tarja) segue as regras dele, sem mudança.
@@ -3765,8 +3768,11 @@ dólares.
 - **a carência não é provada entre 00:00 e 01:00 de São Paulo**: a cena monta
   um expediente que fechou há 20 minutos, e ele atravessaria a meia-noite. A
   seção diz quando pula;
-- **a conversa arquivada não fica de fora**, como na mensagem pronta (021): o
-  cliente que escreve numa arquivada também está esperando.
+- ~~**a conversa arquivada não fica de fora**, como na mensagem pronta (021): o
+  cliente que escreve numa arquivada também está esperando.~~ **Mudou em
+  06/11, no 057:** a arquivada fica finalizada, e o Quazar à noite não escreve
+  para ela. A mensagem pronta (021) continua saindo, e é decisão — ver "A
+  conversa arquivada fica finalizada, e fora dos números (script 057, 06/11)".
 
 Provas: seção 110 (o 055 num Postgres de verdade, com um expediente montado
 para estar fechado a qualquer hora em que a prova rode, 22 conferências) e
@@ -4306,6 +4312,127 @@ lidas uma a uma:
   alfabética (Ana, Bia, Rodrigo) coincidia com a das atrasadas. Entrou o Aldo,
   que vem antes no alfabeto e não tem nenhuma atrasada, e as 14 sabotagens do
   051 foram rodadas de novo sobre a cena nova.
+
+## A conversa arquivada fica finalizada, e fora dos números (script 057, 06/11)
+
+Pedido do Rodrigo: *"Todas as conversas 'Arquivadas' não devem ser
+contabilizada nos números do Painel, e sempre que alguma conversa que está
+arquivada enviar mensagem nova, não deve abrir protocolo, as conversas
+arquivadas precisam se manter finalizadas. Isso porque as conversas
+arquivadas costumam ser, na grande maioria das vezes, propagandas."*
+
+**Medido em 06/11, só contando:** 31 conversas arquivadas, 12 delas fora de
+"Finalizados" ou na fila de espera, e 11 protocolos abertos em arquivadas. Nos
+30 dias anteriores, 25 dos 562 protocolos abertos, 62 mensagens e 42 cliques
+de "Já tratei" eram de conversas arquivadas, e 22 dos 1.693 cartões do funil
+eram de clientes que só têm conversa arquivada no funil deles.
+
+`sql/automaticos/057-a-arquivada-fica-finalizada.sql`:
+
+| o caso | antes | agora |
+|---|---|---|
+| a mensagem do cliente numa arquivada | entrava, e abria um protocolo novo (028) e a conversa na fila de espera | entra, sem protocolo novo e fora da fila: a conversa continua finalizada |
+| a mensagem da equipe numa arquivada | podia tirar a conversa de "Novos" | igual: nada muda na aba |
+| arquivar (de não arquivada para arquivada) | a aba ficava como estava | **finaliza**: o atendimento de agora fecha em nome de quem arquivou, e a conversa sai da fila. **Sem "Já tratei"**: arquivar não é tratar |
+| desarquivar | — | a conversa continua finalizada, e a próxima mensagem do cliente abre o protocolo novo |
+| o Reabrir numa arquivada | abria | recusado (42501): *"Esta conversa está arquivada: desarquive antes de reabrir."* |
+| o "Já tratei" desfeito numa arquivada | reabria o atendimento | sai do relatório, e a conversa continua finalizada |
+| a instalação | — | finaliza as arquivadas de hoje, com o atendimento fechado **sem ninguém** (o banco não sabe quem arquivou); em toda rodada, porque rodar de novo só acha o que ficou fora da regra |
+
+**Arquivada é o estado de agora**, e não o de quando a mensagem chegou: quem
+desarquiva traz a conversa de volta aos números.
+
+**Os números do Painel deixam a arquivada de fora:**
+
+| onde | como |
+|---|---|
+| o resumo de mensagens (`painel_dashboard`, `painel_numeros`) | a vista `painel_mensagens` ganhou um `where`, com as mesmas colunas (conferido contra a de produção) |
+| os protocolos (`zorvin_relatorio_atendimentos`, 052) | o protocolo de uma arquivada sai do total, dos tempos, do prazo e da planilha |
+| o "Já tratei" (`zorvin_relatorio_tratados`) | o clique numa arquivada sai |
+| o funil (`zorvin_relatorio_funil`, 043) | o cliente sai só quando **todas** as conversas dele naquele funil estão arquivadas: o cliente com outra conversa no funil continua contando |
+| o Quazar à noite (`zorvin_quazar_noturno_pendentes`, 055) | não escreve para a arquivada |
+
+**A carteira por responsável (051) e o aviso de espera (041) já deixavam a
+arquivada de fora**, e não mudaram.
+
+**O `zorvin_relatorio_tratados` de produção não é o do 010**: foi colado à mão
+depois, com outro texto. O 057 parte do de produção, transcrito e conferido
+pela impressão digital do corpo, e não do arquivo.
+
+**A mensagem pronta fora do horário (021/022) continua saindo para a
+arquivada, e é decisão**: o pedido foi sobre os números e o protocolo, e a
+resposta automática é o que o cliente lê. Calá-la para as arquivadas é um
+pedido à parte.
+
+**Como cada peça sabe que é arquivada:**
+
+- **o gatilho da mensagem** (`zorvin_situacao_da_mensagem`) e o da espera
+  (`zorvin_marcar_espera`) olham `conversas.arquivada` antes de tudo;
+- **as contas do zero** (`zorvin_recontar_situacao`, `zorvin_recontar_espera`,
+  que a junção da ponte e a importação chamam) também: recontada, a arquivada
+  continua finalizada, fora da fila, e sem protocolo novo pelo que o cliente
+  escreveu;
+- **`zorvin_situacao_fora_da_regra`** tem a régua da arquivada (finalizada,
+  fora da fila e com o atendimento fechado), e é por ela que a instalação acha
+  o que finalizar;
+- **o gatilho novo** (`zorvin_arquivada_fica_finalizada`, `before update of
+  arquivada`) é `security definer`: quem atende arquiva pela tela, e não
+  alcança `zorvin_atendimentos`. Ele dispara sem passar pela guarda do 028
+  (a guarda vale para quem MENCIONA `situacao`), e falhando, a conversa
+  arquiva assim mesmo, com um aviso no log do banco.
+
+**As versões de referência** (regra 5 do LEIA-ME) de `zorvin_marcar_espera`,
+`zorvin_recontar_espera`, `zorvin_situacao_da_mensagem`,
+`zorvin_recontar_situacao`, `zorvin_situacao_fora_da_regra`,
+`zorvin_situacao_desfeita`, `zorvin_situacao_guardada`,
+`zorvin_relatorio_atendimentos`, `zorvin_relatorio_tratados`,
+`zorvin_relatorio_funil` e `zorvin_quazar_noturno_pendentes` passam a ser as
+do 057. Cada uma é a do script anterior, com a régua da arquivada e nada mais.
+
+**Um efeito, dito ao Rodrigo:** o cliente que escreveu enquanto a conversa
+estava arquivada não abre protocolo quando ela é desarquivada; abre na
+mensagem seguinte. Até lá, a conversa fica em "Finalizados".
+
+**A ponte não mudou**: é banco e painel. O painel não precisa de nada: a aba e
+os números vêm do banco.
+
+Prova: seção 114, 38 conferências, num Postgres de verdade, com o Zorvin
+montado pelos próprios scripts (004 a 055 e o painel de agosto): as guardas
+(o banco limpo e o banco sem o 028), a instalação, a mensagem do cliente e da
+equipe numa arquivada (e o contraste da finalizada que não está arquivada), as
+contas do zero, arquivar pela tela como quem atende, desarquivar, o Reabrir,
+o clique desfeito, os cinco números (a mesma conversa contada e depois
+arquivada), o Quazar à noite, rodar de novo e a conferência que diz NÃO quando
+um número quebra para quem atende.
+
+**24 sabotagens, 23 pegas e uma que vaza com razão**, todas rodadas em cópias
+e lidas uma a uma (e a cópia de controle passou inteira):
+
+- a ponte de antes, sem o 057 (27 reprovações);
+- **a mensagem e a espera:** o gatilho da mensagem sem a guarda; o da espera
+  sem a guarda; a espera do zero contando a arquivada; a situação do zero
+  abrindo protocolo; a situação do zero sem fechar o atendimento;
+- **a régua:** "fora da regra" sem a arquivada; a instalação sem finalizar as
+  de hoje; o clique desfeito reabrindo; o Reabrir sem recusa;
+- **os números:** a contabilização, o "Já tratei", o funil e o Quazar com a
+  arquivada; o funil tirando quem tem qualquer conversa arquivada; a vista do
+  painel sem o `where`;
+- **arquivar:** sem quem arquivou; como invoker; sem tirar da fila; sem o
+  gatilho;
+- **o script:** a conferência como dona do banco; a tabela da conferência
+  depois da guarda; sem a guarda do 028;
+- **e a que vaza:** o gatilho disparando também quando a conversa já estava
+  arquivada. Numa arquivada não há atendimento aberto nem aba fora de
+  "Finalizados" (é a regra), e a conta dá o mesmo: a pergunta é a segunda
+  guarda, e poupa o trabalho — a régua de 25/09.
+
+**A primeira rodada achou três defeitos da PROVA, e não do script:** as cenas
+da mensagem nova usavam horas de alguns minutos atrás, antes da finalização da
+instalação, e a régua do 028 (*a mensagem com data de antes da finalização não
+reabre*) já as segurava sem o 057. Três sabotagens vazaram por isso. Hoje as
+mensagens vêm depois, e entraram as contas do zero, que nenhuma cena chamava.
+E a sabotagem da guarda do 028 desligava só metade da condição — a lição do
+044, outra vez. A rodada foi refeita inteira sobre a prova final.
 
 ## Quem não entrou não alcança nada (script 032, 22/10)
 
