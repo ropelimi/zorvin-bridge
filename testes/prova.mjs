@@ -22626,6 +22626,9 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
   const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
   const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
   const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  // GUARDADO: a ponte que não subiu (a porta tomada por outra cópia, numa
+  // rodada de sabotagens) não pode estourar a seção e esconder o resto.
+  const estadoDa = async (t) => { try { return await (await fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`)).json(); } catch (e) { return { erro: e.message }; } };
 
   // ---- 111a. a resposta de ensaio ----
   {
@@ -22743,14 +22746,14 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     const t2 = await subirTudo(rapido(claude, { QUAZAR_NOITE: "desligado" }), { tabelas: tabelas(), rpcs: { zorvin_quazar_noturno_pendentes: () => { perguntas2 += 1; return { corpo: [ITEM] }; } } });
     await espera(1200);
     ok("com QUAZAR_NOITE=desligado, não roda, e o estado diz", perguntas2 === 0
-       && (await (await fetch(`http://127.0.0.1:${t2.porta}/copiloto/estado`)).json()).noite === false, `${perguntas2} perguntas`);
+       && (await estadoDa(t2)).noite === false, `${perguntas2} perguntas`);
     await t2.parar();
     let perguntas3 = 0;
     const t3 = await subirTudo({ QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400" }, { tabelas: tabelas(),
       rpcs: { zorvin_quazar_noturno_pendentes: () => { perguntas3 += 1; return { corpo: [ITEM] }; } } });
     await espera(1200);
     ok("sem a chave da Anthropic, não roda", perguntas3 === 0, `${perguntas3} perguntas`);
-    ok("e o estado da ponte diz que ela escreve à noite", (await (await fetch(`http://127.0.0.1:${t3.porta}/copiloto/estado`)).json()).noite === true);
+    ok("e o estado da ponte diz que ela escreve à noite", (await estadoDa(t3)).noite === true);
     await t3.parar(); await claude.parar();
   }
 }
