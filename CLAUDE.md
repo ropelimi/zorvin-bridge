@@ -3497,6 +3497,169 @@ reprovações, que são as frases de antes, e só elas: 2218 de 2234 passam); a
 recusa do resumo de volta para "A IA"; e a recusa da sugestão de volta para
 "sem o copiloto".
 
+### O Quazar aprende com a equipe de verdade (script 054, 06/11)
+
+Pedido do Rodrigo, depois de ver as notas: *"O Quazar tem que usar nossos
+dados para aprender o jeito que conversamos. O jeito que conversamos com o
+cliente é o jeito certo!!! Ele é quem aprende com a gente [...] para parecer
+um dos nossos operadores humanos. Use e abuse dos dados das conversas do
+telefone do SAC. Lá é onde tem o ouro!"* E: *"O SAC é a fonte principal para o
+departamento Sucesso do Cliente. Já para o departamento Acordos, todas as
+conversas em todos os telefones do departamento Acordos devem ser a fonte
+principal."* E dois fatos do escritório que as regras contradiziam: *"o
+responsável é o atendente que está falando com o cliente, é ele quem resolve"*
+e *"temos que pedir senha sim! [...] assim como assinar o contrato pelo gov,
+nós fazemos e pedimos o código de confirmação"*.
+
+**O que estava errado, lido no banco em 06/11:** as notas que a rodada do 050
+escreveu viraram uma lista de proibições. Nas do Sucesso do Cliente, "levar ao
+responsável" aparecia 18 vezes, e "não pedir CPF, senha, código do gov.br",
+"mesmo que o cliente ofereça". Elas chegaram a dizer que as conversas da
+equipe "não são modelo: têm muitas quebras de regra". **O pedido de aprender
+(meu, de 05/11) mandava anotar "o que a equipe não faz" e dava ao manual a
+palavra final, e a IA passou a ler a equipe para corrigi-la.** E a sugestão
+não via nenhuma resposta de verdade: só regras.
+
+**O que mudou:**
+
+| onde | antes | agora |
+|---|---|---|
+| as regras da sugestão (`COPILOTO_REGRAS`) | "Não repita senhas, CPF completo nem dados bancários" | **"A EQUIPE É O MODELO"**: a mensagem tem de parecer de uma atendente; quem responde **é** a responsável (sem "passar para o responsável"); pedir a senha do gov.br ou do Serasa e o código de confirmação faz parte do atendimento; só não se **copia** na resposta a senha que o cliente mandou |
+| o pedido da sugestão e do "Pedir uma mudança" | a conversa | **os exemplos de verdade** (`<exemplos>`) antes da conversa |
+| o pedido de aprender (`APRENDER_REGRAS`) | as perguntas, os procedimentos, "o que a equipe não faz" | a equipe é o modelo, nunca julgá-la; COMO ESCREVEMOS (com as frases dela), O QUE OS CLIENTES PERGUNTAM E COMO RESPONDEMOS, PROCEDIMENTOS, COMO OS CLIENTES ESCREVEM, PALAVRAS DA CASA; e os dois fatos do escritório |
+| as notas | as de 05/11 | **começam de novo**, uma vez, guardadas antes |
+| a releitura | um pedaço por minuto | **um atrás do outro** (10 s) enquanto o pedaço vem cheio |
+| o manual | "Dados bancários e número da OAB: só os que o responsável passar" | "só os que já estão na conversa ou que o advogado do caso informou" (a única linha; o resto é do Rodrigo, editado por ele em 05/11) |
+
+#### Os exemplos de verdade (`zorvin_copiloto_exemplos`)
+
+A cada clique em "Sugerir resposta" (e em "Pedir uma mudança"), a ponte pede
+ao banco, **como quem pediu**, as respostas de verdade da equipe para
+mensagens parecidas com a do cliente de agora, e o Quazar imita o jeito.
+
+- **parecida é pelo trigrama**, sem acento, com o índice da busca
+  (`mensagens_busca_idx`), nos últimos 365 dias. Medido em produção, só o
+  tempo: cerca de 1,1 segundo, a maior parte na busca pelo índice;
+- **o texto procurado** é o que o cliente disse depois da última mensagem da
+  equipe (até três, o áudio pela transcrição), ou a última dele
+  (`textoParaOsExemplos`);
+- **o par** é a mensagem do cliente (e as que ele mandou até a resposta, até
+  três) e a primeira resposta da equipe em até 24 horas (e as que ela mandou
+  em seguida, até três, em 15 minutos, sem o cliente no meio). **O aviso
+  automático (037) não é a resposta**; o grupo, a conversa de agora e o
+  departamento de outra pessoa não entram;
+- **uma por conversa**, a mesma resposta não se repete, até 8;
+- **as parecidas primeiro**; completam a lista as trocas mais recentes da
+  fonte principal (30 dias), para o jeito de escrever valer mesmo quando o
+  cliente só disse "oi";
+- **no pedido, e não no sistema**: eles mudam a cada clique, e no sistema
+  quebrariam o cache das partes que não mudam.
+
+**A fonte principal** (`zorvin_copiloto_fontes`): departamento **sem linha**
+usa todos os telefones dele como fonte principal (é o Acordos, como o Rodrigo
+pediu); departamento **com linhas** tem esses telefones como fonte principal e
+os outros do departamento com menos peso (+0,15 na nota da semelhança para a
+fonte). Nasce com o **SAC no Sucesso do Cliente**, uma vez só (a semente
+`copiloto:fonte-sac-054`): tirado pela administração, não volta. Quem entrou
+lê; quem administra cria e apaga. **Ainda não há tela para escolher a fonte**:
+por enquanto, pelo conector do Supabase, a pedido do Rodrigo.
+
+**Sem dado de outro cliente no pedido** (`exemploParaOCopiloto`): o nome do
+cliente do exemplo (as palavras de `nome`, `nome_zorvin` e `vantoro_nome`, sem
+olhar acento nem maiúscula) vira `{nome}`, o da atendente vira `{atendente}`
+— que é como o Quazar escreve —, e CPF, CNPJ, processo, e-mail e telefone saem
+(`semDadosPessoais`). O exemplo também não fecha o bloco por escrito
+(`semAEtiqueta`, que ganhou `exemplos` e `exemplo`). **O texto dos exemplos
+vai à Anthropic**, como a conversa de agora já ia: é a autorização de 13/10,
+e nenhum texto de cliente passou por esta sessão (as provas usam conversas
+inventadas; a medição em produção leu só tempos e contagens).
+
+**Não segura a sugestão**: sem o 054, uma linha no log e nenhum exemplo; a
+função que falha, ou que demora mais de 3 segundos
+(`COPILOTO_EXEMPLOS_PRAZO_MS`, opcional), uma linha no log e a sugestão sai
+sem eles.
+
+#### As notas começam de novo
+
+O 054 guarda o texto de cada linha em `zorvin_copiloto_aprendido_antes_054`
+(com quem editou: as do SAC tinham uma correção do Rodrigo, de 05/11 às 22h50)
+e zera as notas, uma vez (a semente `copiloto:notas-de-novo-054`). As notas de
+antes partiriam das proibições: a rodada continua das notas que existem. **As
+linhas da fonte principal (o SAC), do Sucesso do Cliente e do Acordos ficam
+sem `aprendido_em`**, e a fila do 050 começa por elas; as outras entram logo
+depois. **Com o pedaço cheio, a rodada lê o seguinte 10 segundos depois**
+(`COPILOTO_APRENDER_SEGUIDO_MS`), e não um minuto: a primeira passada pelas
+~62 mil mensagens, contadas duas vezes (no telefone e no departamento), leva
+umas três horas, com o tempo de cada resposta da IA. Pela tabela do copiloto,
+uns US$ 2.
+
+**A nota do departamento continua lendo todos os telefones dele** (no Sucesso
+do Cliente, o SAC é 26 mil das 39 mil mensagens), e é decisão: a fonte
+principal vale para os exemplos, que é onde o jeito de escrever pesa mais.
+
+**O manual foi reescrito no mesmo dia, a pedido do Rodrigo** (*"reveja tudo
+isso e melhore o manual também, mesmo que tenha que sobrepor o que eu
+escrevi"*), direto em `zorvin_copiloto.instrucoes`, com o OK dele no
+conector. Entraram três seções no alto: **"O jeito certo é o nosso"** (seguir
+os exemplos de verdade), **"Quem resolve"** (a atendente é a responsável; nada
+de "passar para o responsável"; "vou verificar" só quando é preciso olhar o
+processo) e **"O que pedimos ao cliente"** (a senha do gov.br e do Serasa, o
+código de confirmação e os documentos). O resto é o dele, com as frases
+defensivas trocadas pelo que se faz.
+
+**A troca do modelo é do Rodrigo, na Render** (`COPILOTO_MODELO`). Indicado a
+ele: o Sonnet 5.5, que imita melhor o jeito de escrever pelos exemplos, por
+uns US$ 0,02 a 0,03 por sugestão (estimado pela tabela de preços, e não
+medido). **Para a troca não cortar a resposta, a sugestão e o "Pedir uma
+mudança" levam o teto e o esforço escritos** (`PEDIDO_DA_SUGESTAO`: 8000 e
+médio): no Sonnet 5.5 o esforço padrão é alto, o "pensar antes" conta dentro
+do teto, e com os 2048 de antes ele pararia no meio. O médio é o que o Haiku
+já usava. O funil e a leitura das respostas aos avisos ganharam folga (4096 e
+2048). Nenhum pedido manda `temperature`, `top_p` ou `thinking: disabled`,
+que os modelos maiores recusam, e a seção 62 confere isso.
+
+Provas: seção 108 (o 054 num Postgres de verdade, com as regras de leitura de
+produção, 36 conferências) e seção 109 (a ponte: as regras, os exemplos no
+pedido, a limpeza, a falha, a demora, o "Pedir uma mudança" e a rodada
+seguida, 28), e as conferências do teto nas seções 62 e 101.
+
+**36 sabotagens e 36 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma (e a cópia sem sabotagem passou inteira):
+
+- a ponte de antes inteira (22 reprovações);
+- **a ponte:** as regras de antes; sem os exemplos (13); lidos com a chave da
+  ponte; sem trocar o nome do cliente, nem o da atendente, nem com acento e
+  maiúscula; sem tirar CPF e telefone; o exemplo fechando o bloco por escrito;
+  o texto procurado sendo a última mensagem qualquer, e sem o áudio; sem o
+  prazo dos exemplos; os exemplos no sistema, e não no pedido (7); o ajuste
+  sem os exemplos; sem o aviso do 054 que falta; a releitura sem seguir; o
+  pedido de aprender de antes;
+- **o 054:** o grupo entrando; o aviso automático como resposta; sem a janela
+  de 24 horas; a equipe depois de o cliente responder; o cliente só com a
+  primeira mensagem; a fonte sem peso; as fontes ignoradas; outro departamento
+  entrando; `security definer`; a conversa de agora como exemplo; sem as
+  recentes; as recentes antes das parecidas; as notas zeradas sem guardar, e
+  em toda rodada; o SAC plantado em toda rodada; sem a prioridade na fila;
+  `anon` chamando os exemplos; quem atende escolhendo a fonte; as notas
+  guardadas legíveis pela tela.
+
+**A primeira rodada achou quatro furos, e os quatro eram da prova:**
+
+- **o aviso automático como resposta passava**: o aviso saía um minuto antes
+  da resposta de gente, e a janela de 15 minutos depois dele trazia a resposta
+  assim mesmo. Hoje a pessoa responde meia hora depois do aviso;
+- **outro departamento entrando passava**: a cena perguntava como quem só vê o
+  SAC, e a regra de leitura já tirava o outro departamento. Hoje ela pergunta
+  também como quem vê todos os telefones, que é onde o recorte tem de vir da
+  função;
+- **a conversa de agora como exemplo passava**: ela não tinha nenhuma troca
+  antiga, então nunca viraria par. Hoje ela tem a mesma pergunta respondida,
+  antes de todas;
+- **"antes de todas" ensinou na rodada seguinte**: posta depois das outras,
+  essa troca era a mais nova, e ganhava da Audiências pela data, e a fonte sem
+  peso passou a passar na 108d. A rodada foi refeita inteira sobre a prova
+  final.
+
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
 Pedido do Rodrigo: o que o DataCrazy faz nas conversas, *"para facilitar a
