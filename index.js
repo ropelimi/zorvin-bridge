@@ -10039,6 +10039,14 @@ function explicarFalhaDaAnthropic(status, corpo) {
   return `A Anthropic não respondeu (código ${status})${detalhe ? `: ${detalhe}` : '.'}`;
 }
 
+// O TETO E O ESFORÇO DA SUGESTÃO E DO "PEDIR UMA MUDANÇA" (06/11), escritos,
+// e não o padrão de cada modelo. O modelo se troca pela Render
+// (COPILOTO_MODELO), sem ninguém reler este código: no Haiku 5.5 o esforço
+// padrão é médio, no Sonnet 5.5 é alto, e o "pensar antes" conta dentro do
+// teto. Com 2048, o Sonnet pensando alto cortaria a resposta no meio. O
+// médio é o que o Haiku já usava: nele, nada muda.
+const PEDIDO_DA_SUGESTAO = { max_tokens: 8000, output_config: { effort: 'medium' } };
+
 async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000 } = {}) {
   // O SISTEMA EM PARTES (05/11), cada uma marcada para o cache: a primeira é a
   // mesma para o escritório inteiro, a segunda (o que o copiloto aprendeu num
@@ -10102,7 +10110,8 @@ async function sugerirResposta(jwt, conversaId) {
   if (lido.falha) return lido.falha;
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
   const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
-    pedidoDoCopiloto({ mensagens, departamento: departamento.nome, grupo, exemplos }));
+    pedidoDoCopiloto({ mensagens, departamento: departamento.nome, grupo, exemplos }),
+    PEDIDO_DA_SUGESTAO);
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -10258,7 +10267,7 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
   const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
     pedidoDoAjuste({ mensagens, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos }),
-    { output_config: { format: formatoDoAjuste() } });
+    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } });
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -11305,7 +11314,7 @@ async function moverUmCartaoComAIA(k, nomes, manual) {
   const r = await pedirAoClaude(sistemaDoFunil(manual),
     pedidoDoFunil({ nomeDoFunil: nomes.funil(k), etapas, atual: atualEmUso, quemPos, linhas,
                     variosTelefones: telefoneDaConversa.size > 1 }),
-    { max_tokens: 2048, output_config: { effort: 'low', format: formatoDoFunil(nomesDasEtapas) } });
+    { max_tokens: 4096, output_config: { effort: 'low', format: formatoDoFunil(nomesDasEtapas) } });
   if (!r.ok) {
     const erro = (r.corpo && r.corpo.error) || {};
     console.error(`funil pela IA: a Anthropic respondeu ${r.status}`, JSON.stringify(erro).slice(0, 300));
@@ -12624,7 +12633,7 @@ async function lerRespostaComIA(aviso, resposta) {
     // ESFORÇO BAIXO: é uma escolha entre três. O formato prende a resposta às
     // três palavras, e o teto tem folga para o Haiku 5.5 pensar antes.
     const r = await pedirAoClaude(LEITURA_REGRAS, pedido,
-      { max_tokens: 1024, output_config: { effort: 'low', format: LEITURA_FORMATO } });
+      { max_tokens: 2048, output_config: { effort: 'low', format: LEITURA_FORMATO } });
     if (!r.ok) {
       console.log(`Respostas aos avisos: a IA não leu (a Anthropic respondeu ${r.status}).`);
       return null;

@@ -9536,6 +9536,14 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     ok("com a chave no cabeçalho x-api-key", cab["x-api-key"] === "sk-ant-de-mentira", String(cab["x-api-key"]));
     ok("e a versão da API", cab["anthropic-version"] === "2023-06-01", String(cab["anthropic-version"]));
     ok("com o modelo padrão", p.corpo && p.corpo.model === "claude-haiku-5-5", JSON.stringify(p.corpo && p.corpo.model));
+    // O teto e o esforço vão escritos: trocado o modelo pela Render, o padrão
+    // do outro (o Sonnet pensa alto) não pode cortar a sugestão no meio.
+    ok("com o teto de 8000 e o esforço médio escritos (06/11)",
+       p.corpo && p.corpo.max_tokens === 8000 && p.corpo.output_config && p.corpo.output_config.effort === "medium",
+       JSON.stringify(p.corpo && [p.corpo.max_tokens, p.corpo.output_config]));
+    ok("e nada que um modelo maior recuse (temperatura, pensar desligado)",
+       p.corpo && !("temperature" in p.corpo) && !("top_p" in p.corpo) && !("thinking" in p.corpo),
+       JSON.stringify(p.corpo && Object.keys(p.corpo)));
     const sistema = sistemaDe(p);
     const bloco = (p.corpo && p.corpo.system && p.corpo.system[0]) || {};
     ok("a parte fixa vai marcada para o cache", bloco.cache_control && bloco.cache_control.type === "ephemeral",
@@ -9564,7 +9572,7 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     await espera(100);
     const log = t.registro.join("");
     ok("o log diz quanto custou, e não o que foi escrito",
-       /copiloto: sugestão em \d+ ms — 5 mensagens lidas; 812 tokens de entrada \(\+1500 do cache\), 34 de saída/.test(log)
+       /copiloto: sugestão em \d+ ms — 5 mensagens lidas, 0 exemplos de verdade; 812 tokens de entrada \(\+1500 do cache\), 34 de saída/.test(log)
        && !/mandei o comprovante|acordo foi fechado|foto do comprovante/.test(log), log.slice(-600));
 
     const nada = await pedir(t, 999);
@@ -19977,6 +19985,9 @@ console.log("\n101. O agente: pedir uma mudança ao copiloto, e o que ele aprend
     ok("a resposta da IA vem presa: a mensagem e a lição",
        fmt && fmt.type === "json_schema" && JSON.stringify(fmt.schema && fmt.schema.required) === JSON.stringify(["sugestao", "licao"]),
        JSON.stringify(fmt));
+    ok("com o teto de 8000 e o esforço médio, como a sugestão (06/11)",
+       p.corpo && p.corpo.max_tokens === 8000 && p.corpo.output_config.effort === "medium",
+       JSON.stringify(p.corpo && [p.corpo.max_tokens, p.corpo.output_config && p.corpo.output_config.effort]));
     const pedido = pedidoDe(p);
     ok("leva a mensagem de agora e o pedido, cada um no seu bloco",
        pedido.includes("<sugestao>\nVou verificar e retorno\n</sugestao>") && pedido.includes(`<pedido>\n${PEDIDO}\n</pedido>`),
