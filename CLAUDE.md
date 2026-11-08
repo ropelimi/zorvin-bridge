@@ -73,6 +73,9 @@ Variáveis de ambiente (no Render):
   variável falta. Ver "O copiloto", abaixo.
 - `COPILOTO_MODELO` — o modelo do copiloto. **Opcional**, padrão
   `claude-haiku-5-5`. Trocar aqui não pede publicação.
+- `QUAZAR_MODELO_BASTIDORES` — o modelo das tarefas de bastidor do Quazar
+  (ler as conversas para aprender e ler as respostas aos avisos). **Opcional**,
+  padrão `claude-haiku-5-5`. Ver "O gasto do Quazar (script 058, 08/11)".
 - `ANEXO_TETO_MB` — acima de quantos MB um anexo recebido não é baixado.
   **Opcional**, padrão 50, que é o que a memória da ponte aguenta com folga.
   Ver "A memória da ponte", abaixo.
@@ -3815,6 +3818,163 @@ cópias e lidas uma a uma (e a cópia de controle passou inteira):
 - **uma cópia estourou ao perguntar o estado da ponte** que não tinha subido
   (a porta tomada por outra cópia). A pergunta passou a ser guardada
   (`estadoDa`), e a sabotagem, rodada de novo, é pega limpa.
+
+### O gasto do Quazar (script 058, 08/11)
+
+Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de
+*prompt caching*): *"Veja o que podemos fazer para economizar os gastos, faça
+tudo o que você puder fazer para isso, as configurações necessárias."*
+
+#### O que foi medido
+
+**O escritório roda o Quazar no Sonnet 5.5** (`COPILOTO_MODELO` na Render).
+Medido no banco: `zorvin_quazar_noturno.modelo`. Até 06/11 era o Haiku 5.5.
+
+**Os preços**, conferidos em 08/11 na página de preços da Anthropic
+(platform.claude.com/docs/en/about-claude/pricing), em dólares por milhão de
+tokens:
+
+| modelo | entrada | escrita no cache (5 min) | escrita (1 h) | leitura do cache | saída |
+|---|---|---|---|---|---|
+| Haiku 5.5 (pedido até 100 mil tokens) | 0,10 | 0,125 | 0,20 | 0,01 | 0,50 |
+| Haiku 5.5 (pedido acima de 100 mil) | 0,50 | 0,625 | 1 | 0,05 | 2,50 |
+| Sonnet 5.5 | 2 | 2,50 | 4 | 0,10 | 10 |
+| Opus 5.5 | 4 | 5 | 8 | 0,20 | 20 |
+
+**O Sonnet custa vinte vezes o Haiku.** Os 100 mil do Haiku contam também o que
+foi lido e escrito no cache.
+
+**O gasto da semana**, pelo relatório de custo do console, baixado em 08/11
+(chave `zorvin-ponte`, de 01 a 08/11, no horário universal):
+
+| dia | modelo | gasto | o que foi |
+|---|---|---|---|
+| 01 a 04/11 | Haiku 5.5 | centavos por dia (até US$ 0,10) | o dia a dia |
+| 05/11 | Haiku 5.5 | US$ 1,60 | a primeira leitura das conversas (050) |
+| 06/11 | Sonnet 5.5 | **US$ 23,96** | a releitura inteira depois do 054 (as notas zeradas) |
+| 07/11 | Sonnet 5.5 | US$ 1,15 | um dia normal: uns US$ 35 por mês, se ficasse assim |
+| 08/11 | — | US$ 0,06 | parcial |
+
+- **A semana custou uns US$ 27, e US$ 24 (89%) num dia só**: a releitura de
+  todas as conversas, no Sonnet. A mesma leitura, no Haiku, custou uns
+  US$ 1,60 — quinze vezes menos.
+- **Em 06/11, o Sonnet**: entrada sem cache 11,76; saída 10,82; escrita no
+  cache 1,24; leitura do cache 0,14.
+- **Em 07/11**: entrada sem cache 0,24; saída 0,53; escrita no cache 0,37;
+  leitura do cache 0,01. **Escrever no cache custou 37 vezes ler dele**: a
+  maior parte do que é guardado vence antes de ser lido de novo. A parte fixa
+  do pedido (as regras, o manual, as rápidas) só é reaproveitada se outra
+  chamada vier dentro de 5 minutos.
+- **O funil movido pela IA está desligado** (nenhum funil com a chave), e a
+  primeira leitura das conversas já terminou: hoje são umas 20 leituras por
+  dia.
+- **"Ler tudo de novo"**, pela aba do Quazar, custaria de novo uns US$ 24 no
+  Sonnet. No Haiku, uns US$ 1,60.
+
+#### O que mudou
+
+**As tarefas de bastidor vão para o Haiku 5.5** (`QUAZAR_MODELO_BASTIDORES`),
+decidido pelo Rodrigo:
+
+| tarefa | modelo |
+|---|---|
+| ler as conversas para aprender (a que mais lê) | **Haiku** (`QUAZAR_MODELO_BASTIDORES`) |
+| ler as respostas aos avisos de audiência | **Haiku** (`QUAZAR_MODELO_BASTIDORES`) |
+| a sugestão de resposta | Sonnet (`COPILOTO_MODELO`) |
+| o "Pedir uma mudança" | Sonnet |
+| o resumo da conversa | Sonnet |
+| o Quazar à noite | Sonnet |
+| o funil movido pela IA (desligado hoje) | Sonnet |
+
+- **Quem pede diz o modelo** (`pedirAoClaude(…, { modelo, rota })`), e não um
+  campo escondido no meio do pedido. Sem dizer, vale o `COPILOTO_MODELO`.
+- **O modelo que a Anthropic não reconhece** manda conferir a variável certa:
+  na leitura das conversas, `QUAZAR_MODELO_BASTIDORES`.
+- **`/copiloto/estado` diz os dois**: `modelo` e `modelo_bastidores`.
+- **O Haiku já foi o modelo de tudo até 06/11**, com os mesmos pedidos: o
+  esforço e o teto de cada tarefa não mudaram.
+
+**E cada chamada passa a ser anotada no banco** (`zorvin_uso_da_ia`, script
+058). Até aqui o gasto ia só para o log da ponte, que ninguém abre. Uma linha
+por chamada:
+
+- a rota (`sugerir`, `ajustar`, `resumir`, `aprender`, `noite`, `funil`,
+  `leitura`), o modelo, o tempo e o código da resposta;
+- os quatro números: entrada sem cache, escrita no cache (a de 5 minutos e a
+  de 1 hora, separadas), leitura do cache e saída;
+- o custo estimado pela tabela de preços (`PRECOS_DA_ANTHROPIC`, no
+  `index.js`). O modelo que a tabela não conhece fica com o custo vazio.
+  **A conta que vale é a da Anthropic**: esta serve para comparar rotas e
+  dias. **O preço muda: ao mudar, troque a tabela.**
+
+**A anotação nunca segura nem derruba a chamada**: ela sai depois da resposta,
+sem esperar. **Sem a tabela**, a ponte avisa uma vez e para de tentar até
+reiniciar. **O banco que recusa** é dito no log, no máximo uma vez por minuto.
+**Só números**, no log e na tabela: nada do que foi dito.
+
+**A resposta que não serve também conta** (a recusa, a cortada no teto): ela
+gastou do mesmo jeito.
+
+**Quem lê:** só quem administra (`zorvin_admin()`). Ninguém do painel grava,
+muda ou apaga. A conferência confere isso no papel de quem atende, com uma
+linha de prova que entra e sai na mesma rodada (zero linhas, sozinhas, não
+provariam nada numa tabela vazia).
+
+**Como ler o gasto**, pelo conector do Supabase:
+
+```sql
+select zorvin_gasto_da_ia(7);   -- os últimos 7 dias, por dia, rota e modelo
+```
+
+A função olha com os olhos de quem pergunta (`security invoker`): pelo
+conector (dono do banco) ela devolve tudo; para quem atende, uma lista vazia.
+O dia é o de Brasília.
+
+#### O que NÃO foi feito, e por quê
+
+- **O cache de 1 hora, ou o "manter aceso"** (um pedido de `max_tokens: 0`
+  antes de o cache vencer): é a resposta para a escrita que vence sem ser
+  lida, mas só paga se as chamadas vierem entre 5 e 60 minutos uma da outra.
+  O registro novo mostra isso por rota. **Decidir depois de uns dias de
+  números**, e não no chute: com as chamadas espaçadas demais, o cache de 1
+  hora (que escreve pelo dobro) só gastaria mais.
+- **A leitura das conversas pelo Batch** (metade do preço, resposta em até 24
+  horas): cada pedaço parte das notas do pedaço anterior, e a rodada teria de
+  ser refeita. No Haiku, a leitura do dia custa centavos: não vale a obra.
+- **O modelo e o esforço da sugestão, do resumo e do Quazar à noite**: são
+  trocas de qualidade por preço, e sem uma prova de qualidade (um conjunto de
+  conversas com a resposta certa) não há como saber o que se perde. Ficam no
+  Sonnet, como o Rodrigo escolheu.
+- **O funil movido pela IA no Haiku**: está desligado. Quando for ligado, vale
+  perguntar ao Rodrigo.
+
+#### As provas
+
+Seção 115 (a ponte, 29 conferências), com um Claude de mentira que responde a
+todas as rotas e devolve o `usage` que a cena manda, e seção 116 (o 058 num
+Postgres de verdade, com a herança da Supabase, 15).
+
+**22 sabotagens e 22 pegas**, todas limpas, rodadas em cópias e lidas uma a
+uma (e a cópia de controle passou inteira):
+
+- **o modelo:** ler as conversas no `COPILOTO_MODELO` (5 reprovações); a
+  leitura dos avisos no `COPILOTO_MODELO`; a sugestão no Haiku (5); o Quazar
+  à noite no Haiku; o 404 dos bastidores mandando conferir o
+  `COPILOTO_MODELO`; o estado sem o modelo dos bastidores;
+- **a anotação:** sem anotar (16); a anotação esperada e derrubando a
+  sugestão; a escrita de 5 minutos e a de 1 hora trocadas; sem o preço de
+  cima do Haiku; sem a quebra por duração, a escrita contando zero; a tabela
+  que falta tratada como um erro qualquer; a tabela que falta tentada a cada
+  chamada; o erro do banco no log a cada chamada;
+- **o 058:** a leitura aberta a quem atende (5); sem tirar de quem não entrou;
+  quem atende gravando; a conferência como dona do banco; sem a guarda do
+  banco limpo; a soma com poder de dono (5); a soma sem o período; quem não
+  entrou chamando a soma.
+
+**A soma sem tirar de quem não entrou é pega só pela conferência**, e está
+certo: a soma olha com os olhos de quem pergunta, e quem não entrou não lê a
+tabela. A função dá erro do mesmo jeito; quem diz que a porta ficou aberta é a
+conferência.
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
