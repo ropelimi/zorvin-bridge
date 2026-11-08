@@ -23493,5 +23493,468 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
   }
 }
 
+// ============================================================
+//  115. O GASTO DO QUAZAR — os bastidores no modelo barato e o gasto de cada
+//  chamada anotado (08/11)
+//
+//  Pedido do Rodrigo, depois de um e-mail da Anthropic: "Veja o que podemos
+//  fazer para economizar os gastos". O escritório roda o Quazar no Sonnet 5.5.
+//  A seção guarda:
+//    - ler as conversas para aprender e ler as respostas aos avisos vão ao
+//      QUAZAR_MODELO_BASTIDORES (o Haiku 5.5, se ninguém mudar), e a variável
+//      troca o modelo; a sugestão, o "Pedir uma mudança", o resumo e o Quazar
+//      à noite continuam no COPILOTO_MODELO;
+//    - o estado diz o modelo dos bastidores;
+//    - cada chamada vira uma linha em `zorvin_uso_da_ia`: a rota, o modelo, os
+//      quatro números (a escrita de 5 minutos e a de 1 hora separadas; sem a
+//      quebra, a escrita conta como de 5 minutos), o custo pela tabela de
+//      preços (o Haiku acima de 100 mil tokens com o preço de cima) e o
+//      código da resposta; a resposta que não serve (a recusa) também conta;
+//    - a gravação nunca segura nem derruba a chamada; sem a tabela, avisa uma
+//      vez e para de tentar; o tropeço do banco é dito no log, uma vez;
+//    - e o modelo desconhecido grava sem custo, e o 404 dos bastidores diz a
+//      variável deles.
+// ============================================================
+console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de cada chamada");
+{
+  // O CLAUDE DE MENTIRA, UM SÓ PARA TODAS AS ROTAS: a resposta sai do que o
+  // pedido é, e o `usage` e o código saem da cena.
+  const cena = { uso: { input_tokens: 100, output_tokens: 10 }, status: 200, stop: "end_turn" };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const sis = ((json && json.system) || []).map((b) => b.text || "").join("\n");
+      const props = Object.keys((json && json.output_config && json.output_config.format
+        && json.output_config.format.schema && json.output_config.format.schema.properties) || {});
+      let texto;
+      if (/Você lê a resposta de um cliente/.test(sis)) texto = JSON.stringify({ leitura: "CONFIRMOU" });
+      else if (/Você estuda as conversas/.test(sis)) texto = "NOTAS-DE-PROVA";
+      else if (props.includes("responder")) texto = JSON.stringify({ responder: true, mensagem: "Boa noite!", resumo: "Resumo.", motivo: "" });
+      else if (props.includes("quer")) texto = JSON.stringify({ quer: "Saber do acordo.", combinado: [], falta: [] });
+      else if (props.includes("licao")) texto = JSON.stringify({ sugestao: "Oi, tudo bem?", licao: "" });
+      else texto = "Bom dia! Recebido.";
+      if (cena.status !== 200) {
+        res.writeHead(cena.status, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "model: x" } }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg_de_mentira", type: "message", role: "assistant", model: json && json.model,
+        content: cena.stop === "refusal" ? [] : [{ type: "text", text: texto }], stop_reason: cena.stop, usage: cena.uso }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  // O CONTRATO DO 050, fingido (a régua da seção 102): uma linha que nunca
+  // leu, e o pedaço com as duas mensagens da conversa.
+  const rpcsDoAprender = {
+    zorvin_copiloto_para_aprender: (json, dados) => ({ corpo: (dados.zorvin_copiloto_aprendido || [])
+      .filter((l) => !l.aprendido_em).map((l) => ({ ...l, pendentes: 2 })) }),
+    zorvin_copiloto_pedaco: () => ({ corpo: [
+      { id: "m1", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Bom dia, mandei o comprovante",
+        transcricao: null, midia_nome: null, resposta_previa: null, criado_em: haMin(60), telefone: TELEFONE.nome, grupo: false },
+      { id: "m2", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Recebido, obrigada!",
+        transcricao: null, midia_nome: null, resposta_previa: null, criado_em: haMin(59), telefone: TELEFONE.nome, grupo: false },
+    ] }),
+  };
+  const ITEM = { conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo: "ensaio",
+                 fuso: "America/Sao_Paulo", ate: new Date(AGORA + 9 * 3600000).toISOString(), fechou_em: haMin(240),
+                 cliente_ate: haMin(5), cliente_ate_id: "m3" };
+  const rpcsDaNoite = { zorvin_quazar_noturno_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || [])
+    .some((q) => q.cliente_ate_id === ITEM.cliente_ate_id) ? [] : [ITEM] }) };
+  const tabelas = (extra = {}) => ({
+    departamentos: [{ id: 1, nome: "Sucesso do Cliente", slug: "sucesso", ordem: 1, ativo: true }],
+    contatos: [{ id: "k1", numero: "5511999998888", nome: "Cliente" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+    mensagens: [
+      { id: "m1", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Bom dia, mandei o comprovante", criado_em: haMin(60) },
+      { id: "m2", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Recebido, obrigada!", criado_em: haMin(59) },
+      { id: "m3", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "E o acordo?", criado_em: haMin(5) },
+    ],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL-DE-PROVA" }],
+    zorvin_uso_da_ia: [],
+    ...extra,
+  });
+  const comChave = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url,
+    COPILOTO_MODELO: "claude-sonnet-5-5", ...extra });
+  const post = (t, rota, corpo) => fetch(`http://127.0.0.1:${t.porta}${rota}`, {
+    method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) })).catch((e) => ({ status: 0, corpo: { erro: e.message } }));
+  const estadoDa = async (t) => { try { return await (await fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`)).json(); } catch (e) { return { erro: e.message }; } };
+  const usos = (t) => t.sb.dados.zorvin_uso_da_ia || [];
+  const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const ehAprender = (p) => /Você estuda as conversas/.test(((p && p.system) || []).map((b) => b.text || "").join("\n"));
+  const perto = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
+
+  // ---- 115a. o estado ----
+  {
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas() });
+    const e = await estadoDa(t);
+    ok("115a o estado diz os dois modelos: o do copiloto e o dos bastidores (o Haiku, se ninguém mudar)",
+       e.modelo === "claude-sonnet-5-5" && e.modelo_bastidores === "claude-haiku-5-5", JSON.stringify(e));
+    await t.parar();
+    const t2 = await subirTudo(comChave(claude, { QUAZAR_MODELO_BASTIDORES: "claude-opus-5-5" }), { tabelas: tabelas() });
+    const e2 = await estadoDa(t2);
+    ok("e QUAZAR_MODELO_BASTIDORES troca o dos bastidores", e2.modelo_bastidores === "claude-opus-5-5", JSON.stringify(e2));
+    await t2.parar(); await claude.parar();
+  }
+
+  // ---- 115b. a sugestão continua no COPILOTO_MODELO, e a chamada é anotada ----
+  {
+    const claude = await subirClaude();
+    cena.status = 200; cena.stop = "end_turn";
+    cena.uso = { input_tokens: 1000, output_tokens: 400, cache_read_input_tokens: 3000, cache_creation_input_tokens: 2500,
+                 cache_creation: { ephemeral_5m_input_tokens: 2000, ephemeral_1h_input_tokens: 500 } };
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas() });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    ok("115b a sugestão sai", r.status === 200 && r.corpo && r.corpo.sugestao, JSON.stringify(r));
+    ok("e vai ao COPILOTO_MODELO (o Sonnet do escritório), e não ao modelo dos bastidores",
+       claude.pedidos[0] && claude.pedidos[0].model === "claude-sonnet-5-5", JSON.stringify(claude.pedidos[0] && claude.pedidos[0].model));
+    await esperaAte(() => usos(t).length >= 1);
+    const u = usos(t)[0] || {};
+    ok("a chamada vira uma linha: a rota, o modelo e o código da resposta",
+       usos(t).length === 1 && u.rota === "sugerir" && u.modelo === "claude-sonnet-5-5" && u.status === 200, JSON.stringify(usos(t)));
+    ok("com os quatro números, a escrita de 5 minutos e a de 1 hora separadas",
+       u.entrada === 1000 && u.cache_escrita_5m === 2000 && u.cache_escrita_1h === 500 && u.cache_lida === 3000 && u.saida === 400,
+       JSON.stringify(u));
+    // 1000×2 + 2000×2,50 + 500×4 + 3000×0,10 + 400×10, por milhão
+    ok("e o custo pela tabela de preços: US$ 0,0133", perto(u.custo_usd, 0.0133), JSON.stringify(u.custo_usd));
+    ok("e o tempo da chamada, em milissegundos", Number.isInteger(u.ms) && u.ms >= 0, JSON.stringify(u.ms));
+    ok("nada do que foi dito vai na linha",
+       !JSON.stringify(u).includes("comprovante") && !JSON.stringify(u).includes("Recebido"), JSON.stringify(u));
+
+    // O "PEDIR UMA MUDANÇA" E O RESUMO, também no COPILOTO_MODELO
+    cena.uso = { input_tokens: 10, output_tokens: 1 };
+    const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", sugestao: "Oi", pedido: "mais curto" });
+    const pa = claude.pedidos[claude.pedidos.length - 1] || {};
+    ok("115c o \"Pedir uma mudança\" vai ao COPILOTO_MODELO", a.status === 200 && pa.model === "claude-sonnet-5-5", JSON.stringify([a.status, pa.model]));
+    const s = await post(t, "/copiloto/resumir", { conversa_id: "c1" });
+    const ps = claude.pedidos[claude.pedidos.length - 1] || {};
+    ok("o resumo também", s.status === 200 && ps.model === "claude-sonnet-5-5", JSON.stringify([s.status, ps.model, s.corpo]));
+    await esperaAte(() => usos(t).length >= 3);
+    ok("e cada uma é anotada com a sua rota",
+       JSON.stringify(usos(t).map((x) => x.rota).sort()) === JSON.stringify(["ajustar", "resumir", "sugerir"]), JSON.stringify(usos(t).map((x) => x.rota)));
+
+    // A RESPOSTA QUE NÃO SERVE (a recusa) TAMBÉM GASTOU: conta.
+    cena.stop = "refusal"; cena.uso = { input_tokens: 700, output_tokens: 0 };
+    const rec = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await esperaAte(() => usos(t).length >= 4);
+    const ur = usos(t)[3] || {};
+    ok("115d a recusa da IA não vira sugestão, e a chamada é anotada assim mesmo",
+       rec.status === 502 && ur.rota === "sugerir" && ur.entrada === 700 && perto(ur.custo_usd, 0.0014), JSON.stringify([rec.status, ur]));
+    cena.stop = "end_turn";
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115e. ler as conversas para aprender vai ao modelo dos bastidores ----
+  {
+    const claude = await subirClaude();
+    // ACIMA DE 100 MIL TOKENS, o Haiku 5.5 cobra o preço de cima — contando o
+    // que foi lido do cache. E SEM A QUEBRA POR DURAÇÃO, a escrita conta como
+    // a de 5 minutos.
+    cena.uso = { input_tokens: 90000, output_tokens: 1000, cache_read_input_tokens: 9000, cache_creation_input_tokens: 2000 };
+    const t = await subirTudo(comChave(claude, { COPILOTO_APRENDER_PRIMEIRA_MS: "200", COPILOTO_APRENDER_INTERVALO_MS: "300",
+      COPILOTO_APRENDER_MINIMO: "1" }), { rpcs: rpcsDoAprender, tabelas: tabelas({ zorvin_copiloto_aprendido: [
+        { id: "a1", escopo: "telefone", advogado_id: TELEFONE.id, departamento_id: null, texto: "", leu_ate: null, leu_ate_id: null,
+          mensagens_lidas: 0, aprendido_em: null, atualizado_em: haMin(10) }] }) });
+    await esperaAte(() => claude.pedidos.some(ehAprender) && usos(t).some((x) => x.rota === "aprender"));
+    const p = claude.pedidos.find(ehAprender) || {};
+    ok("115e ler as conversas para aprender vai ao Haiku 5.5, com o Sonnet no COPILOTO_MODELO",
+       p.model === "claude-haiku-5-5", JSON.stringify(p.model));
+    const u = usos(t).find((x) => x.rota === "aprender") || {};
+    ok("e é anotada como 'aprender', no Haiku", u.modelo === "claude-haiku-5-5", JSON.stringify(u));
+    ok("sem a quebra por duração, a escrita conta como a de 5 minutos", u.cache_escrita_5m === 2000 && u.cache_escrita_1h === 0, JSON.stringify(u));
+    // 90000×0,50 + 2000×0,625 + 9000×0,05 + 1000×2,50, por milhão (101 mil tokens no pedido)
+    ok("e acima de 100 mil tokens, com o preço de cima do Haiku: US$ 0,0492", perto(u.custo_usd, 0.0492), JSON.stringify(u.custo_usd));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115f. até 100 mil, o preço de baixo ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 50000, output_tokens: 1000, cache_read_input_tokens: 10000 };
+    const t = await subirTudo(comChave(claude, { COPILOTO_APRENDER_PRIMEIRA_MS: "200", COPILOTO_APRENDER_INTERVALO_MS: "300",
+      COPILOTO_APRENDER_MINIMO: "1" }), { rpcs: rpcsDoAprender, tabelas: tabelas({ zorvin_copiloto_aprendido: [
+        { id: "a1", escopo: "telefone", advogado_id: TELEFONE.id, departamento_id: null, texto: "", leu_ate: null, leu_ate_id: null,
+          mensagens_lidas: 0, aprendido_em: null, atualizado_em: haMin(10) }] }) });
+    await esperaAte(() => usos(t).some((x) => x.rota === "aprender"));
+    const u = usos(t).find((x) => x.rota === "aprender") || {};
+    // 50000×0,10 + 10000×0,01 + 1000×0,50, por milhão
+    ok("115f até 100 mil tokens, o preço de baixo do Haiku: US$ 0,0056", perto(u.custo_usd, 0.0056), JSON.stringify(u.custo_usd));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115g. QUAZAR_MODELO_BASTIDORES troca o modelo, e o 404 diz a variável certa ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 10, output_tokens: 1 };
+    cena.status = 404;
+    const t = await subirTudo(comChave(claude, { QUAZAR_MODELO_BASTIDORES: "claude-opus-5-5",
+      COPILOTO_APRENDER_PRIMEIRA_MS: "200", COPILOTO_APRENDER_INTERVALO_MS: "300", COPILOTO_APRENDER_MINIMO: "1" }),
+      { rpcs: rpcsDoAprender, tabelas: tabelas({ zorvin_copiloto_aprendido: [
+        { id: "a1", escopo: "telefone", advogado_id: TELEFONE.id, departamento_id: null, texto: "", leu_ate: null, leu_ate_id: null,
+          mensagens_lidas: 0, aprendido_em: null, atualizado_em: haMin(10) }] }) });
+    await esperaAte(() => /copiloto aprende: pausado/.test(t.registro.join("")));
+    const p = claude.pedidos.find(ehAprender) || {};
+    ok("115g QUAZAR_MODELO_BASTIDORES troca o modelo de aprender", p.model === "claude-opus-5-5", JSON.stringify(p.model));
+    const log = t.registro.join("");
+    ok("e o modelo que a Anthropic não reconhece manda conferir QUAZAR_MODELO_BASTIDORES, e não o COPILOTO_MODELO",
+       /não reconheceu o modelo "claude-opus-5-5"\. Confira a variável QUAZAR_MODELO_BASTIDORES/.test(log), log.slice(-400));
+    cena.status = 200;
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115h. a leitura das respostas aos avisos vai ao modelo dos bastidores ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 300, output_tokens: 12 };
+    const AVISO = "Olá! Sua audiência é dia 12/11 às 14h30. Por gentileza, confirmar ciência e comparecimento.";
+    const t = await subirTudo({ ...comChave(claude), AVISOS_INTERVALO_MS: "500" }, {
+      vantoro: { lerResposta: (corpo) => (corpo.leitura_ia
+        ? { nova: false, entendida_como: corpo.leitura_ia, lida_pela_ia: true, marcou_confirmou: true, confirmou: "Sim" }
+        : { nova: true, entendida_como: "OUTRA", lida_pela_ia: false, marcou_confirmou: false, confirmou: "" }) },
+      tabelas: {
+        contatos: [{ id: 1, numero: "5511999000101" }],
+        conversas: [{ id: 1, advogado_id: TELEFONE.id, contato_id: 1 }],
+        fila_envio: [{ id: 1, conversa_id: 1, tipo: "texto", texto: AVISO, status: "enviada", tentativas: 0,
+                       aviso_vantoro_id: "AV-1", enviado_em: haMin(120), criado_em: haMin(121) }],
+        mensagens: [
+          { id: 1000, conversa_id: 1, origem: "advogado", tipo: "texto", texto: AVISO, id_uazapi: "AVISO-1", status: "enviada",
+            criado_em: haMin(120), reacoes: [] },
+          { id: 1001, conversa_id: 1, origem: "contato", tipo: "texto", texto: "Estarei lá, mas chego às 10h", id_uazapi: "CLI-1",
+            status: "recebida", criado_em: haMin(110) }],
+        zorvin_uso_da_ia: [],
+      },
+    });
+    await esperaAte(() => usos(t).some((x) => x.rota === "leitura"), 8000);
+    const p = claude.pedidos.find((x) => /Você lê a resposta de um cliente/.test(((x && x.system) || []).map((b) => b.text || "").join("\n"))) || {};
+    ok("115h a leitura da resposta ao aviso vai ao Haiku 5.5, com o Sonnet no COPILOTO_MODELO", p.model === "claude-haiku-5-5",
+       JSON.stringify([claude.pedidos.length, p.model]));
+    const u = usos(t).find((x) => x.rota === "leitura") || {};
+    // 300×0,10 + 12×0,50, por milhão
+    ok("e é anotada como 'leitura', no Haiku", u.modelo === "claude-haiku-5-5" && perto(u.custo_usd, 0.000036), JSON.stringify(u));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115i. o Quazar à noite continua no COPILOTO_MODELO ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 900, output_tokens: 60 };
+    const t = await subirTudo(comChave(claude, { QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400" }),
+      { rpcs: rpcsDaNoite, tabelas: tabelas({ zorvin_quazar_noturno: [], zorvin_respostas_automaticas: [] }) });
+    await esperaAte(() => usos(t).some((x) => x.rota === "noite"));
+    const p = claude.pedidos[0] || {};
+    const u = usos(t).find((x) => x.rota === "noite") || {};
+    ok("115i o Quazar à noite continua no COPILOTO_MODELO, e é anotado como 'noite'",
+       p.model === "claude-sonnet-5-5" && u.modelo === "claude-sonnet-5-5", JSON.stringify([p.model, u]));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115j. o modelo que a tabela não conhece grava sem custo ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 100, output_tokens: 10 };
+    const t = await subirTudo(comChave(claude, { COPILOTO_MODELO: "claude-modelo-de-amanha" }), { tabelas: tabelas() });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await esperaAte(() => usos(t).length >= 1);
+    const u = usos(t)[0] || {};
+    ok("115j o modelo que a tabela de preços não conhece grava os números, e o custo fica vazio",
+       r.status === 200 && u.modelo === "claude-modelo-de-amanha" && u.entrada === 100 && u.custo_usd === null, JSON.stringify(u));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115k. sem a tabela, avisa uma vez e para de tentar ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 100, output_tokens: 10 };
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(), semTabelas: ["zorvin_uso_da_ia"] });
+    const r1 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(400);
+    const r2 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(400);
+    ok("115k sem a tabela, a sugestão sai do mesmo jeito", r1.status === 200 && r2.status === 200, JSON.stringify([r1.status, r2.status]));
+    const tentativas = t.sb.chamadas.filter((c) => c.metodo === "POST" && /zorvin_uso_da_ia/.test(c.caminho)).length;
+    ok("tenta uma vez só, e não a cada chamada", tentativas === 1, `foram ${tentativas}`);
+    const avisos = (t.registro.join("").match(/a tabela "zorvin_uso_da_ia" não existe/g) || []).length;
+    ok("e avisa uma vez, dizendo qual script falta", avisos === 1 && /058-o-gasto-do-quazar/.test(t.registro.join("")), `${avisos} aviso(s)`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115l. o banco que recusa a gravação não derruba a chamada ----
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 100, output_tokens: 10 };
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(),
+      quebrar: (metodo, tabela) => (metodo === "POST" && tabela === "zorvin_uso_da_ia" ? "o banco recusou" : null) });
+    const r1 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const r2 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(500);
+    ok("115l o banco recusando a gravação, a sugestão sai do mesmo jeito", r1.status === 200 && r2.status === 200 && r1.corpo.sugestao,
+       JSON.stringify([r1, r2]));
+    const tentativas = t.sb.chamadas.filter((c) => c.metodo === "POST" && /zorvin_uso_da_ia/.test(c.caminho)).length;
+    const erros = (t.registro.join("").match(/não consegui anotar o gasto da chamada/g) || []).length;
+    ok("continua tentando (não é a tabela que falta), e o log diz uma vez por minuto",
+       tentativas === 2 && erros === 1, `${tentativas} tentativa(s), ${erros} linha(s) no log`);
+    await t.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+//  116. O GASTO DO QUAZAR (058), num Postgres de verdade
+//
+//  A seção guarda:
+//    - num banco limpo, nada;
+//    - a tabela: quem administra lê, quem atende lê zero, quem não entrou
+//      não alcança nada, e ninguém do painel grava, muda ou apaga;
+//    - a soma por dia, rota e modelo, no dia de Brasília, e só para quem
+//      administra;
+//    - rodar de novo não muda nada;
+//    - e a conferência no papel de quem atende diz NÃO quando a leitura se
+//      abre para todo mundo.
+// ============================================================
+{
+  console.log("\n116. O gasto do Quazar (058), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 058 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const S058 = fs.readFileSync(new URL("../sql/automaticos/058-o-gasto-do-quazar.sql", import.meta.url), "utf8");
+    // O ZORVIN MÍNIMO, com a herança da Supabase (a armadilha nº 5).
+    const ESQUEMA = `
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false,
+  ativo boolean not null default true);
+create or replace function zorvin_admin() returns boolean language sql stable security definer
+  set search_path = public as $f$
+  select coalesce((select admin and ativo from usuarios where id = auth.uid()), false) $f$;
+create table conversas (id uuid primary key default gen_random_uuid());
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoAnon = async (c, fn) => { await c.query("set role anon"); try { return await fn(); } finally { await c.query("reset role"); } };
+    const U = { adm: "00000000-0000-0000-0000-0000000000a1", atende: "00000000-0000-0000-0000-0000000000a2" };
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 116a. num banco limpo, nada ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S058));
+        ok("116a num banco limpo, o 058 não faz nada e diz isso", /nada a fazer/.test(String(item(r, /sem as tabelas/))), JSON.stringify(r));
+      }
+
+      // ---- 116b. a instalação ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U.adm}', 'Quem administra', true), ('${U.atende}', 'Quem atende', false)`);
+      const r = await guardado(() => aplicar(c, S058));
+      ok("116b a instalação passa, sem nada pintado de defeito", Array.isArray(r) && !defeito(r), JSON.stringify(r));
+      ok("a conferência confere, no papel de quem atende, que ela não lê o gasto, e que quem administra lê",
+         item(r, /quem atende não lê/) === "true" && item(r, /quem administra lê/) === "true", JSON.stringify(r));
+      ok("e a linha de prova da conferência não fica", Number((await c.query("select count(*) n from zorvin_uso_da_ia")).rows[0].n) === 0);
+
+      // A PONTE GRAVA (service_role, que passa por cima da regra de acesso)
+      await c.query("set role service_role");
+      await c.query(`insert into zorvin_uso_da_ia (rota, modelo, entrada, cache_escrita_5m, cache_escrita_1h, cache_lida, saida, custo_usd, ms, status, quando) values
+        ('sugerir', 'claude-sonnet-5-5', 1000, 2000, 500, 3000, 400, 0.0133, 1200, 200, now()),
+        ('sugerir', 'claude-sonnet-5-5', 100, 0, 0, 5000, 50, 0.0012, 900, 200, now()),
+        ('aprender', 'claude-haiku-5-5', 50000, 0, 0, 10000, 1000, 0.0056, 30000, 200, now()),
+        ('aprender', 'claude-haiku-5-5', 50000, 0, 0, 10000, 1000, 0.0056, 30000, 200, now() - interval '40 days')`);
+      await c.query("reset role");
+
+      // ---- 116c. quem pode o quê ----
+      const adm = await guardado(() => comoPessoa(c, U.adm, async () => (await c.query("select count(*) n from zorvin_uso_da_ia")).rows[0].n));
+      const at = await guardado(() => comoPessoa(c, U.atende, async () => (await c.query("select count(*) n from zorvin_uso_da_ia")).rows[0].n));
+      ok("116c quem administra lê as linhas, e quem atende lê zero", Number(adm) === 4 && Number(at) === 0, JSON.stringify([adm, at]));
+      const grava = await guardado(() => comoPessoa(c, U.adm, () => c.query("insert into zorvin_uso_da_ia (rota, modelo) values ('x', 'y')")));
+      const apaga = await guardado(() => comoPessoa(c, U.adm, () => c.query("delete from zorvin_uso_da_ia")));
+      ok("nem quem administra grava ou apaga pela tela", grava.codigo === "42501" && apaga.codigo === "42501", JSON.stringify([grava, apaga]));
+      const anon = await guardado(() => comoAnon(c, () => c.query("select count(*) from zorvin_uso_da_ia")));
+      const anonF = await guardado(() => comoAnon(c, () => c.query("select zorvin_gasto_da_ia(30)")));
+      ok("quem não entrou não alcança a tabela nem a soma", anon.codigo === "42501" && anonF.codigo === "42501", JSON.stringify([anon, anonF]));
+
+      // ---- 116d. a soma ----
+      const soma = await guardado(() => comoPessoa(c, U.adm, async () => (await c.query("select zorvin_gasto_da_ia(30) s")).rows[0].s));
+      const sug = lista(soma).find((x) => x.rota === "sugerir") || {};
+      const apr = lista(soma).find((x) => x.rota === "aprender") || {};
+      ok("116d a soma junta por dia, rota e modelo, dentro do período",
+         lista(soma).length === 2 && sug.chamadas === 2 && sug.entrada === 1100 && sug.cache_lida === 8000 && sug.saida === 450
+           && sug.cache_escrita_5m === 2000 && sug.cache_escrita_1h === 500 && Number(sug.custo_usd) === 0.0145
+           && apr.chamadas === 1 && sug.modelo === "claude-sonnet-5-5", JSON.stringify(soma));
+      ok("o dia é o de Brasília, e a mais cara vem primeiro no dia",
+         sug.dia === (await c.query("select ((now() at time zone 'America/Sao_Paulo')::date)::text d")).rows[0].d && lista(soma)[0].rota === "sugerir",
+         JSON.stringify(soma));
+      const soma60 = await guardado(() => comoPessoa(c, U.adm, async () => (await c.query("select zorvin_gasto_da_ia(60) s")).rows[0].s));
+      ok("e com 60 dias, a chamada de 40 dias atrás entra", lista(soma60).length === 3, JSON.stringify(soma60));
+      const somaAt = await guardado(() => comoPessoa(c, U.atende, async () => (await c.query("select zorvin_gasto_da_ia(30) s")).rows[0].s));
+      ok("quem atende chama a soma e recebe uma lista vazia", Array.isArray(somaAt) && somaAt.length === 0, JSON.stringify(somaAt));
+      ok("a soma olha com os olhos de quem pergunta (security invoker)",
+         (await c.query("select prosecdef from pg_proc where proname = 'zorvin_gasto_da_ia'")).rows[0].prosecdef === false);
+
+      // ---- 116e. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S058));
+      ok("116e rodar de novo não acusa nada, e não perde as linhas",
+         Array.isArray(de2) && !defeito(de2) && item(de2, /chamadas anotadas/) === "3", JSON.stringify(de2));
+
+      // ---- 116f. a conferência pega a leitura aberta ----
+      await c.query("drop policy zorvin_uso_da_ia_leitura on zorvin_uso_da_ia");
+      await c.query("create policy zorvin_uso_da_ia_aberta on zorvin_uso_da_ia for select to authenticated using (true)");
+      const aberta = await guardado(() => comoPessoa(c, U.atende, async () => (await c.query("select count(*) n from zorvin_uso_da_ia")).rows[0].n));
+      // O script recria a regra certa: a conferência tem de ver a aberta ANTES. Aqui ela é provada à parte, pela
+      // mesma conta que o script faz no papel de quem atende.
+      ok("116f com a leitura aberta, quem atende passa a ler (e é isso que a conferência mede)", Number(aberta) === 4, JSON.stringify(aberta));
+      const de3 = await guardado(() => aplicar(c, S058));
+      ok("e rodar o script de novo com a regra aberta ainda lá: a conferência, no papel de quem atende, a acusa",
+         /^NÃO — quem não administra leu 1 linha/.test(String(item(de3, /quem atende não lê/))), JSON.stringify(de3));
+      await c.query("drop policy zorvin_uso_da_ia_aberta on zorvin_uso_da_ia");
+    } catch (e) {
+      ok("a seção 116 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

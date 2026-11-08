@@ -9603,6 +9603,16 @@ setInterval(() => { transcreverOsQueChegaram().catch(() => {}); }, TRANSCRICAO_I
 // ============================================================
 const ANTHROPIC_URL = (process.env.ANTHROPIC_API_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
 const COPILOTO_MODELO = String(process.env.COPILOTO_MODELO || '').trim() || 'claude-haiku-5-5';
+// OS BASTIDORES NO MODELO BARATO (08/11). Pedido do Rodrigo, depois de um
+// e-mail da Anthropic sobre o cache: "Veja o que podemos fazer para economizar
+// os gastos". O escritório roda o Quazar no Sonnet 5.5 (COPILOTO_MODELO, na
+// Render), e o Haiku 5.5 custa vinte vezes menos por palavra lida e escrita.
+// Decidido com ele: vão para o Haiku SÓ as duas tarefas que ninguém vê na hora
+// — ler as conversas para aprender (a que mais lê) e ler as respostas aos
+// avisos de audiência. A sugestão, o "Pedir uma mudança", o resumo, o Quazar
+// à noite e o funil continuam no COPILOTO_MODELO. Trocável por
+// QUAZAR_MODELO_BASTIDORES sem publicar nada.
+const QUAZAR_MODELO_BASTIDORES = String(process.env.QUAZAR_MODELO_BASTIDORES || '').trim() || 'claude-haiku-5-5';
 // O NOME DO ASSISTENTE (05/11): o copiloto ganhou nome e rosto. Ele é o
 // QUAZAR, o assistente oficial do Zorvin, um pato malandro de óculos escuros
 // (o "quá" foi o primeiro som de aviso do Zorvin). O nome vai nas frases que
@@ -10019,7 +10029,7 @@ function textoDaSugestao(corpo) {
 }
 
 /** A frase de cada recusa da Anthropic — dita para quem atende, com o que fazer. */
-function explicarFalhaDaAnthropic(status, corpo) {
+function explicarFalhaDaAnthropic(status, corpo, { bastidores = false } = {}) {
   const erro = (corpo && corpo.error) || {};
   const detalhe = String(erro.message || '').slice(0, 160);
   if (status === 401) {
@@ -10033,7 +10043,9 @@ function explicarFalhaDaAnthropic(status, corpo) {
   }
   if (status === 403) return 'A chave da Anthropic não tem permissão para usar este modelo. Confira a conta em platform.claude.com.';
   if (status === 404) {
-    return `A Anthropic não reconheceu o modelo "${COPILOTO_MODELO}". Confira a variável COPILOTO_MODELO na Render, ou apague-a para usar o padrão.`;
+    // A VARIÁVEL CERTA (08/11): as tarefas de bastidor têm a sua.
+    const [modelo, variavel] = bastidores ? [QUAZAR_MODELO_BASTIDORES, 'QUAZAR_MODELO_BASTIDORES'] : [COPILOTO_MODELO, 'COPILOTO_MODELO'];
+    return `A Anthropic não reconheceu o modelo "${modelo}". Confira a variável ${variavel} na Render, ou apague-a para usar o padrão.`;
   }
   if (status === 429) return 'O limite de uso da conta da Anthropic foi atingido agora. Tente de novo em um minuto.';
   if (status === 504) return 'A Anthropic demorou demais para responder. Tente de novo.';
@@ -10051,14 +10063,92 @@ function explicarFalhaDaAnthropic(status, corpo) {
 // médio é o que o Haiku já usava: nele, nada muda.
 const PEDIDO_DA_SUGESTAO = { max_tokens: 8000, output_config: { effort: 'medium' } };
 
-async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000 } = {}) {
+// ============================================================
+//  O GASTO DE CADA CHAMADA (script 058, 08/11)
+//
+//  Cada resposta da Anthropic traz quantas palavras (tokens) foram lidas sem
+//  cache, escritas no cache, lidas do cache e escritas na resposta. A ponte
+//  anota esses quatro números, a rota e o modelo em `zorvin_uso_da_ia`, com o
+//  custo estimado pela tabela abaixo — é o que mostra, com número, onde o
+//  dinheiro vai, e o que mede se o cache está pegando.
+//
+//  NUNCA SEGURA NEM DERRUBA A CHAMADA: a gravação sai depois da resposta, sem
+//  esperar. Sem a tabela (o 058 não rodou), avisa uma vez e para de tentar até
+//  reiniciar. Qualquer outro tropeço, no máximo uma linha por minuto. Só
+//  números no log e na tabela: nada do que foi dito.
+// ============================================================
+
+// OS PREÇOS, em dólares por milhão de tokens: entrada, escrita no cache de 5
+// minutos, escrita no de 1 hora, leitura do cache, saída. Conferido em 08/11
+// na página de preços (platform.claude.com/docs/en/about-claude/pricing); o
+// preço muda, confira lá. O Haiku 5.5 tem outro preço quando o pedido passa de
+// 100 mil tokens, contando as leituras e as escritas do cache.
+const PRECOS_DA_ANTHROPIC = {
+  'claude-haiku-5-5': { preco: [0.10, 0.125, 0.20, 0.01, 0.50],
+                        longo: { acima: 100000, preco: [0.50, 0.625, 1, 0.05, 2.50] } },
+  'claude-sonnet-5-5': { preco: [2, 2.50, 4, 0.10, 10] },
+  'claude-opus-5-5': { preco: [4, 5, 8, 0.20, 20] },
+};
+
+/** Os quatro medidores do `usage` da Anthropic, como a tabela os guarda. */
+function medidoresDoUso(uso) {
+  const u = uso || {};
+  const n = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v))) : 0);
+  const quebra = u.cache_creation && typeof u.cache_creation === 'object' ? u.cache_creation : null;
+  // SEM A QUEBRA POR DURAÇÃO, a escrita conta como a de 5 minutos, que é a que
+  // a ponte usa.
+  const e5 = quebra ? n(quebra.ephemeral_5m_input_tokens) : n(u.cache_creation_input_tokens);
+  const e1 = quebra ? n(quebra.ephemeral_1h_input_tokens) : 0;
+  return { entrada: n(u.input_tokens), cache_escrita_5m: e5, cache_escrita_1h: e1,
+           cache_lida: n(u.cache_read_input_tokens), saida: n(u.output_tokens) };
+}
+
+/** O custo em dólares, ou `null` para um modelo que a tabela não conhece. */
+function custoDoUso(modelo, m) {
+  const chave = Object.keys(PRECOS_DA_ANTHROPIC).find((k) => String(modelo || '') === k || String(modelo || '').startsWith(`${k}-`));
+  if (!chave) return null;
+  const tabela = PRECOS_DA_ANTHROPIC[chave];
+  const tamanho = m.entrada + m.cache_escrita_5m + m.cache_escrita_1h + m.cache_lida;
+  const p = tabela.longo && tamanho > tabela.longo.acima ? tabela.longo.preco : tabela.preco;
+  const usd = (m.entrada * p[0] + m.cache_escrita_5m * p[1] + m.cache_escrita_1h * p[2]
+               + m.cache_lida * p[3] + m.saida * p[4]) / 1e6;
+  return Math.round(usd * 1e6) / 1e6;
+}
+
+let usoDaIaSemTabela = false;
+let usoDaIaUltimoErro = 0;
+function anotarUsoDaIa({ rota, modelo, uso, ms, status }) {
+  if (usoDaIaSemTabela || !uso || typeof uso !== 'object') return;
+  try {
+    const m = medidoresDoUso(uso);
+    const linha = { rota: String(rota || 'outra'), modelo: String(modelo || ''), ...m,
+                    custo_usd: custoDoUso(modelo, m), ms: Math.round(ms || 0), status: status || null };
+    supabase.from('zorvin_uso_da_ia').insert(linha).then(({ error }) => {
+      if (!error) return;
+      if (semATabela(error)) {
+        usoDaIaSemTabela = true;
+        console.warn('quazar: a tabela "zorvin_uso_da_ia" não existe — o gasto de cada chamada não é anotado. '
+          + 'Rode sql/automaticos/058-o-gasto-do-quazar.sql.');
+        return;
+      }
+      if (Date.now() - usoDaIaUltimoErro > 60 * 1000) {
+        usoDaIaUltimoErro = Date.now();
+        console.error('quazar: não consegui anotar o gasto da chamada', error.code || '', String(error.message || '').slice(0, 200));
+      }
+    }, () => {});
+  } catch (_) { /* anotar nunca derruba a chamada */ }
+}
+
+async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, modelo = COPILOTO_MODELO, rota = 'outra' } = {}) {
   // O SISTEMA EM PARTES (05/11), cada uma marcada para o cache: a primeira é a
   // mesma para o escritório inteiro, a segunda (o que o copiloto aprendeu num
   // telefone) muda de um telefone para outro. Um texto só continua valendo.
   const partes = (Array.isArray(sistema) ? sistema : [sistema])
     .filter((x) => String(x || '').trim()).slice(0, 4);
   const corpo = JSON.stringify({
-    model: COPILOTO_MODELO,
+    // O MODELO VEM DE QUEM PEDE (08/11): as tarefas de bastidor mandam o
+    // QUAZAR_MODELO_BASTIDORES; o resto, o COPILOTO_MODELO.
+    model: modelo,
     // COM FOLGA PARA PENSAR: no Haiku 5.5 o "pensar antes" vem ligado e conta
     // dentro deste teto. A resposta em si é curta.
     max_tokens: 2048,
@@ -10069,6 +10159,7 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000 } = 
     ...extra,
   });
   for (let tentativa = 1; ; tentativa++) {
+    const inicio = Date.now();
     const r = await fetchComTimeout(`${ANTHROPIC_URL}/v1/messages`, {
       method: 'POST',
       headers: {
@@ -10080,6 +10171,7 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000 } = 
     }, prazoMs);
     let resposta = null;
     try { resposta = await r.json(); } catch (_) { /* resposta sem JSON: fica nulo */ }
+    anotarUsoDaIa({ rota, modelo, uso: resposta && resposta.usage, ms: Date.now() - inicio, status: r.status });
     // UMA SEGUNDA TENTATIVA, e só no que passa sozinho: 500 e 529
     // ("sobrecarregada"). Pedir de novo aqui não tem efeito colateral — nada
     // vai ao cliente —, mas o limite de uso (429) não passa em um segundo, e
@@ -10115,7 +10207,7 @@ async function sugerirResposta(jwt, conversaId) {
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
   const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
     pedidoDoCopiloto({ mensagens, departamento: departamento.nome, grupo, exemplos }),
-    PEDIDO_DA_SUGESTAO);
+    PEDIDO_DA_SUGESTAO, { rota: 'sugerir' });
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -10271,7 +10363,8 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
   const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
     pedidoDoAjuste({ mensagens, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos }),
-    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } });
+    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } },
+    { rota: 'ajustar' });
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -10339,6 +10432,9 @@ app.options('/copiloto/*', (req, res) => { liberarCors(res); res.sendStatus(204)
 app.get('/copiloto/estado', (req, res) => {
   liberarCors(res);
   res.json({ ok: true, ligado: Boolean(process.env.ANTHROPIC_API_KEY), modelo: COPILOTO_MODELO,
+             // O MODELO DAS TAREFAS DE BASTIDOR (08/11): aprender e ler as
+             // respostas aos avisos.
+             modelo_bastidores: QUAZAR_MODELO_BASTIDORES,
              resumo: true,
              // A IA QUE MOVE O FUNIL (02/11): `funil` diz se ESTA ponte move o
              // funil (falso com FUNIL_IA=desligada). A ponte de antes não manda
@@ -10633,7 +10729,9 @@ async function aprenderUmPedaco(linha, nomes, manual) {
 
   const r = await pedirAoClaude(sistemaDoAprender(manual),
     pedidoDoAprender({ quem: nomes.quem(linha), notas: linha.texto || '', blocos }),
-    { max_tokens: 12000, output_config: { effort: 'medium' } }, { prazoMs: 120000 });
+    { max_tokens: 12000, output_config: { effort: 'medium' } },
+    // BASTIDOR (08/11): ninguém espera por esta leitura, e ela é a que mais lê.
+    { prazoMs: 120000, modelo: QUAZAR_MODELO_BASTIDORES, rota: 'aprender' });
   if (!r.ok) {
     const erro = (r.corpo && r.corpo.error) || {};
     console.error(`copiloto aprende: a Anthropic respondeu ${r.status}`, JSON.stringify(erro).slice(0, 300));
@@ -10642,7 +10740,7 @@ async function aprenderUmPedaco(linha, nomes, manual) {
                motivo: 'o limite de uso da conta da Anthropic foi atingido' };
     }
     if ([401, 402, 403, 404].includes(r.status) || erro.type === 'billing_error') {
-      return { desfecho: 'pausa', esperarMs: APRENDER_PAUSA_DA_CONTA_MS, motivo: explicarFalhaDaAnthropic(r.status, r.corpo) };
+      return { desfecho: 'pausa', esperarMs: APRENDER_PAUSA_DA_CONTA_MS, motivo: explicarFalhaDaAnthropic(r.status, r.corpo, { bastidores: true }) };
     }
     return { desfecho: 'tentar' };
   }
@@ -10966,7 +11064,8 @@ async function escreverANoite(item) {
     [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_NOITE_REGRAS), notasDoCopiloto(lido.aprendido)],
     pedidoDaNoite({ mensagens, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
                     volta: quandoVoltaPorExtenso(item.ate, item.fuso), nome: primeiroNomeDoContato(contato), primeira }),
-    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } });
+    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } },
+    { rota: 'noite' });
   const uso = (r.corpo && r.corpo.usage) || {};
   if (r.status === 429) return { desfecho: 'pausa', esperarMs: Math.min(Math.max(r.esperarS || 30, 30), 600) * 1000, motivo: 'limite de uso da Anthropic', uso };
   if ([401, 402, 403, 404].includes(r.status)) return { desfecho: 'pausa', esperarMs: 30 * 60 * 1000, motivo: explicarFalhaDaAnthropic(r.status, r.corpo), uso };
@@ -11310,7 +11409,7 @@ async function resumirConversa(jwt, conversaId) {
   // para a IA pensar antes: o pensar conta dentro dele.
   const r = await pedirAoClaude(sistemaDoResumo(manual.erro ? '' : manual.manual),
     pedidoDoResumo({ linhas, departamento, grupo, cortou }),
-    { max_tokens: 8000, output_config: { effort: 'medium', format: RESUMO_FORMATO } });
+    { max_tokens: 8000, output_config: { effort: 'medium', format: RESUMO_FORMATO } }, { rota: 'resumir' });
   if (!r.ok) {
     console.error(`resumo: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -11636,7 +11735,7 @@ async function moverUmCartaoComAIA(k, nomes, manual) {
   const r = await pedirAoClaude(sistemaDoFunil(manual),
     pedidoDoFunil({ nomeDoFunil: nomes.funil(k), etapas, atual: atualEmUso, quemPos, linhas,
                     variosTelefones: telefoneDaConversa.size > 1 }),
-    { max_tokens: 4096, output_config: { effort: 'low', format: formatoDoFunil(nomesDasEtapas) } });
+    { max_tokens: 4096, output_config: { effort: 'low', format: formatoDoFunil(nomesDasEtapas) } }, { rota: 'funil' });
   if (!r.ok) {
     const erro = (r.corpo && r.corpo.error) || {};
     console.error(`funil pela IA: a Anthropic respondeu ${r.status}`, JSON.stringify(erro).slice(0, 300));
@@ -13047,7 +13146,9 @@ async function lerRespostaComIA(aviso, resposta) {
     // ESFORÇO BAIXO: é uma escolha entre três. O formato prende a resposta às
     // três palavras, e o teto tem folga para o Haiku 5.5 pensar antes.
     const r = await pedirAoClaude(LEITURA_REGRAS, pedido,
-      { max_tokens: 2048, output_config: { effort: 'low', format: LEITURA_FORMATO } });
+      { max_tokens: 2048, output_config: { effort: 'low', format: LEITURA_FORMATO } },
+      // BASTIDOR (08/11): uma escolha entre três palavras, que ninguém espera.
+      { modelo: QUAZAR_MODELO_BASTIDORES, rota: 'leitura' });
     if (!r.ok) {
       console.log(`Respostas aos avisos: a IA não leu (a Anthropic respondeu ${r.status}).`);
       return null;
