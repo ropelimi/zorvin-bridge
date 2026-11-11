@@ -10139,6 +10139,18 @@ function anotarUsoDaIa({ rota, modelo, uso, ms, status }) {
   } catch (_) { /* anotar nunca derruba a chamada */ }
 }
 
+// O CACHE DE UMA HORA (11/11), só nas rotas em que ele se paga. Medido no
+// registro do gasto (058), de 08 a 11/11: na sugestão e no Quazar à noite a
+// mesma parte fixa do sistema (uns 17 mil tokens) era escrita no
+// cache a cada chamada e quase nunca lida, porque as chamadas vêm de 5 a 60
+// minutos uma da outra, e o cache de 5 minutos vence antes. Escrever custa
+// 1,25x o preço de entrada; ler, 0,05x. Com 1 hora, a escrita custa 2x, mas
+// a mesma parte passa a ser lida nas chamadas seguintes: simulado nas horas
+// de verdade, a parte fixa sai por um terço a metade do que custava. O resto
+// (aprender, a leitura dos avisos, o resumo, o funil) fica como estava: no
+// Haiku o gasto é de centavos, e o resumo e o funil são raros ou desligados.
+const ROTAS_COM_CACHE_DE_UMA_HORA = new Set(['sugerir', 'ajustar', 'noite']);
+
 async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, modelo = COPILOTO_MODELO, rota = 'outra' } = {}) {
   // O SISTEMA EM PARTES (05/11), cada uma marcada para o cache: a primeira é a
   // mesma para o escritório inteiro, a segunda (o que o copiloto aprendeu num
@@ -10152,7 +10164,10 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, mod
     // COM FOLGA PARA PENSAR: no Haiku 5.5 o "pensar antes" vem ligado e conta
     // dentro deste teto. A resposta em si é curta.
     max_tokens: 2048,
-    system: partes.map((text) => ({ type: 'text', text, cache_control: { type: 'ephemeral' } })),
+    // TODAS AS PARTES COM A MESMA DURAÇÃO: a Anthropic exige que as de 1 hora
+    // venham antes das de 5 minutos, e misturar só traria essa conta a mais.
+    system: partes.map((text) => ({ type: 'text', text, cache_control: ROTAS_COM_CACHE_DE_UMA_HORA.has(rota)
+      ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' } })),
     messages: [{ role: 'user', content: pedido }],
     // O RESTO DO PEDIDO de quem não é o copiloto — a leitura das respostas
     // aos avisos manda o esforço e o formato da resposta.

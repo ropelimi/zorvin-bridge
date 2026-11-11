@@ -23513,7 +23513,10 @@ grant select (id, nome, numero, ativo, departamento_id) on advogados to authenti
 //    - a gravação nunca segura nem derruba a chamada; sem a tabela, avisa uma
 //      vez e para de tentar; o tropeço do banco é dito no log, uma vez;
 //    - e o modelo desconhecido grava sem custo, e o 404 dos bastidores diz a
-//      variável deles.
+//      variável deles;
+//    - e o cache de 1 hora (11/11) vai só na sugestão, no "Pedir uma mudança"
+//      e no Quazar à noite, em todas as partes do sistema; o resumo, aprender
+//      e a leitura dos avisos continuam no de 5 minutos.
 // ============================================================
 console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de cada chamada");
 {
@@ -23591,6 +23594,10 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
   const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
   const ehAprender = (p) => /Você estuda as conversas/.test(((p && p.system) || []).map((b) => b.text || "").join("\n"));
   const perto = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
+  // A DURAÇÃO DO CACHE de cada parte do sistema: "1h" ou "5m" (sem ttl).
+  const duracoes = (p) => ((p && p.system) || []).map((b) => (b.cache_control
+    ? (b.cache_control.ttl === "1h" ? "1h" : (b.cache_control.ttl ? `outro:${b.cache_control.ttl}` : "5m")) : "sem"));
+  const todasCom = (p, d) => { const ds = duracoes(p); return ds.length > 0 && ds.filter((x) => x === d).length === ds.length; };
 
   // ---- 115a. o estado ----
   {
@@ -23629,15 +23636,19 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
     ok("e o tempo da chamada, em milissegundos", Number.isInteger(u.ms) && u.ms >= 0, JSON.stringify(u.ms));
     ok("nada do que foi dito vai na linha",
        !JSON.stringify(u).includes("comprovante") && !JSON.stringify(u).includes("Recebido"), JSON.stringify(u));
+    ok("115m a sugestão marca o sistema com o cache de 1 hora (11/11)",
+       todasCom(claude.pedidos[0], "1h"), JSON.stringify(duracoes(claude.pedidos[0])));
 
     // O "PEDIR UMA MUDANÇA" E O RESUMO, também no COPILOTO_MODELO
     cena.uso = { input_tokens: 10, output_tokens: 1 };
     const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", sugestao: "Oi", pedido: "mais curto" });
     const pa = claude.pedidos[claude.pedidos.length - 1] || {};
     ok("115c o \"Pedir uma mudança\" vai ao COPILOTO_MODELO", a.status === 200 && pa.model === "claude-sonnet-5-5", JSON.stringify([a.status, pa.model]));
+    ok("e com o cache de 1 hora em todas as partes", todasCom(pa, "1h"), JSON.stringify(duracoes(pa)));
     const s = await post(t, "/copiloto/resumir", { conversa_id: "c1" });
     const ps = claude.pedidos[claude.pedidos.length - 1] || {};
     ok("o resumo também", s.status === 200 && ps.model === "claude-sonnet-5-5", JSON.stringify([s.status, ps.model, s.corpo]));
+    ok("e o resumo continua no cache de 5 minutos (é raro: 1 hora só encareceria a escrita)", todasCom(ps, "5m"), JSON.stringify(duracoes(ps)));
     await esperaAte(() => usos(t).length >= 3);
     ok("e cada uma é anotada com a sua rota",
        JSON.stringify(usos(t).map((x) => x.rota).sort()) === JSON.stringify(["ajustar", "resumir", "sugerir"]), JSON.stringify(usos(t).map((x) => x.rota)));
@@ -23670,6 +23681,7 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
        p.model === "claude-haiku-5-5", JSON.stringify(p.model));
     const u = usos(t).find((x) => x.rota === "aprender") || {};
     ok("e é anotada como 'aprender', no Haiku", u.modelo === "claude-haiku-5-5", JSON.stringify(u));
+    ok("e continua no cache de 5 minutos", todasCom(p, "5m"), JSON.stringify(duracoes(p)));
     ok("sem a quebra por duração, a escrita conta como a de 5 minutos", u.cache_escrita_5m === 2000 && u.cache_escrita_1h === 0, JSON.stringify(u));
     // 90000×0,50 + 2000×0,625 + 9000×0,05 + 1000×2,50, por milhão (101 mil tokens no pedido)
     ok("e acima de 100 mil tokens, com o preço de cima do Haiku: US$ 0,0492", perto(u.custo_usd, 0.0492), JSON.stringify(u.custo_usd));
@@ -23740,6 +23752,7 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
     const u = usos(t).find((x) => x.rota === "leitura") || {};
     // 300×0,10 + 12×0,50, por milhão
     ok("e é anotada como 'leitura', no Haiku", u.modelo === "claude-haiku-5-5" && perto(u.custo_usd, 0.000036), JSON.stringify(u));
+    ok("e continua no cache de 5 minutos", todasCom(p, "5m"), JSON.stringify(duracoes(p)));
     await t.parar(); await claude.parar();
   }
 
@@ -23754,6 +23767,23 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
     const u = usos(t).find((x) => x.rota === "noite") || {};
     ok("115i o Quazar à noite continua no COPILOTO_MODELO, e é anotado como 'noite'",
        p.model === "claude-sonnet-5-5" && u.modelo === "claude-sonnet-5-5", JSON.stringify([p.model, u]));
+    ok("e com o cache de 1 hora em todas as partes", todasCom(p, "1h"), JSON.stringify(duracoes(p)));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 115n. com as notas do telefone, o sistema tem duas partes, e as duas vão com 1 hora ----
+  // (a Anthropic exige as de 1 hora antes das de 5 minutos: misturadas na
+  // ordem errada, o pedido inteiro seria recusado)
+  {
+    const claude = await subirClaude();
+    cena.uso = { input_tokens: 10, output_tokens: 1 }; cena.status = 200; cena.stop = "end_turn";
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas({ zorvin_copiloto_aprendido: [
+      { id: "a1", escopo: "telefone", advogado_id: TELEFONE.id, departamento_id: null, texto: "NOTAS-DO-TELEFONE" }] }) });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const p = claude.pedidos[0] || {};
+    ok("115n com as notas do telefone, a sugestão manda duas partes de sistema",
+       r.status === 200 && duracoes(p).length === 2 && JSON.stringify(p.system || []).includes("NOTAS-DO-TELEFONE"), JSON.stringify([r.status, duracoes(p)]));
+    ok("e as duas com o cache de 1 hora", todasCom(p, "1h"), JSON.stringify(duracoes(p)));
     await t.parar(); await claude.parar();
   }
 

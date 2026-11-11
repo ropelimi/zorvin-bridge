@@ -3932,12 +3932,10 @@ O dia é o de Brasília.
 
 #### O que NÃO foi feito, e por quê
 
-- **O cache de 1 hora, ou o "manter aceso"** (um pedido de `max_tokens: 0`
-  antes de o cache vencer): é a resposta para a escrita que vence sem ser
-  lida, mas só paga se as chamadas vierem entre 5 e 60 minutos uma da outra.
-  O registro novo mostra isso por rota. **Decidir depois de uns dias de
-  números**, e não no chute: com as chamadas espaçadas demais, o cache de 1
-  hora (que escreve pelo dobro) só gastaria mais.
+- ~~**O cache de 1 hora, ou o "manter aceso"**: decidir depois de uns dias
+  de números.~~ **Decidido em 11/11, com os números:** o cache de 1 hora na
+  sugestão, no "Pedir uma mudança" e no Quazar à noite. Ver "O cache de 1
+  hora nas rotas do Sonnet (11/11)", logo abaixo.
 - **A leitura das conversas pelo Batch** (metade do preço, resposta em até 24
   horas): cada pedaço parte das notas do pedaço anterior, e a rodada teria de
   ser refeita. No Haiku, a leitura do dia custa centavos: não vale a obra.
@@ -3975,6 +3973,64 @@ uma (e a cópia de controle passou inteira):
 certo: a soma olha com os olhos de quem pergunta, e quem não entrou não lê a
 tabela. A função dá erro do mesmo jeito; quem diz que a porta ficou aberta é a
 conferência.
+
+#### O cache de 1 hora nas rotas do Sonnet (11/11)
+
+A análise que ficou marcada para três dias depois do 058, com os números do
+registro (`select zorvin_gasto_da_ia(3);`, de 08 a 11/11):
+
+- **o Quazar custava uns US$ 1,35 a 1,65 por dia** (uns US$ 45 por mês). A
+  sugestão e o Quazar à noite, no Sonnet, eram quase 90% disso; aprender e a
+  leitura dos avisos, no Haiku, centavos;
+- **o que pesava era escrever no cache, e não ler.** Cada chamada leva uma
+  parte fixa de uns 17 mil tokens (as regras, o manual, as rápidas, as lições
+  e as notas do telefone), e ela era escrita de novo em quase toda chamada:
+  em 10/11, 21 sugestões escreveram 302 mil tokens no cache (86% do custo da
+  rota) e leram 58 mil. O cache de 5 minutos vencia antes da chamada
+  seguinte;
+- **as chamadas vêm de 5 a 60 minutos uma da outra** (lido nas horas de cada
+  chamada, só a hora e os números), que é a faixa em que o cache de 1 hora se
+  paga. Escrever custa 1,25x o preço de entrada com 5 minutos e 2x com 1 hora;
+  ler custa 0,05x no Sonnet 5.5, e cada leitura renova o prazo;
+- **simulado nas horas de verdade**, só a parte fixa: a sugestão de 09/11 sai
+  de US$ 0,56 para 0,36, e a de 10/11 de US$ 0,73 para 0,24; o Quazar à noite,
+  de US$ 0,65 para 0,36 e de 0,47 para 0,35. Uns US$ 0,50 por dia, perto de um
+  terço da conta.
+
+**O que mudou** (`ROTAS_COM_CACHE_DE_UMA_HORA`, em `pedirAoClaude`): as rotas
+`sugerir`, `ajustar` e `noite` marcam todas as partes do sistema com
+`{"type": "ephemeral", "ttl": "1h"}`. **Todas com a mesma duração**: a
+Anthropic exige que as partes de 1 hora venham antes das de 5 minutos, e
+misturar só traria essa conta a mais. Não precisa de cabeçalho beta.
+
+**Fica como estava, e é decisão:**
+
+- **o resumo e o funil:** o resumo é raro (um por dia), e o funil está
+  desligado. Com uma chamada por hora, o cache de 1 hora só encareceria a
+  escrita;
+- **aprender e a leitura dos avisos:** no Haiku, o gasto do dia é de
+  centavos;
+- **o "manter aceso"** (um pedido de `max_tokens: 0` a cada 4 minutos e meio):
+  na simulação, custa o mesmo que o cache de 1 hora ou um pouco mais, e pediria
+  uma rodada própria e um pedido por departamento.
+
+**O cache se perde quando a parte fixa muda**: uma lição nova, o manual
+editado, uma rápida mudada ou as notas do telefone relidas fazem a próxima
+chamada escrever de novo. Isso já era assim com 5 minutos.
+
+**Como conferir depois de publicar:** `select zorvin_gasto_da_ia(3);` deve
+mostrar, nas rotas `sugerir` e `noite`, a escrita indo para `cache_escrita_1h`
+e a `cache_lida` crescendo. Se a leitura não crescer, o cache de 1 hora está
+gastando mais do que poupa, e o certo é voltar ao de 5 minutos.
+
+Prova: seção 115, agora com 37 conferências: a sugestão, o "Pedir uma
+mudança" e o Quazar à noite com 1 hora; a sugestão com as notas do telefone
+(duas partes, as duas com 1 hora); e o resumo, aprender e a leitura dos
+avisos com 5 minutos. **7 sabotagens e 7 pegas**, rodadas em cópias e lidas
+uma a uma (e a cópia sem sabotagem passou inteira): sem o cache de 1 hora
+(4 reprovações); 1 hora em todas as rotas (3); só a primeira parte com 1
+hora; cada uma das três rotas fora da lista; e a duração escrita errada
+(`60m`).
 
 ## Aguardando, em aberto e finalizados (script 028, 19/10)
 
