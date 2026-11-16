@@ -10149,7 +10149,13 @@ function anotarUsoDaIa({ rota, modelo, uso, ms, status }) {
 // de verdade, a parte fixa sai por um terço a metade do que custava. O resto
 // (aprender, a leitura dos avisos, o resumo, o funil) fica como estava: no
 // Haiku o gasto é de centavos, e o resumo e o funil são raros ou desligados.
-const ROTAS_COM_CACHE_DE_UMA_HORA = new Set(['sugerir', 'ajustar', 'noite']);
+//
+// O "PEDIR UMA MUDANÇA" VOLTOU AO DE 5 MINUTOS (16/11). Medido de 11 a 13/11:
+// a sugestão passou de US$ 0,042 para 0,032 por chamada, e o Quazar à noite
+// também leu o que guardou. O ajuste, não: ele é pouco usado, não lê o que a
+// sugestão guarda (a parte fixa dele é outra), e em 13/11 escreveu cinco vezes
+// sem ler nenhuma, ficando de US$ 0,050 para 0,079 por chamada.
+const ROTAS_COM_CACHE_DE_UMA_HORA = new Set(['sugerir', 'noite']);
 
 async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, modelo = COPILOTO_MODELO, rota = 'outra' } = {}) {
   // O SISTEMA EM PARTES (05/11), cada uma marcada para o cache: a primeira é a
