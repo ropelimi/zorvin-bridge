@@ -4023,6 +4023,14 @@ mostrar, nas rotas `sugerir` e `noite`, a escrita indo para `cache_escrita_1h`
 e a `cache_lida` crescendo. Se a leitura não crescer, o cache de 1 hora está
 gastando mais do que poupa, e o certo é voltar ao de 5 minutos.
 
+**O "Pedir uma mudança" voltou ao de 5 minutos (16/11)**, depois de medir
+de 11 a 13/11 (`select zorvin_gasto_da_ia(3);`): a sugestão passou de
+US$ 0,042 para 0,032 por chamada, e o Quazar à noite também passou a ler o que
+guardou. O ajuste, não: é pouco usado, a parte fixa dele é outra (não lê o que
+a sugestão guarda) e, em 13/11, escreveu cinco vezes sem ler nenhuma, indo de
+US$ 0,050 para 0,079 por chamada. Hoje só `sugerir` e `noite` usam 1 hora, e a
+seção 115 confere o ajuste com 5 minutos.
+
 Prova: seção 115, agora com 37 conferências: a sugestão, o "Pedir uma
 mudança" e o Quazar à noite com 1 hora; a sugestão com as notas do telefone
 (duas partes, as duas com 1 hora); e o resumo, aprender e a leitura dos

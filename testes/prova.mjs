@@ -23644,7 +23644,9 @@ console.log("\n115. O gasto do Quazar — os bastidores no Haiku e o gasto de ca
     const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", sugestao: "Oi", pedido: "mais curto" });
     const pa = claude.pedidos[claude.pedidos.length - 1] || {};
     ok("115c o \"Pedir uma mudança\" vai ao COPILOTO_MODELO", a.status === 200 && pa.model === "claude-sonnet-5-5", JSON.stringify([a.status, pa.model]));
-    ok("e com o cache de 1 hora em todas as partes", todasCom(pa, "1h"), JSON.stringify(duracoes(pa)));
+    // VOLTOU AO DE 5 MINUTOS (16/11): medido de 11 a 13/11, ele é pouco usado e
+    // não lê o que a sugestão guarda; com 1 hora, só pagava mais pela escrita.
+    ok("e no cache de 5 minutos (16/11: com 1 hora ele só pagava mais pela escrita)", todasCom(pa, "5m"), JSON.stringify(duracoes(pa)));
     const s = await post(t, "/copiloto/resumir", { conversa_id: "c1" });
     const ps = claude.pedidos[claude.pedidos.length - 1] || {};
     ok("o resumo também", s.status === 200 && ps.model === "claude-sonnet-5-5", JSON.stringify([s.status, ps.model, s.corpo]));
