@@ -3897,6 +3897,47 @@ cliente "de 1 minuto e meio" tinha justamente 90 segundos, e não separava 60
 de 90. Hoje ele escreveu há 75 segundos. O padrão do banco é a segunda guarda
 (a ponte sempre manda `p_quieto_s`), e fica conferido assim mesmo.
 
+### O "Sugerir resposta" fica marcado, e tem relatório (script 060, 18/11)
+
+Pedido do Rodrigo: *"Quando for usado o 'Sugerir resposta' eu preciso saber
+que o usuário usou essa opção, tem que aparecer de alguma forma discretamente
+na mensagem (apenas para a equipe, não para o contato). Preciso também de um
+relatório para isso."*
+
+`sql/automaticos/060-a-sugestao-do-quazar-fica-marcada.sql`:
+
+| peça | o quê |
+|---|---|
+| `fila_envio.sugestao_quazar` e `mensagens.sugestao_quazar` | `'igual'` (saiu como o Quazar escreveu), `'editada'` (a pessoa mexeu antes de mandar) ou nulo (escrita sem ele). Quem marca é o painel, na fila; a ponte copia para a mensagem ao gravá-la (`gravarEnviadaNoHistorico`) |
+| `zorvin_sugestoes` | cada "Sugerir resposta" (`sugerir`) e "Pedir uma mudança" (`ajustar`) que deu certo: quem pediu, qual conversa, quando. Só a ponte escreve (`anotarSugestao`) |
+| `zorvin_relatorio_sugestoes(desde, ate, quem, fuso, telefone, departamento)` | pedidas, mudanças pedidas, usadas (sem mudança e editadas) e escritas (as mensagens de texto que a pessoa mandou pelo painel), por pessoa e por dia, e o período anterior |
+
+- **O cliente não recebe nada disto**: a marca é uma coluna, e o que vai à
+  Uazapi continua sendo só o texto (a seção 120 confere).
+- **O pedido é anotado só quando deu certo** (200 com a sugestão), e dois
+  cliques juntos, que são uma ida, são um pedido. A recusa da IA não conta.
+- **Anotar nunca segura nem derruba a sugestão.** Sem a tabela, a ponte avisa
+  uma vez no log e para de tentar até reiniciar.
+- **O relatório:** quem administra vê todo mundo; quem atende, só o que é dela
+  (o recorte é feito na função). `security invoker`: cada pessoa conta só as
+  conversas que vê. A arquivada não conta (057). "Escritas" deixam de fora a
+  mensagem automática, a do cliente e o que não é texto.
+- **Guarda:** sem `mensagens.enviado_por_id` (agosto) ou `automatica` (037),
+  o script não faz nada e diz o que falta.
+
+Provas: seção 119 (o 060 num Postgres de verdade, 22 conferências) e seção
+120 (a ponte, 10). **12 sabotagens e 12 pegas**, rodadas em cópias e lidas uma
+a uma: sem anotar o pedido; anotando a recusa; sem copiar a marca para a
+mensagem; o aviso da tabela que falta repetido; a leitura dos pedidos aberta a
+todos; sem o recorte de quem atende; a arquivada contando; a automática
+contando; `security definer`; sem a regra dos valores da marca; os pedidos
+graváveis por quem entrou; e sem a guarda de quem enviou.
+
+**Duas vazaram na primeira rodada, e as duas eram da prova:** a automática
+contando passava porque a mensagem automática da cena não tinha quem enviou
+(o outro filtro a tirava); e `security definer` passava porque nenhuma
+mensagem estava num telefone que a pessoa não vê. Hoje a cena tem as duas.
+
 ### O gasto do Quazar (script 058, 08/11)
 
 Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de

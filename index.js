@@ -5003,6 +5003,10 @@ async function gravarEnviadaNoHistorico(item, idUazapi, quando = null) {
   // espera e a aba Novos não mudam). `pelo_quazar` é o que a tela usa para
   // pôr o rosto dele na bolha.
   if (item.pelo_quazar) { extras.automatica = true; extras.pelo_quazar = true; }
+  // A MENSAGEM QUE SAIU DO "SUGERIR RESPOSTA" (060): o painel marca na fila
+  // ('igual' ou 'editada'), e a marca vai para a mensagem, que é o que a
+  // bolha desenha e o relatório conta. O cliente não recebe nada disto.
+  if (item.sugestao_quazar) extras.sugestao_quazar = item.sugestao_quazar;
   if (item.responder_id_uazapi) {
     extras.responder_id_uazapi = item.responder_id_uazapi;
     extras.resposta_previa = item.resposta_previa || null;
@@ -10138,6 +10142,38 @@ function custoDoUso(modelo, m) {
   return Math.round(usd * 1e6) / 1e6;
 }
 
+// ============================================================
+//  OS PEDIDOS AO "SUGERIR RESPOSTA" (060, 18/11)
+//
+//  Pedido do Rodrigo: saber quem usa o "Sugerir resposta", com relatório. A
+//  mensagem que sai com a sugestão é marcada pelo painel; o que a ponte anota
+//  é o PEDIDO que deu certo (`zorvin_sugestoes`: quem, qual conversa, quando,
+//  e se foi uma sugestão ou um "Pedir uma mudança"). É dele que sai quantas
+//  sugestões foram pedidas e não usadas. Anotar nunca segura nem derruba a
+//  resposta; sem a tabela (antes do 060), a ponte avisa uma vez e para de
+//  tentar até reiniciar.
+// ============================================================
+let sugestoesSemTabela = false;
+let sugestoesUltimoErro = 0;
+function anotarSugestao(quem, conversaId, tipo) {
+  if (sugestoesSemTabela || !quem || !conversaId) return;
+  try {
+    supabase.from('zorvin_sugestoes').insert({ quem, conversa_id: conversaId, tipo }).then(({ error }) => {
+      if (!error) return;
+      if (semATabela(error)) {
+        sugestoesSemTabela = true;
+        console.warn('copiloto: a tabela "zorvin_sugestoes" não existe — os pedidos de sugestão não são anotados. '
+          + 'Rode sql/automaticos/060-a-sugestao-do-quazar-fica-marcada.sql.');
+        return;
+      }
+      if (Date.now() - sugestoesUltimoErro > 60 * 1000) {
+        sugestoesUltimoErro = Date.now();
+        console.error('copiloto: não consegui anotar o pedido de sugestão', error.code || '', String(error.message || '').slice(0, 200));
+      }
+    }, () => {});
+  } catch (_) { /* anotar nunca derruba a sugestão */ }
+}
+
 let usoDaIaSemTabela = false;
 let usoDaIaUltimoErro = 0;
 function anotarUsoDaIa({ rota, modelo, uso, ms, status }) {
@@ -10512,7 +10548,11 @@ app.post('/copiloto/sugerir', async (req, res) => {
     const chave = `${usuario.id}:${conversaId}`;
     let promessa = sugestoesEmVoo.get(chave);
     if (!promessa) {
-      promessa = sugerirResposta(jwt, conversaId).finally(() => sugestoesEmVoo.delete(chave));
+      promessa = sugerirResposta(jwt, conversaId).then((r) => {
+        // Dois cliques juntos são uma ida, e um pedido anotado.
+        if (r && r.status === 200 && r.corpo && r.corpo.sugestao) anotarSugestao(usuario.id, conversaId, 'sugerir');
+        return r;
+      }).finally(() => sugestoesEmVoo.delete(chave));
       sugestoesEmVoo.set(chave, promessa);
     }
     const r = await promessa;
@@ -10552,7 +10592,10 @@ app.post('/copiloto/ajustar', async (req, res) => {
     const chave = `${usuario.id}:${conversaId}:${crypto.createHash('sha256').update(`${pedido}\u0000${mensagemDeAgora}`).digest('hex')}`;
     let promessa = ajustesEmVoo.get(chave);
     if (!promessa) {
-      promessa = ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido).finally(() => ajustesEmVoo.delete(chave));
+      promessa = ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido).then((r) => {
+        if (r && r.status === 200 && r.corpo && r.corpo.sugestao) anotarSugestao(usuario.id, conversaId, 'ajustar');
+        return r;
+      }).finally(() => ajustesEmVoo.delete(chave));
       ajustesEmVoo.set(chave, promessa);
     }
     const r = await promessa;
