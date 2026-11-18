@@ -24328,5 +24328,325 @@ console.log("\n118. O Quazar à noite, valendo — a ponte manda");
   }
 }
 
+// ============================================================
+//  119. A SUGESTÃO DO QUAZAR FICA MARCADA (060), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 18/11: saber quem usou o "Sugerir resposta", na
+//  mensagem e num relatório. A seção guarda:
+//    - num banco limpo, nada; sem quem enviou em mensagens, diz o que falta;
+//    - a marca na fila e na mensagem, só 'igual' ou 'editada';
+//    - os pedidos: quem administra lê todos, quem atende só os seus, e
+//      ninguém do painel grava;
+//    - o relatório: as contas por pessoa e por dia, as escritas sem a
+//      automática e sem a do cliente, a arquivada fora, o período anterior,
+//      os recortes de telefone, departamento e pessoa, e quem atende vendo só
+//      o que é dela;
+//    - rodar de novo.
+// ============================================================
+{
+  console.log("\n119. A sugestão do Quazar fica marcada (060), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 060 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S060 = fs.readFileSync(new URL("../sql/automaticos/060-a-sugestao-do-quazar-fica-marcada.sql", import.meta.url), "utf8");
+    const ESQUEMA = (comQuem = true) => `
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema public, auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false,
+  ativo boolean not null default true);
+create or replace function zorvin_admin() returns boolean language sql stable security definer
+  set search_path = public as $f$
+  select coalesce((select admin and ativo from usuarios where id = auth.uid()), false) $f$;
+create table departamentos (id bigint primary key, nome text not null);
+create table advogados (id uuid primary key, nome text not null, departamento_id bigint references departamentos(id),
+  ativo boolean default true);
+create table permissoes (usuario_id uuid, advogado_id uuid);
+create or replace function meus_telefones() returns uuid[] language sql stable security definer
+  set search_path = public as $f$ select coalesce(array_agg(advogado_id), '{}') from permissoes where usuario_id = auth.uid() $f$;
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), arquivada boolean not null default false);
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  origem text not null, tipo text not null default 'texto', texto text,
+  criado_em timestamptz not null default now(), automatica boolean not null default false
+  ${comQuem ? ", enviado_por_id uuid" : ""});
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id), texto text,
+  status text not null default 'pendente', criado_em timestamptz not null default now());
+alter table conversas enable row level security;
+create policy conversas_leitura on conversas for select using
+  ((select zorvin_admin()) or advogado_id = any ((select meus_telefones())::uuid[]));
+alter table mensagens enable row level security;
+create policy mensagens_leitura on mensagens for select using
+  (exists (select 1 from conversas c where c.id = conversa_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid || ""]);
+      await c.query(`set role ${uid === null ? "anon" : "authenticated"}`);
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const U = { adm: "00000000-0000-0000-0000-00000000ad01", a: "00000000-0000-0000-0000-00000000aa01",
+                b: "00000000-0000-0000-0000-00000000bb01" };
+    const T = { t1: "00000000-0000-0000-0000-0000000000f1", t2: "00000000-0000-0000-0000-0000000000f2" };
+    const C = { c1: "cccccccc-0000-0000-0000-000000000301", c2: "cccccccc-0000-0000-0000-000000000302",
+                c3: "cccccccc-0000-0000-0000-000000000303" };
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 119a. banco limpo, e sem quem enviou ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S060));
+        ok("119a num banco limpo, o 060 não faz nada e diz isso", /nada a fazer/.test(String(item(r, /sem as tabelas/))), JSON.stringify(r));
+        const sem = await bancoNovo();
+        await sem.query(ESQUEMA(false));
+        const r2 = await guardado(() => aplicar(sem, S060));
+        ok("e sem quem enviou em mensagens, diz o que falta, e não cria nada",
+           /^NÃO — rode/.test(String(item(r2, /falta quem enviou/)))
+           && !(await sem.query("select to_regclass('public.zorvin_sugestoes') r")).rows[0].r, JSON.stringify(r2));
+      }
+
+      // ---- 119b. a instalação ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA());
+      await c.query("insert into departamentos values (1, 'Sucesso do Cliente'), (2, 'Acordos')");
+      await c.query("insert into usuarios (id, nome, admin) values ($1, 'Quem Administra', true), ($2, 'Ana', false), ($3, 'Bia', false)",
+                    [U.adm, U.a, U.b]);
+      await c.query("insert into advogados values ($1, 'SAC', 1, true), ($2, 'ACORDOS', 2, true)", [T.t1, T.t2]);
+      await c.query("insert into permissoes values ($1, $2), ($3, $2), ($3, $4)", [U.a, T.t1, U.b, T.t2]);
+      await c.query("insert into contatos (id, numero) values (gen_random_uuid(), '5571900000301')");
+      await c.query(`insert into conversas (id, advogado_id, arquivada) values ($1, $2, false), ($3, $4, false), ($5, $2, true)`,
+                    [C.c1, T.t1, C.c2, T.t2, C.c3]);
+      const conf = await guardado(() => aplicar(c, S060));
+      ok("119b o 060 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+      ok("e chama o relatório no papel de quem atende", item(conf, /quem atende abre o relatório/) === "true", JSON.stringify(conf));
+      const errada = await guardado(() => c.query("insert into fila_envio (conversa_id, texto, sugestao_quazar) values ($1, 'x', 'outra')", [C.c1]));
+      ok("a marca só aceita 'igual' ou 'editada', na fila", errada.codigo === "23514", JSON.stringify(errada));
+      const errada2 = await guardado(() => c.query("insert into mensagens (conversa_id, origem, texto, sugestao_quazar) values ($1, 'advogado', 'x', 'sim')", [C.c1]));
+      ok("e na mensagem", errada2.codigo === "23514", JSON.stringify(errada2));
+      const pelaTela = await guardado(() => comoPessoa(c, U.a, () =>
+        c.query("insert into fila_envio (conversa_id, texto, sugestao_quazar) values ($1, 'Oi', 'editada') returning sugestao_quazar", [C.c1])));
+      ok("quem entrou grava a marca na fila", lista(pelaTela.rows)[0] && pelaTela.rows[0].sugestao_quazar === "editada", JSON.stringify(pelaTela));
+
+      // ---- 119c. os dados ----
+      const msg = (conv, quem, horas, marca = null, extra = {}) => c.query(
+        `insert into mensagens (conversa_id, origem, tipo, texto, criado_em, automatica, enviado_por_id, sugestao_quazar)
+         values ($1, $2, $3, 'x', now() - $4::numeric * interval '1 hour', $5, $6, $7)`,
+        [conv, extra.origem || "advogado", extra.tipo || "texto", horas, extra.automatica === true, quem, marca]);
+      await msg(C.c1, U.a, 30, "igual");
+      await msg(C.c1, U.a, 26, "editada");
+      await msg(C.c1, U.a, 2);
+      await msg(C.c2, U.b, 5, "igual");
+      await msg(C.c2, U.b, 4);
+      await msg(C.c3, U.a, 3, "igual");                          // arquivada: fora
+      await msg(C.c1, U.a, 1, "igual", { automatica: true });    // automática: fora
+      await msg(C.c2, U.a, 6, "igual");                          // no telefone que a Ana não vê
+      await msg(C.c1, null, 1, null, { origem: "contato" });     // do cliente: fora
+      await msg(C.c1, U.a, 1, null, { tipo: "imagem" });         // não é texto: fora
+      await msg(C.c1, U.a, 24 * 40, "igual");                    // o período anterior
+      const pedido = (quem, conv, horas, tipo = "sugerir") => c.query(
+        "insert into zorvin_sugestoes (quem, conversa_id, quando, tipo) values ($1, $2, now() - $3::numeric * interval '1 hour', $4)",
+        [quem, conv, horas, tipo]);
+      await pedido(U.a, C.c1, 30); await pedido(U.a, C.c1, 27); await pedido(U.a, C.c1, 26, "ajustar");
+      await pedido(U.b, C.c2, 5); await pedido(U.a, C.c3, 3); await pedido(U.a, C.c1, 24 * 41);
+
+      const rel = (quem, args = {}) => guardado(() => comoPessoa(c, quem, async () => (await c.query(
+        `select zorvin_relatorio_sugestoes(now() - interval '30 days', now(), $1, 'America/Sao_Paulo', $2, $3) r`,
+        [args.quem || null, args.telefone || null, args.departamento || null])).rows[0].r));
+
+      // ---- 119d. quem administra ----
+      const r = await rel(U.adm);
+      const tot = (r && r.total) || {};
+      ok("119d as contas do período: 3 pedidas e 1 mudança, 4 usadas (3 sem mudança, 1 editada) de 6 escritas",
+         tot.pedidas === 3 && tot.ajustes === 1 && tot.usadas === 4 && tot.iguais === 3 && tot.editadas === 1 && tot.escritas === 6,
+         JSON.stringify(r));
+      ok("e o período anterior: 1 pedida e 1 usada", r && r.antes && r.antes.pedidas === 1 && r.antes.usadas === 1, JSON.stringify(r && r.antes));
+      const pa = lista(r && r.por_pessoa).find((p) => p.id === U.a) || {};
+      const pb = lista(r && r.por_pessoa).find((p) => p.id === U.b) || {};
+      ok("por pessoa: a Ana pediu 2 e mudou 1, usou 3 (2 e 1) de 4 escritas",
+         pa.nome === "Ana" && pa.pedidas === 2 && pa.ajustes === 1 && pa.usadas === 3 && pa.iguais === 2 && pa.editadas === 1 && pa.escritas === 4,
+         JSON.stringify(pa));
+      ok("e a Bia pediu 1 e usou 1 de 2", pb.pedidas === 1 && pb.usadas === 1 && pb.escritas === 2, JSON.stringify(pb));
+      ok("quem usou mais vem primeiro", lista(r && r.por_pessoa)[0] && r.por_pessoa[0].id === U.a, JSON.stringify(r && r.por_pessoa));
+      const dias = lista(r && r.por_dia);
+      ok("por dia: as somas batem com o total",
+         dias.reduce((s, d) => s + d.pedidas, 0) === 3 && dias.reduce((s, d) => s + d.iguais + d.editadas, 0) === 4,
+         JSON.stringify(dias));
+      ok("e o relatório de quem administra não vem recortado", r && r.so_meu === false, JSON.stringify(r && r.so_meu));
+
+      // ---- 119e. os recortes ----
+      const rt = await rel(U.adm, { telefone: T.t2 });
+      ok("119e o telefone recorta: só o de Acordos", rt && rt.total && rt.total.usadas === 2 && rt.total.pedidas === 1 && rt.total.escritas === 3,
+         JSON.stringify(rt && rt.total));
+      const rd = await rel(U.adm, { departamento: 1 });
+      ok("o departamento recorta: só a Ana", rd && rd.total && rd.total.usadas === 2 && rd.total.pedidas === 2 && rd.total.escritas === 3,
+         JSON.stringify(rd && rd.total));
+      const rq = await rel(U.adm, { quem: U.b });
+      ok("e a pessoa escolhida recorta", rq && rq.total && rq.total.usadas === 1 && lista(rq.por_pessoa).length === 1, JSON.stringify(rq));
+
+      // ---- 119f. quem atende ----
+      const ra = await rel(U.a, { quem: U.b });
+      ok("119f quem atende vê só o que é dela, mesmo pedindo o de outra pessoa, e só nos telefones que vê",
+         ra && ra.so_meu === true && ra.total && ra.total.usadas === 2 && ra.total.pedidas === 2
+         && lista(ra.por_pessoa).length === 1 && ra.por_pessoa[0].id === U.a, JSON.stringify(ra));
+      const peds = await guardado(() => comoPessoa(c, U.a, async () => (await c.query("select quem from zorvin_sugestoes")).rows));
+      ok("e lê só os próprios pedidos", lista(peds).length > 0 && lista(peds).every((x) => x.quem === U.a), JSON.stringify(peds));
+      const pedsAdm = await guardado(() => comoPessoa(c, U.adm, async () => (await c.query("select count(*)::int n from zorvin_sugestoes")).rows[0].n));
+      ok("quem administra lê todos", pedsAdm === 6, JSON.stringify(pedsAdm));
+      const grava = await guardado(() => comoPessoa(c, U.a, () =>
+        c.query("insert into zorvin_sugestoes (quem, conversa_id) values ($1, $2)", [U.a, C.c1])));
+      ok("ninguém do painel grava um pedido", grava.codigo === "42501", JSON.stringify(grava));
+      const anon = await guardado(() => comoPessoa(c, null, () => c.query("select zorvin_relatorio_sugestoes()")));
+      ok("e quem não entrou não chama o relatório", anon.codigo === "42501", JSON.stringify(anon).slice(0, 200));
+
+      // ---- 119g. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S060));
+      ok("119g rodar de novo não acusa nada, e os pedidos continuam", lista(de2).length > 0 && !defeito(de2)
+         && (await c.query("select count(*)::int n from zorvin_sugestoes")).rows[0].n === 6, JSON.stringify(de2));
+    } catch (e) {
+      ok("a seção 119 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end().catch(() => {});
+    }
+  }
+}
+
+// ============================================================
+//  120. A SUGESTÃO DO QUAZAR FICA MARCADA — a ponte (18/11)
+//
+//  A seção guarda:
+//    - o "Sugerir resposta" que deu certo vira um pedido anotado, com quem e
+//      qual conversa; dois cliques juntos, um só; o "Pedir uma mudança"
+//      anota 'ajustar'; a recusa da IA não anota nada;
+//    - sem a tabela, a sugestão sai assim mesmo, e o log avisa uma vez;
+//    - a marca da fila vai para a mensagem gravada, e a mensagem sem a marca
+//      continua sem ela.
+// ============================================================
+console.log("\n120. A sugestão do Quazar fica marcada — a ponte");
+{
+  const cena = { stop: "end_turn" };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const props = Object.keys((json && json.output_config && json.output_config.format
+        && json.output_config.format.schema && json.output_config.format.schema.properties) || {});
+      const texto = props.includes("licao") ? JSON.stringify({ sugestao: "Oi, tudo certo?", licao: "" }) : "Bom dia! Recebido.";
+      await espera(150);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: cena.stop === "refusal" ? [] : [{ type: "text", text: texto }], stop_reason: cena.stop,
+        usage: { input_tokens: 10, output_tokens: 5 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const tabelas = (extra = {}) => ({
+    contatos: [{ id: "k1", numero: "5511999998888", nome: "Cliente" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+    mensagens: [{ id: "m1", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Bom dia", criado_em: new Date().toISOString() }],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL" }],
+    zorvin_sugestoes: [],
+    ...extra,
+  });
+  const comChave = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, ...extra });
+  const post = (t, rota, corpo) => fetch(`http://127.0.0.1:${t.porta}${rota}`, {
+    method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) })).catch((e) => ({ status: 0, corpo: { erro: e.message } }));
+  const pedidos = (t) => t.sb.dados.zorvin_sugestoes || [];
+  const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+
+  // ---- 120a. o pedido anotado ----
+  {
+    const claude = await subirClaude();
+    cena.stop = "end_turn";
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas() });
+    const [r1, r2] = await Promise.all([post(t, "/copiloto/sugerir", { conversa_id: "c1" }), post(t, "/copiloto/sugerir", { conversa_id: "c1" })]);
+    ok("120a a sugestão sai", r1.status === 200 && r2.status === 200, JSON.stringify([r1, r2]));
+    await esperaAte(() => pedidos(t).length >= 1);
+    await espera(300);
+    const p = pedidos(t)[0] || {};
+    ok("e vira um pedido anotado: quem pediu, qual conversa, 'sugerir'",
+       pedidos(t).length === 1 && p.quem === "u1" && p.conversa_id === "c1" && p.tipo === "sugerir", JSON.stringify(pedidos(t)));
+    ok("dois cliques juntos são uma ida e um pedido", claude.pedidos.length === 1, `${claude.pedidos.length} idas`);
+    const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", pedido: "Mais curto", sugestao: "Bom dia! Recebido." });
+    await esperaAte(() => pedidos(t).length >= 2);
+    ok("o \"Pedir uma mudança\" anota 'ajustar'", a.status === 200 && pedidos(t).length === 2 && pedidos(t)[1].tipo === "ajustar",
+       JSON.stringify([a.status, pedidos(t)]));
+    cena.stop = "refusal";
+    const rec = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(400);
+    ok("a recusa da IA não anota nada", rec.status !== 200 && pedidos(t).length === 2, JSON.stringify([rec.status, pedidos(t).length]));
+    cena.stop = "end_turn";
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 120b. sem a tabela ----
+  {
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(), semTabelas: ["zorvin_sugestoes"] });
+    const r1 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(300);
+    const r2 = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    await espera(300);
+    const avisos = (t.registro.join("").match(/a tabela "zorvin_sugestoes" não existe/g) || []).length;
+    ok("120b sem a tabela, a sugestão sai assim mesmo, e o log avisa uma vez", r1.status === 200 && r2.status === 200 && avisos === 1,
+       `${avisos} avisos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 120c. a marca vai da fila para a mensagem ----
+  {
+    const itens = [
+      { id: "f1", conversa_id: "c1", texto: "Oi, tudo certo?", status: "pendente", enviado_por: "Ana", enviado_por_id: "u1",
+        sugestao_quazar: "editada", criado_em: new Date().toISOString() },
+      { id: "f2", conversa_id: "c1", texto: "Escrevi sozinha", status: "pendente", enviado_por: "Ana", enviado_por_id: "u1",
+        criado_em: new Date().toISOString() },
+    ];
+    const t = await subirTudo({}, { tabelas: tabelas({ fila_envio: itens }) });
+    await esperaAte(() => (t.sb.dados.mensagens || []).filter((m) => m.origem === "advogado").length >= 2, 9000);
+    const m1 = (t.sb.dados.mensagens || []).find((m) => m.texto === "Oi, tudo certo?") || {};
+    const m2 = (t.sb.dados.mensagens || []).find((m) => m.texto === "Escrevi sozinha") || {};
+    ok("120c a mensagem que saiu com a sugestão é gravada com a marca", m1.sugestao_quazar === "editada", JSON.stringify(m1));
+    ok("e a escrita sem o Quazar, sem marca nenhuma", m2.id && !m2.sugestao_quazar, JSON.stringify(m2));
+    const envio = t.uaz.recebidas.find((x) => x.caminho === "/send/text" && x.corpo && x.corpo.text === "Oi, tudo certo?") || {};
+    ok("e o cliente recebe só o texto", envio.corpo && !JSON.stringify(envio.corpo).includes("sugestao"), JSON.stringify(envio.corpo));
+    await t.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

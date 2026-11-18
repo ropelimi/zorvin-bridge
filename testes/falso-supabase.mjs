@@ -170,7 +170,9 @@ const COLUNAS_DO_BANCO = {
               // O AVISO AUTOMÁTICO (script 037).
               "automatica",
               // A RESPOSTA DO QUAZAR À NOITE, VALENDO (script 059).
-              "pelo_quazar"],
+              "pelo_quazar",
+              // A MENSAGEM QUE SAIU DO "SUGERIR RESPOSTA" (script 060).
+              "sugestao_quazar"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
           "vantoro_atividade_id", "atualizado_em",
           // O ANEXO DA NOTA (script 053).
@@ -190,7 +192,9 @@ const COLUNAS_DO_BANCO = {
                // qualquer linha que o mencione.
                "erro_detalhe",
                // A RESPOSTA DO QUAZAR À NOITE, VALENDO (script 059).
-               "pelo_quazar"],
+               "pelo_quazar",
+               // A MENSAGEM QUE SAIU DO "SUGERIR RESPOSTA" (script 060).
+               "sugestao_quazar"],
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],
