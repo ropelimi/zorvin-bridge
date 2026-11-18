@@ -23988,5 +23988,345 @@ create table conversas (id uuid primary key default gen_random_uuid());
   }
 }
 
+// ============================================================
+//  117. O QUAZAR À NOITE, VALENDO (059), num Postgres de verdade
+//
+//  Pedido do Rodrigo em 18/11: "quero já começar a usar". A seção guarda:
+//    - num banco limpo, e sem o 055, nada;
+//    - o modo 'valendo', o status 'enviada', o item da fila, a marca
+//      `pelo_quazar` na fila e nas mensagens, e o nome do escritório;
+//    - a resposta do próprio Quazar não é "a equipe na conversa": o cliente
+//      que escreve de novo depois dela volta à lista; a da equipe, não;
+//    - a espera padrão de 1 minuto;
+//    - a resposta enviada também se avalia, e quem entrou continua sem chamar
+//      a lista.
+// ============================================================
+{
+  console.log("\n117. O Quazar à noite, valendo (059), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 059 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S021 = ler("021-a-resposta-fora-do-horario.sql"), S055 = ler("055-o-quazar-a-noite-em-ensaio.sql");
+    const S059 = ler("059-o-quazar-a-noite-valendo.sql");
+    const ESQUEMA = `
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema public, auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false,
+  ativo boolean not null default true);
+create or replace function zorvin_admin() returns boolean language sql stable security definer
+  set search_path = public as $f$
+  select coalesce((select admin and ativo from usuarios where id = auth.uid()), false) $f$;
+create table departamentos (id bigint primary key, nome text not null);
+create table advogados (id uuid primary key, nome text not null, departamento_id bigint references departamentos(id),
+  ativo boolean default true);
+create table permissoes (usuario_id uuid, advogado_id uuid);
+create or replace function meus_telefones() returns uuid[] language sql stable security definer
+  set search_path = public as $f$ select coalesce(array_agg(advogado_id), '{}') from permissoes where usuario_id = auth.uid() $f$;
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), arquivada boolean not null default false);
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  origem text not null, tipo text not null default 'texto', texto text, id_uazapi text,
+  criado_em timestamptz not null default now(), automatica boolean not null default false);
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id), texto text,
+  status text not null default 'pendente', criado_em timestamptz not null default now(), agendada_para timestamptz);
+create table zorvin_copiloto (id boolean primary key default true, instrucoes text not null default '');
+insert into zorvin_copiloto (id) values (true);
+alter table conversas enable row level security;
+create policy conversas_leitura on conversas for select using
+  ((select zorvin_admin()) or advogado_id = any ((select meus_telefones())::uuid[]));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    // FECHADO AGORA em qualquer hora (a régua da seção 110).
+    const horaSP = Number(new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", hourCycle: "h23" }).format(new Date()));
+    const abre = (horaSP + 2) % 24 <= 22 ? (horaSP + 2) % 24 : (horaSP + 3) % 24;
+    const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+    const FECHADA = Object.fromEntries(["seg", "ter", "qua", "qui", "sex", "sab", "dom"].map((d) => [d, [hh(abre), hh(abre + 1)]]));
+    const U = { sac: "00000000-0000-0000-0000-00000000aa02" };
+    const T = { sac: "00000000-0000-0000-0000-00000000bb01" };
+    const C = (n) => `cccccccc-0000-0000-0000-0000000002${String(n).padStart(2, "0")}`;
+    const K = (n) => `aaaaaaaa-0000-0000-0000-0000000002${String(n).padStart(2, "0")}`;
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 117a. banco limpo, e sem o 055 ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S059));
+        ok("117a num banco limpo, o 059 não faz nada e diz isso", /nada a fazer/.test(String(item(r, /sem as tabelas/))), JSON.stringify(r));
+        const sem = await bancoNovo();
+        await sem.query(ESQUEMA);
+        const r2 = await guardado(() => aplicar(sem, S059));
+        ok("e sem o 055, diz que falta", /rode o 055/.test(String(item(r2, /falta o Quazar à noite/))), JSON.stringify(r2));
+      }
+
+      // ---- 117b. a instalação ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await aplicar(c, S021);
+      await c.query("insert into departamentos values (1, 'Sucesso do Cliente')");
+      await c.query("insert into usuarios (id, nome) values ($1, 'Atendente SAC')", [U.sac]);
+      await c.query("insert into advogados values ($1, 'SAC', 1, true)", [T.sac]);
+      await c.query("insert into permissoes values ($1, $2)", [U.sac, T.sac]);
+      await c.query("insert into zorvin_fora_do_horario (departamento_id, ligada, texto, semana) values (1, true, 'Recebemos.', $1::jsonb)",
+                    [JSON.stringify(FECHADA)]);
+      await aplicar(c, S055);
+      const conf = await guardado(() => aplicar(c, S059));
+      ok("117b o 059 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+      const valendo = await guardado(() => c.query("update zorvin_fora_do_horario set quazar = 'valendo' where departamento_id = 1"));
+      ok("o modo 'valendo' é aceito", !valendo.codigo, JSON.stringify(valendo));
+      const estranho = await guardado(() => c.query("update zorvin_fora_do_horario set quazar = 'ligado' where departamento_id = 1"));
+      ok("e um valor que não existe continua recusado", estranho.codigo === "23514", JSON.stringify(estranho));
+      const cols = (await c.query(`select table_name t from information_schema.columns
+        where table_schema = 'public' and column_name in ('pelo_quazar', 'nome_do_escritorio', 'fila_id')`)).rows.map((x) => x.t).sort();
+      ok("a fila e as mensagens ganham a marca, o registro o item da fila, e o manual o nome do escritório",
+         JSON.stringify(cols) === JSON.stringify(["fila_envio", "mensagens", "zorvin_copiloto", "zorvin_quazar_noturno"]), JSON.stringify(cols));
+      const longo = await guardado(() => c.query("update zorvin_copiloto set nome_do_escritorio = repeat('x', 121)"));
+      ok("o nome do escritório tem teto", longo.codigo === "23514", JSON.stringify(longo));
+      const nomeOk = await guardado(() => c.query("update zorvin_copiloto set nome_do_escritorio = 'Escritório de Prova'"));
+      ok("e o nome cabe", !nomeOk.codigo, JSON.stringify(nomeOk));
+
+      // ---- 117c. quem está esperando ----
+      const contato = (n) => c.query("insert into contatos (id, numero, nome) values ($1, $2, $3)", [K(n), `55719000002${String(n).padStart(2, "0")}`, `Cliente ${n}`]);
+      const conversa = (n) => c.query("insert into conversas (id, advogado_id, contato_id) values ($1, $2, $3)", [C(n), T.sac, K(n)]);
+      const msg = (n, origem, minAtras, extra = {}) => c.query(
+        `insert into mensagens (conversa_id, origem, texto, criado_em, automatica, pelo_quazar)
+         values ($1, $2, $3, now() - $4::numeric * interval '1 minute', $5, $6) returning id`,
+        [C(n), origem, `${origem} ${n}`, minAtras, extra.quazar === true, extra.quazar === true]);
+      const fila = (n, minAtras, quazar) => c.query(
+        "insert into fila_envio (conversa_id, texto, status, criado_em, pelo_quazar) values ($1, 'x', 'enviada', now() - $2::numeric * interval '1 minute', $3) returning id",
+        [C(n), minAtras, quazar]);
+      for (const n of [1, 2, 3, 4, 5]) { await contato(n); await conversa(n); }
+      // 1: o Quazar respondeu, e o cliente escreveu de novo
+      const m1 = (await msg(1, "contato", 20)).rows[0].id;
+      const f1 = (await fila(1, 18, true)).rows[0].id;
+      await msg(1, "advogado", 18, { quazar: true });
+      await c.query(`insert into zorvin_quazar_noturno (conversa_id, ate, cliente_ate, cliente_ate_id, status, texto, modo, fila_id)
+                     values ($1, now() + interval '3 hours', now() - interval '20 minutes', $2, 'enviada', 'Sou o Quazar.', 'valendo', $3)`, [C(1), m1, f1]);
+      await msg(1, "contato", 5);
+      // 2: a equipe respondeu depois do fechamento, e o cliente escreveu de novo
+      await msg(2, "contato", 20); await msg(2, "advogado", 15); await msg(2, "contato", 5);
+      // 3: a equipe tem um pedido na fila
+      await msg(3, "contato", 5); await fila(3, 2, false);
+      // 4: o cliente escreveu há 75 segundos (entre o minuto e os 90 s de antes); 5: há meio minuto
+      await msg(4, "contato", 1.25); await msg(5, "contato", 0.5);
+      const ids = (await c.query("select zorvin_quazar_noturno_pendentes(50) p")).rows[0].p.map((x) => x.conversa_id);
+      ok("117c depois da resposta do Quazar, o cliente que escreve de novo volta à lista (ele conversa)", ids.includes(C(1)), JSON.stringify(ids));
+      ok("e o modo vem 'valendo'", (await c.query("select zorvin_quazar_noturno_pendentes(50) p")).rows[0].p.some((x) => x.conversa_id === C(1) && x.modo === "valendo"));
+      ok("a conversa em que a equipe respondeu fica com a equipe", !ids.includes(C(2)), JSON.stringify(ids));
+      ok("e a com um pedido da equipe na fila, também", !ids.includes(C(3)), JSON.stringify(ids));
+      ok("a espera padrão é de 1 minuto: entra quem escreveu há 75 segundos, e não quem escreveu há meio",
+         ids.includes(C(4)) && !ids.includes(C(5)), JSON.stringify(ids));
+
+      // ---- 117d. quem pode o quê ----
+      const avaliou = await guardado(() => comoPessoa(c, U.sac, async () =>
+        (await c.query("update zorvin_quazar_noturno set avaliacao = 'boa' where conversa_id = $1 returning avaliada_por", [C(1)])).rows));
+      ok("117d a resposta enviada também se avalia", lista(avaliou).length === 1 && avaliou[0].avaliada_por === U.sac, JSON.stringify(avaliou));
+      const pend = await guardado(() => comoPessoa(c, U.sac, () => c.query("select zorvin_quazar_noturno_pendentes(5)")));
+      ok("e quem entrou continua sem chamar a lista", pend.codigo === "42501", JSON.stringify(pend).slice(0, 200));
+
+      // ---- 117e. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S059));
+      ok("117e rodar de novo não acusa nada, e o departamento continua valendo",
+         lista(de2).length > 0 && !defeito(de2) && /Sucesso do Cliente/.test(String(item(de2, /departamentos valendo/))), JSON.stringify(de2));
+    } catch (e) {
+      ok("a seção 117 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end().catch(() => {});
+    }
+  }
+}
+
+// ============================================================
+//  118. O QUAZAR À NOITE, VALENDO — a ponte manda (18/11)
+//
+//  A seção guarda:
+//    - no departamento que vale, a resposta vai ao cliente pela fila de
+//      envio, marcada `pelo_quazar`, sem marcar a conversa como lida, e entra
+//      na conversa como automática;
+//    - ele se apresenta pelo nome, com o nome do escritório;
+//    - o cliente que escreveu de novo enquanto a IA pensava, e a equipe que
+//      entrou na conversa: nada sai;
+//    - a mensagem pronta não sai onde o Quazar vale, e sai onde ele não pode
+//      rodar;
+//    - a espera padrão de 1 minuto.
+// ============================================================
+console.log("\n118. O Quazar à noite, valendo — a ponte manda");
+{
+  async function subirClaude(texto) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: texto || JSON.stringify({ responder: true,
+          mensagem: "Boa noite, Andreia! Sou o Quazar, assistente virtual do escritório.", resumo: "Quer saber do processo.", motivo: "" }) }],
+        stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 60 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const ATE = new Date(AGORA + 9 * 3600000).toISOString();
+  const tabelas = (extra = {}) => ({
+    contatos: [{ id: "k1", numero: "5571900000001", nome: "Deus", vantoro_nome: "ANDREIA CRISTINA MARTINS" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+    mensagens: [
+      { id: "m1", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Combinado.", criado_em: haMin(600) },
+      { id: "m3", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Boa noite, como está meu processo?", criado_em: haMin(5) },
+    ],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+    zorvin_fora_do_horario: [{ departamento_id: 1, ligada: true, texto: "Pronta.", quazar: "valendo" }],
+    zorvin_respostas_automaticas: [],
+    zorvin_quazar_noturno: [],
+    fila_envio: [],
+    ...extra,
+  });
+  const ITEM = { conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo: "valendo",
+                 fuso: "America/Sao_Paulo", ate: ATE, fechou_em: haMin(240), cliente_ate: haMin(5), cliente_ate_id: "m3" };
+  const pendentes = (item = ITEM) => (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || [])
+    .some((q) => q.conversa_id === item.conversa_id && q.cliente_ate_id === item.cliente_ate_id) ? [] : [item] });
+  const rapido = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+    QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400", ...extra });
+  const linhas = (t) => (t.sb.dados.zorvin_quazar_noturno || []);
+  const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+
+  // ---- 118a. a resposta vai ao cliente ----
+  {
+    const claude = await subirClaude();
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => (t.sb.dados.mensagens || []).some((m) => m.pelo_quazar), 9000);
+    const f = (t.sb.dados.fila_envio || [])[0] || {};
+    ok("118a no departamento que vale, a resposta entra na fila de envio, marcada pelo Quazar",
+       f.pelo_quazar === true && f.enviado_por === "Quazar" && /Sou o Quazar/.test(f.texto || "") && f.conversa_id === "c1", JSON.stringify(t.sb.dados.fila_envio));
+    const l = linhas(t)[0] || {};
+    ok("o registro diz 'enviada', valendo, com o item da fila", l.status === "enviada" && l.modo === "valendo" && l.fila_id === f.id && l.resumo,
+       JSON.stringify(l));
+    const envio = t.uaz.recebidas.find((r) => r.caminho === "/send/text") || {};
+    ok("sai pelo WhatsApp sem marcar a conversa como lida", envio.corpo && envio.corpo.readchat === false && envio.corpo.number === "5571900000001",
+       JSON.stringify(t.uaz.recebidas.map((r) => [r.caminho, r.corpo])));
+    const m = (t.sb.dados.mensagens || []).find((x) => x.pelo_quazar) || {};
+    ok("e entra na conversa como automática, e não como alguém da equipe", m.automatica === true && m.origem === "advogado" && !m.enviado_por_id,
+       JSON.stringify(m));
+    const ped = pedidoDe(claude.pedidos[0]);
+    ok("118b o pedido diz o nome do escritório e manda ele se apresentar pelo nome",
+       ped.includes("Nome do escritório: Escritório de Prova.") && ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")'), ped.slice(0, 700));
+    ok("e as regras também", /apresente-se pelo nome, assim: "Sou o Quazar, assistente virtual do escritório"/.test(sistemaDe(claude.pedidos[0])));
+    ok("o log diz que enviou, só com números", /quazar à noite: resposta enviada ao cliente em \d+ ms/.test(t.registro.join(""))
+       && !t.registro.join("").includes("Boa noite, Andreia"), t.registro.join("").slice(-400));
+    await espera(900);
+    ok("e não manda duas vezes", (t.sb.dados.fila_envio || []).length === 1 && claude.pedidos.length === 1, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 118c. o cliente escreveu de novo enquanto a IA pensava; a equipe entrou ----
+  {
+    const claude = await subirClaude();
+    const nova = { id: "m4", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "e o acordo?", criado_em: haMin(0.5) };
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [...tabelas().mensagens, nova] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    await espera(1200);
+    ok("118c o cliente que escreveu de novo enquanto a IA pensava: nada sai, e a linha sai para responder tudo depois",
+       !(t.sb.dados.fila_envio || []).length && !linhas(t).length && /o cliente escreveu de novo/.test(t.registro.join("")), JSON.stringify(linhas(t)));
+    await t.parar(); await claude.parar();
+
+    const claude2 = await subirClaude();
+    const daEquipe = { id: "f9", conversa_id: "c1", texto: "Oi, estou aqui", status: "pendente", agendada_para: null, pelo_quazar: false, criado_em: haMin(0.2) };
+    const t2 = await subirTudo(rapido(claude2, { FILA_INTERVALO_MS: "600000" }), { tabelas: tabelas({ fila_envio: [daEquipe] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => claude2.pedidos.length >= 1);
+    await espera(1200);
+    ok("e a equipe que entrou na conversa fica com ela: o Quazar não manda",
+       !(t2.sb.dados.fila_envio || []).some((f) => f.pelo_quazar) && /a equipe entrou na conversa/.test(t2.registro.join("")),
+       JSON.stringify(t2.sb.dados.fila_envio));
+    await t2.parar(); await claude2.parar();
+  }
+
+  // ---- 118d. a mensagem pronta não sai onde o Quazar vale ----
+  {
+    const doCliente = (id) => ({ EventType: "messages", owner: TELEFONE.numero,
+      chat: { phone: "5511988887777", wa_name: "Cliente da Noite" },
+      message: { id, messageid: id, chatid: "5511988887777@s.whatsapp.net", sender: "5511988887777@s.whatsapp.net",
+        fromMe: false, isGroup: false, messageTimestamp: Date.now(), wasSentByApi: false, type: "text", text: "Boa noite" } });
+    const mandar = (t, corpo) => fetch(`http://127.0.0.1:${t.porta}/webhook`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo) });
+    const lento = { QUAZAR_NOITE_PRIMEIRA_MS: "600000", QUAZAR_NOITE_INTERVALO_MS: "600000" };
+    let perguntas = 0;
+    const rpcs = { zorvin_responder_fora_do_horario: () => { perguntas += 1; return { corpo: { responde: false, motivo: "no_horario" } }; } };
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-x", ...lento }, { tabelas: { zorvin_fora_do_horario: [{ departamento_id: 1, quazar: "valendo" }] }, rpcs });
+    await mandar(t, doCliente("val-1")); await espera(900);
+    ok("118d onde o Quazar vale, a mensagem pronta nem é perguntada", perguntas === 0 && t.sb.dados.mensagens.some((m) => m.id_uazapi === "val-1"),
+       `${perguntas} perguntas`);
+    await t.parar();
+    const t2 = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-x", ...lento }, { tabelas: { zorvin_fora_do_horario: [{ departamento_id: 1, quazar: "ensaio" }] }, rpcs });
+    await mandar(t2, doCliente("ens-1")); await espera(900);
+    ok("no ensaio, a mensagem pronta continua", perguntas === 1, `${perguntas} perguntas`);
+    await t2.parar();
+    const t3 = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-x", QUAZAR_NOITE: "desligado", ...lento },
+      { tabelas: { zorvin_fora_do_horario: [{ departamento_id: 1, quazar: "valendo" }] }, rpcs });
+    await mandar(t3, doCliente("des-1")); await espera(900);
+    ok("e com o Quazar desligado na ponte, sai a mensagem pronta (o cliente nunca fica sem nada)", perguntas === 2, `${perguntas} perguntas`);
+    await t3.parar();
+    const t4 = await subirTudo({ ...lento }, { tabelas: { zorvin_fora_do_horario: [{ departamento_id: 1, quazar: "valendo" }] }, rpcs });
+    await mandar(t4, doCliente("sem-1")); await espera(900);
+    ok("e sem a chave da Anthropic, também", perguntas === 3, `${perguntas} perguntas`);
+    await t4.parar();
+  }
+
+  // ---- 118e. a espera padrão de 1 minuto ----
+  {
+    const claude = await subirClaude();
+    let pedido = null;
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-x", ANTHROPIC_API_URL: claude.url, QUAZAR_NOITE_PRIMEIRA_MS: "200" },
+      { tabelas: tabelas(), rpcs: { zorvin_quazar_noturno_pendentes: (json) => { pedido = json; return { corpo: [] }; } } });
+    await esperaAte(() => pedido);
+    ok("118e a espera padrão é de 1 minuto", pedido && pedido.p_quieto_s === 60, JSON.stringify(pedido));
+    await t.parar(); await claude.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

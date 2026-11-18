@@ -168,7 +168,9 @@ const COLUNAS_DO_BANCO = {
               "resposta_previa", "resposta_autor", "responder_id_uazapi",
               "transcricao", "transcrita_em",
               // O AVISO AUTOMÁTICO (script 037).
-              "automatica"],
+              "automatica",
+              // A RESPOSTA DO QUAZAR À NOITE, VALENDO (script 059).
+              "pelo_quazar"],
   notas: ["id", "conversa_id", "texto", "autor", "criado_em", "apagada_em",
           "vantoro_atividade_id", "atualizado_em",
           // O ANEXO DA NOTA (script 053).
@@ -186,7 +188,9 @@ const COLUNAS_DO_BANCO = {
                // O MOTIVO DA FALHA, que existe desde a primeira fila. A conferência
                // do aviso que já está na fila (auditoria de 27/10) o lê antes de
                // qualquer linha que o mencione.
-               "erro_detalhe"],
+               "erro_detalhe",
+               // A RESPOSTA DO QUAZAR À NOITE, VALENDO (script 059).
+               "pelo_quazar"],
   // A etiqueta pendurada numa conversa. A ponte passou a escrever aqui quando
   // a etiqueta virou coisa do CONTATO — e não da caixa em que ele falou.
   conversa_tags: ["id", "conversa_id", "tag_id"],

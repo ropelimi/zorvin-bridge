@@ -106,10 +106,13 @@ Variáveis de ambiente (no Render):
   `COPILOTO_APRENDER_PRIMEIRA_MS` (3 min) e `COPILOTO_APRENDER_MINIMO` (150)
   são para a bancada. Ver "O copiloto aprende (script 050, 05/11)".
 - `QUAZAR_NOITE` — `desligado` faz o Quazar não escrever as respostas da
-  noite. **Opcional: sem ela, ele escreve nos departamentos em ensaio** (e só
-  com `ANTHROPIC_API_KEY`). `QUAZAR_NOITE_INTERVALO_MS` (padrão 30 s),
-  `QUAZAR_NOITE_PRIMEIRA_MS` (90 s) e `QUAZAR_NOITE_QUIETO_S` (90) são para a
-  bancada. Ver "O Quazar à noite, em ensaio (script 055, 06/11)".
+  noite (e, nos departamentos que valem, a mensagem pronta volta a sair).
+  **Opcional: sem ela, ele escreve nos departamentos em ensaio e responde nos
+  que valem** (e só com `ANTHROPIC_API_KEY`). `QUAZAR_NOITE_INTERVALO_MS`
+  (padrão 15 s), `QUAZAR_NOITE_PRIMEIRA_MS` (90 s) e `QUAZAR_NOITE_QUIETO_S`
+  (60: o minuto que o Rodrigo pediu) são para a bancada. Ver "O Quazar à
+  noite, em ensaio (script 055, 06/11)" e "O Quazar à noite, valendo (script
+  059, 18/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -3818,6 +3821,81 @@ cópias e lidas uma a uma (e a cópia de controle passou inteira):
 - **uma cópia estourou ao perguntar o estado da ponte** que não tinha subido
   (a porta tomada por outra cópia). A pergunta passou a ser guardada
   (`estadoDa`), e a sabotagem, rodada de novo, é pega limpa.
+
+### O Quazar à noite, valendo (script 059, 18/11)
+
+Pedido do Rodrigo: *"Sobre os ensaios do Quazar, quero já começar a usar. Não
+revi todas as respostas, mas todas que eu vi são muito boas. Importante é que
+a IA demore 1 minuto para responder, para dar tempo do contato enviar mais de
+uma mensagem dentro da conversa, antes de uma resposta do Quazar. Importante
+também o Quazar se apresentar com seu nome, algo como \"Sou o Quazar,
+assistente virtual do escritório…\""*.
+
+`sql/automaticos/059-o-quazar-a-noite-valendo.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_fora_do_horario.quazar` | ganha `valendo` (ao lado de `desligado` e `ensaio`) |
+| `zorvin_quazar_noturno` | `modo` aceita `valendo`, `status` aceita `enviada`, e `fila_id` diz qual item da fila levou a resposta |
+| `fila_envio.pelo_quazar`, `mensagens.pelo_quazar` | a marca do que o Quazar mandou |
+| `zorvin_copiloto.nome_do_escritorio` | o nome com que ele se apresenta (até 120), escrito pelo conector, e não no código |
+| `zorvin_quazar_noturno_pendentes` | a do 057, com o quieto padrão de 60 s e a mensagem do Quazar fora de "a equipe agiu" |
+
+**O 059 não liga nenhum departamento**: quem liga é quem administra, pela aba
+Fora do horário, ou o conector, a pedido do Rodrigo.
+
+**Como sai:**
+
+- **o minuto de espera** é o quieto da lista do banco (60 s depois da ÚLTIMA
+  mensagem do cliente): o "oi", o "bom dia" e a pergunta viram uma resposta
+  só. A rodada passa de 15 em 15 segundos, e a resposta sai entre 60 e uns 90
+  segundos depois da última mensagem, contando o tempo da IA;
+- **ele se apresenta pelo nome** na primeira resposta da noite ("Sou o
+  Quazar, assistente virtual do escritório X"), com o nome lido de
+  `nome_do_escritorio` (`nomeDoEscritorio`). Sem o nome, só "do escritório";
+- **antes de pôr na fila, a ponte confere** (`mandarANoite`): o cliente
+  escreveu de novo depois de a IA começar → a linha sai, e a rodada refaz com
+  a mensagem nova (`refazer`); a equipe entrou na conversa (um item na fila
+  que não é do Quazar, ou a última mensagem é da equipe) → a linha sai, e o
+  Quazar larga a conversa (`largar`);
+- **a resposta vai pela fila** (`pelo_quazar`, `enviado_por` "Quazar"), com
+  `readchat` desligado: ninguém leu, e marcar como lida no aparelho apagaria o
+  sinal de cliente esperando. A linha do registro vira `enviada`, com o
+  `fila_id`;
+- **na conversa, ela entra `automatica` e `pelo_quazar`**
+  (`gravarEnviadaNoHistorico`): não tira o cliente da fila de espera nem de
+  "Novos", não abre nem fecha protocolo e não conta como primeira resposta
+  (as regras do 037). A equipe vê de manhã quem ainda precisa de gente;
+- **a resposta seguinte da noite vê as de antes** como "Você (assistente
+  virtual)", e não se apresenta de novo.
+
+**A mensagem pronta (021) não sai onde o Quazar responde**
+(`quazarAssumeANoite`): o departamento vale, a chave da Anthropic existe,
+`QUAZAR_NOITE` não está desligado e o 055 existe. Faltando qualquer um, a
+pronta sai como antes: o cliente nunca fica sem nada **por configuração**.
+
+**O risco que fica dito ao Rodrigo:** se a IA falhar várias vezes seguidas
+naquela noite (a Anthropic fora do ar, sem crédito), a resposta não sai, e a
+pronta também não. A rodada tenta de novo depois de 1, 5 e 30 minutos.
+
+Provas: seção 117 (o 059 num Postgres de verdade, com o Zorvin montado pelos
+próprios scripts) e seção 118 (a ponte: a fila com a marca, o registro
+`enviada`, o `readchat` desligado, a mensagem `automatica`, o nome no pedido,
+nada mandado duas vezes, o refazer e o largar, a pronta que não sai quando
+vale e sai no ensaio, sem a chave e com `QUAZAR_NOITE=desligado`, e o quieto
+de 60 s).
+
+**7 sabotagens e 7 pegas**, rodadas em cópias e lidas uma a uma (e a cópia de
+controle passou inteira): o `readchat` ligado; sem `quazarAssumeANoite` (a
+pronta sai onde o Quazar vale, 4 reprovações); a mensagem do Quazar contando
+como a equipe agindo no banco (o cliente que escreve de novo não volta à
+lista); o quieto padrão de 90 s no banco; a mensagem sem `automatica`; sem o
+`refazer` (a resposta sai sem ver a mensagem nova do cliente).
+
+**O quieto de 90 s vazou na primeira rodada**, e a culpa era da cena: o
+cliente "de 1 minuto e meio" tinha justamente 90 segundos, e não separava 60
+de 90. Hoje ele escreveu há 75 segundos. O padrão do banco é a segunda guarda
+(a ponte sempre manda `p_quieto_s`), e fica conferido assim mesmo.
 
 ### O gasto do Quazar (script 058, 08/11)
 

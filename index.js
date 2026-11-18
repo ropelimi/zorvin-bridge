@@ -1794,9 +1794,23 @@ const semAFuncao = (erro) => Boolean(erro) && (
   ['PGRST202', '42883'].includes(String(erro.code))
   || /could not find the function|function .* does not exist/i.test(String(erro.message || '')));
 
+/** O departamento tem o Quazar VALENDO (059), e esta ponte consegue rodá-lo?
+ *  Então a mensagem pronta não sai: quem responde é ele, um minuto depois.
+ *  Na dúvida (a pergunta falhou, a chave falta, o Quazar desligado), sai a
+ *  mensagem pronta, como antes: o cliente nunca fica sem resposta nenhuma. */
+async function quazarAssumeANoite(adv) {
+  if (QUAZAR_NOITE_DESLIGADO || quazarNoiteSemOScript || !process.env.ANTHROPIC_API_KEY) return false;
+  if (!adv || adv.departamento_id == null) return false;
+  const { data, error } = await supabase.from('zorvin_fora_do_horario').select('*')
+    .eq('departamento_id', adv.departamento_id).limit(1);
+  if (error) return false;
+  return ((data || [])[0] || {}).quazar === 'valendo';
+}
+
 async function responderForaDoHorario({ adv, conversaId, idUazapi, numero }) {
   if (foraDoHorarioDesligada || !conversaId || !idUazapi || !adv) return;
   try {
+    if (await quazarAssumeANoite(adv)) return;
     const { data, error } = await supabase.rpc('zorvin_responder_fora_do_horario',
       { p_conversa: conversaId, p_id_uazapi: idUazapi });
     if (error) {
@@ -4984,6 +4998,11 @@ async function gravarEnviadaNoHistorico(item, idUazapi, quando = null) {
   // Entra como "extra" pelo motivo dos outros: num banco sem o 037 a coluna
   // não existe, e a mensagem não pode deixar de ser gravada por isso.
   if (item.aviso_vantoro_id) extras.automatica = true;
+  // A RESPOSTA DO QUAZAR À NOITE (059) também é automática: ninguém da
+  // equipe a escreveu, e o cliente continua esperando uma pessoa (a fila de
+  // espera e a aba Novos não mudam). `pelo_quazar` é o que a tela usa para
+  // pôr o rosto dele na bolha.
+  if (item.pelo_quazar) { extras.automatica = true; extras.pelo_quazar = true; }
   if (item.responder_id_uazapi) {
     extras.responder_id_uazapi = item.responder_id_uazapi;
     extras.resposta_previa = item.resposta_previa || null;
@@ -5564,7 +5583,9 @@ async function processarFilaDeEnvio() {
           }
         } else {
           // Envia texto. Se é uma RESPOSTA, passa o replyid para citar.
-          const corpo = { number: numeroDestino, text: item.texto, readchat: true };
+          // O QUAZAR À NOITE (059) NÃO MARCA COMO LIDA: ninguém do escritório leu, e o
+          // sinal de cliente esperando no aparelho tem de ficar (a régua do 021).
+          const corpo = { number: numeroDestino, text: item.texto, readchat: !item.pelo_quazar };
           if (item.responder_id_uazapi) corpo.replyid = item.responder_id_uazapi;
           resposta = await fetchComTimeout(`${servidor}/send/text`, {
             method: 'POST',
@@ -9752,7 +9773,9 @@ function linhaParaOCopiloto(m) {
   // O AVISO AUTOMÁTICO (037) é do escritório, mas ninguém da equipe o
   // escreveu: dito como "Equipe", a sugestão trataria o aviso de audiência
   // como uma conversa que alguém já começou com o cliente.
-  const quem = m.origem !== 'advogado' ? 'Cliente' : m.automatica ? 'Aviso automático do escritório' : 'Equipe';
+  const quem = m.origem !== 'advogado' ? 'Cliente'
+    : m.pelo_quazar ? `${NOME_DO_ASSISTENTE} (assistente virtual, fora do horário)`
+    : m.automatica ? 'Aviso automático do escritório' : 'Equipe';
   const citada = m.resposta_previa ? ` (respondendo a: "${cortarTexto(semAEtiqueta(m.resposta_previa), 120)}")` : '';
   return `[${quandoCurto(m.criado_em)}] ${quem}${citada}: ${conteudoParaOCopiloto(m)}`;
 }
@@ -10924,10 +10947,10 @@ setInterval(() => { aprenderComAsConversas().catch(() => {}); }, APRENDER_INTERV
 //  `QUAZAR_NOITE_QUIETO_S` são opcionais, para a bancada.
 // ============================================================
 const QUAZAR_NOITE_DESLIGADO = String(process.env.QUAZAR_NOITE || '').trim().toLowerCase() === 'desligado';
-const QUAZAR_NOITE_INTERVALO_MS = Number(process.env.QUAZAR_NOITE_INTERVALO_MS) || 30 * 1000;
+const QUAZAR_NOITE_INTERVALO_MS = Number(process.env.QUAZAR_NOITE_INTERVALO_MS) || 15 * 1000;
 const QUAZAR_NOITE_PRIMEIRA_MS = Number(process.env.QUAZAR_NOITE_PRIMEIRA_MS) || 90 * 1000;
 const QUAZAR_NOITE_QUIETO_S = String(process.env.QUAZAR_NOITE_QUIETO_S || '').trim() !== ''
-  && Number.isFinite(Number(process.env.QUAZAR_NOITE_QUIETO_S)) ? Number(process.env.QUAZAR_NOITE_QUIETO_S) : 90;
+  && Number.isFinite(Number(process.env.QUAZAR_NOITE_QUIETO_S)) ? Number(process.env.QUAZAR_NOITE_QUIETO_S) : 60;
 const QUAZAR_NOITE_POR_VOLTA = 5;
 const QUAZAR_NOITE_PRESA_MS = 10 * 60 * 1000;
 const QUAZAR_NOITE_ESPERAS_MS = [60 * 1000, 5 * 60 * 1000, 30 * 60 * 1000];
@@ -10941,7 +10964,7 @@ const QUAZAR_NOITE_REGRAS = [
   `Você é o ${NOME_DO_ASSISTENTE}, o assistente virtual de um escritório de advocacia no WhatsApp. O escritório está FECHADO agora, e você responde o cliente SOZINHO: ninguém da equipe lê a sua mensagem antes de ela chegar ao cliente. A equipe volta no horário que o pedido diz, lê a conversa e continua o atendimento de onde você parou.`,
   '',
   'QUEM VOCÊ É',
-  '- Na sua primeira mensagem desta noite para este cliente (o pedido diz se é a primeira), diga que é o assistente virtual do escritório e quando a equipe volta. Nas seguintes, não se apresente de novo.',
+  `- Na sua primeira mensagem desta noite para este cliente (o pedido diz se é a primeira), apresente-se pelo nome, assim: "Sou o ${NOME_DO_ASSISTENTE}, assistente virtual do escritório" seguido do nome do escritório que o pedido diz, e diga quando a equipe volta. Nas seguintes, não se apresente de novo.`,
   '- Você não é uma pessoa da equipe: nunca use nome de atendente nem escreva como se fosse alguém do escritório. Se o cliente perguntar, diga que é o assistente virtual.',
   '',
   'O QUE VOCÊ FAZ',
@@ -11012,17 +11035,19 @@ function primeiroNomeDoContato(ct) {
 }
 
 function linhaDaNoite(m) {
-  if (m.origem === 'quazar') return `[${quandoCurto(m.criado_em)}] Você (assistente virtual): ${cortarTexto(semAEtiqueta(m.texto), COPILOTO_TETO_TEXTO)}`;
+  if (m.origem === 'quazar' || m.pelo_quazar) return `[${quandoCurto(m.criado_em)}] Você (assistente virtual): ${cortarTexto(semAEtiqueta(m.texto), COPILOTO_TETO_TEXTO)}`;
   if (m.origem === 'pronta') return `[${quandoCurto(m.criado_em)}] Mensagem automática do escritório (fora do horário): ${cortarTexto(semAEtiqueta(m.texto), COPILOTO_TETO_TEXTO)}`;
   return linhaParaOCopiloto(m);
 }
 
-function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, primeira }) {
+function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, primeira, escritorio = '' }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
+  if (escritorio) linhas.push(`Nome do escritório: ${escritorio}.`);
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
   linhas.push(`O escritório está fechado. A equipe volta ${volta || 'no próximo dia de expediente'}.`);
   linhas.push(nome ? `Primeiro nome do cliente, como está no cadastro: ${nome}.` : 'Não sabemos o nome do cliente.');
-  linhas.push(primeira ? 'Esta é a sua primeira mensagem para este cliente nesta noite: apresente-se.'
+  linhas.push(primeira
+    ? `Esta é a sua primeira mensagem para este cliente nesta noite: apresente-se ("Sou o ${NOME_DO_ASSISTENTE}, assistente virtual do escritório${escritorio ? ` ${escritorio}` : ''}").`
     : 'Você já respondeu este cliente nesta noite: não se apresente de novo.');
   linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...mensagens.map(linhaDaNoite), '</conversa>', '',
     'Responda a última mensagem do cliente, como o assistente virtual, ou diga por que não responder.');
@@ -11066,25 +11091,31 @@ async function escreverANoite(item) {
   // AS RESPOSTAS DO ENSAIO DESTA NOITE, e a mensagem pronta que o cliente
   // recebeu: entram na conversa na hora em que saíram (ou sairiam).
   const [ensaios, prontas] = await Promise.all([
-    supabase.from('zorvin_quazar_noturno').select('texto, pronta_em')
-      .eq('conversa_id', item.conversa_id).eq('ate', item.ate).eq('status', 'pronta'),
+    supabase.from('zorvin_quazar_noturno').select('texto, pronta_em, status')
+      .eq('conversa_id', item.conversa_id).eq('ate', item.ate).in('status', ['pronta', 'enviada']),
     supabase.from('zorvin_respostas_automaticas').select('texto, enviada_em, criada_em, status')
       .eq('conversa_id', item.conversa_id).eq('ate', item.ate),
   ]);
   const extras = [
-    ...((ensaios.data || []).filter((e) => e.texto && e.pronta_em)
+    // A QUE FOI ENVIADA (059) já está na conversa, em `mensagens`: só a do
+    // ensaio entra aqui, como se tivesse saído.
+    ...((ensaios.data || []).filter((e) => e.texto && e.pronta_em && e.status === 'pronta')
       .map((e) => ({ origem: 'quazar', texto: e.texto, criado_em: e.pronta_em }))),
     ...((prontas.data || []).filter((p) => p.texto && p.status === 'enviada')
       .map((p) => ({ origem: 'pronta', texto: p.texto, criado_em: p.enviada_em || p.criada_em }))),
   ];
   const mensagens = [...lido.mensagens, ...extras]
     .sort((a, b) => Date.parse(a.criado_em) - Date.parse(b.criado_em));
-  const primeira = !(ensaios.data || []).some((e) => e.texto);
+  const primeira = !(ensaios.data || []).some((e) => e.texto)
+    && !lido.mensagens.some((m) => m.pelo_quazar
+      && Date.parse(m.criado_em) >= (item.fechou_em ? Date.parse(item.fechou_em) : 0));
+  const escritorio = await nomeDoEscritorio();
 
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_NOITE_REGRAS), notasDoCopiloto(lido.aprendido)],
     pedidoDaNoite({ mensagens, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
-                    volta: quandoVoltaPorExtenso(item.ate, item.fuso), nome: primeiroNomeDoContato(contato), primeira }),
+                    volta: quandoVoltaPorExtenso(item.ate, item.fuso), nome: primeiroNomeDoContato(contato), primeira,
+                    escritorio }),
     { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } },
     { rota: 'noite' });
   const uso = (r.corpo && r.corpo.usage) || {};
@@ -11104,6 +11135,38 @@ async function escreverANoite(item) {
     return { desfecho: 'calada', motivo: resposta.motivo || 'A mensagem não pedia resposta.', resumo: resposta.resumo, uso };
   }
   return { desfecho: 'pronta', texto: resposta.mensagem, resumo: resposta.resumo, uso };
+}
+
+/** O nome do escritório (059), para o Quazar se apresentar. Sem a coluna ou
+ *  sem o nome, vazio: ele se apresenta sem o nome. */
+async function nomeDoEscritorio() {
+  const { data, error } = await supabase.from('zorvin_copiloto').select('*').limit(1);
+  if (error) return '';
+  return umaLinhaSemEtiqueta(String(((data || [])[0] || {}).nome_do_escritorio || ''), 120);
+}
+
+/** VALENDO (059): a resposta vai ao cliente pela fila de envio, marcada
+ *  `pelo_quazar`. Antes, confere se a conversa continua como o Quazar a leu:
+ *  o cliente que escreveu de novo enquanto a IA pensava recebe uma resposta
+ *  para tudo na volta seguinte; a equipe que entrou na conversa fica com ela.
+ *  Devolve 'enviada', 'refazer' (o cliente escreveu de novo) ou 'largar'. */
+async function mandarANoite(item, texto) {
+  const [ultima, daEquipe] = await Promise.all([
+    supabase.from('mensagens').select('id, origem').eq('conversa_id', item.conversa_id)
+      .order('criado_em', { ascending: false }).limit(1),
+    supabase.from('fila_envio').select('id').eq('conversa_id', item.conversa_id)
+      .gte('criado_em', item.fechou_em || item.cliente_ate).is('agendada_para', null).eq('pelo_quazar', false).limit(1),
+  ]);
+  if (ultima.error || daEquipe.error) throw new Error((ultima.error || daEquipe.error).message);
+  const u = (ultima.data || [])[0];
+  if ((daEquipe.data || []).length || (u && u.origem === 'advogado')) return { desfecho: 'largar' };
+  if (u && u.id !== item.cliente_ate_id) return { desfecho: 'refazer' };
+  const { data: fila, error } = await supabase.from('fila_envio').insert({
+    conversa_id: item.conversa_id, texto, tipo: 'texto', status: 'pendente',
+    pelo_quazar: true, enviado_por: NOME_DO_ASSISTENTE,
+  }).select('id');
+  if (error) throw new Error(error.message);
+  return { desfecho: 'enviada', filaId: ((fila || [])[0] || {}).id || null };
 }
 
 async function quazarDaNoite() {
@@ -11132,7 +11195,8 @@ async function quazarDaNoite() {
     if (!quazarNoiteAnunciado) {
       quazarNoiteAnunciado = true;
       console.log(`quazar à noite: ligado — de ${Math.round(QUAZAR_NOITE_INTERVALO_MS / 1000)} em `
-        + `${Math.round(QUAZAR_NOITE_INTERVALO_MS / 1000)} segundos, nos departamentos em ensaio (nada vai ao cliente).`);
+        + `${Math.round(QUAZAR_NOITE_INTERVALO_MS / 1000)} segundos, nos departamentos em ensaio (sem enviar) `
+        + 'e nos que valem (a resposta vai ao cliente).');
     }
     if (tentativasDaNoite.size > 2000) tentativasDaNoite.clear();
     const agora = Date.now();
@@ -11175,16 +11239,44 @@ async function quazarDaNoite() {
         console.log('quazar à noite: não deu desta vez; tento de novo mais tarde.');
         continue;
       }
+      let filaId = null;
+      if (r.desfecho === 'pronta' && item.modo === 'valendo') {
+        let m;
+        try { m = await mandarANoite(item, r.texto); } catch (e) {
+          console.error('quazar à noite: não consegui pôr a resposta na fila', (e && e.message) || e);
+          m = { desfecho: 'tentar' };
+        }
+        if (m.desfecho !== 'enviada') {
+          // REFAZER: o cliente escreveu de novo, e a próxima volta responde
+          // tudo. LARGAR: a equipe entrou na conversa. TENTAR: a fila recusou.
+          await supabase.from('zorvin_quazar_noturno').delete().eq('id', linha.id).eq('status', 'pensando');
+          if (m.desfecho === 'tentar') {
+            const t = tentativasDaNoite.get(chave) || { vezes: 0, proxima: 0 };
+            t.vezes += 1;
+            t.proxima = t.vezes <= QUAZAR_NOITE_ESPERAS_MS.length ? Date.now() + QUAZAR_NOITE_ESPERAS_MS[t.vezes - 1] : 0;
+            tentativasDaNoite.set(chave, t);
+          }
+          console.log(`quazar à noite: resposta não enviada (${m.desfecho === 'refazer' ? 'o cliente escreveu de novo'
+            : m.desfecho === 'largar' ? 'a equipe entrou na conversa' : 'a fila recusou; tento de novo'}).`);
+          continue;
+        }
+        r.desfecho = 'enviada';
+        filaId = m.filaId;
+      }
       tentativasDaNoite.delete(chave);
-      const { error: erroGravar } = await supabase.from('zorvin_quazar_noturno').update({
+      const gravar = {
         status: r.desfecho, texto: r.texto || null, resumo: r.resumo || null, motivo: r.desfecho === 'calada' ? r.motivo : null,
         modelo: COPILOTO_MODELO, pronta_em: new Date().toISOString(),
-      }).eq('id', linha.id).eq('status', 'pensando');
+      };
+      if (item.modo === 'valendo') { gravar.modo = 'valendo'; gravar.fila_id = filaId; }
+      const { error: erroGravar } = await supabase.from('zorvin_quazar_noturno').update(gravar)
+        .eq('id', linha.id).eq('status', 'pensando');
       if (erroGravar) console.error('quazar à noite: não consegui guardar a resposta', erroGravar.message);
       // SÓ NÚMEROS NO LOG: o que o cliente escreveu e o que a IA respondeu
       // não vão para lá.
       const uso = r.uso || {};
-      console.log(`quazar à noite: ${r.desfecho === 'pronta' ? 'resposta de ensaio escrita' : 'ficaria calado'} em `
+      console.log(`quazar à noite: ${r.desfecho === 'enviada' ? 'resposta enviada ao cliente'
+        : r.desfecho === 'pronta' ? 'resposta de ensaio escrita' : item.modo === 'valendo' ? 'ficou calado' : 'ficaria calado'} em `
         + `${Date.now() - inicio} ms; ${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
         + `${uso.output_tokens || 0} de saída.`);
     }
