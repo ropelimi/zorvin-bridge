@@ -9664,6 +9664,58 @@ let avisouSemManualDoCopiloto = false;
 // escritório (esse mora no manual, que a tela edita). Ficam aqui porque são
 // o contrato com o painel: os marcadores entre chaves são os de `variaveis.js`,
 // que os preenche com as regras das mensagens rápidas.
+// A PESQUISA NA INTERNET DO "SUGERIR RESPOSTA" (19/11). Pedido do Rodrigo,
+// com a foto de uma cliente preocupada com "a nova lei que bloqueia o salário
+// por até 1 ano": "Quando o contato fizer uma pergunta que não temos na nossa
+// base de dados e nem na conversa, quando é algo mais complexo […],
+// precisamos de uma forma fazer o Quazar pesquisar na internet quando
+// clicarmos em 'Sugerir resposta'. Mas sempre antes tem que consultar nosso
+// banco de dados e conversas, e não o deixe alucinar, tem que manter nossa
+// linguagem."
+//
+// É a ferramenta de pesquisa da própria Anthropic (`web_search`), que roda do
+// lado dela: a ponte só a oferece no pedido. QUEM DECIDE SE PESQUISA É A IA,
+// pelas regras abaixo — primeiro o que o escritório já sabe (o manual, as
+// lições, os exemplos, as notas e a conversa), e só pesquisa quando a pergunta
+// é de fora disso (uma lei, uma notícia, uma regra de órgão público). No máximo
+// três pesquisas por sugestão. As fontes que a resposta usou voltam para a
+// tela, para a atendente conferir antes de mandar: a mensagem ao cliente não
+// leva link nenhum.
+//
+// SÓ NO "SUGERIR RESPOSTA". O Quazar à noite responde sozinho, sem ninguém
+// conferir, e o "Pedir uma mudança" refaz a mensagem que já está na caixa.
+// `COPILOTO_PESQUISA=desligada` tira a pesquisa sem publicar nada.
+//
+// O CUSTO: US$ 10 por mil pesquisas (US$ 0,01 cada), mais as palavras das
+// páginas lidas, que entram como tokens de entrada. Somado ao gasto anotado
+// (058).
+const COPILOTO_PESQUISA_DESLIGADA = String(process.env.COPILOTO_PESQUISA || '').trim().toLowerCase() === 'desligada';
+const COPILOTO_PESQUISAS_POR_SUGESTAO = 3;
+const PRECO_DE_UMA_PESQUISA_USD = 0.01;
+
+/** A ferramenta de pesquisa para o modelo da sugestão, ou `null` desligada.
+ *  A versão de 09/02/2026 filtra os resultados antes de lê-los (menos tokens,
+ *  mais acerto), e só existe nos modelos maiores; no Haiku, a de antes. */
+function ferramentaDePesquisa(modelo = COPILOTO_MODELO) {
+  if (COPILOTO_PESQUISA_DESLIGADA) return null;
+  return {
+    type: /haiku/i.test(String(modelo || '')) ? 'web_search_20250305' : 'web_search_20260209',
+    name: 'web_search',
+    max_uses: COPILOTO_PESQUISAS_POR_SUGESTAO,
+    user_location: { type: 'approximate', country: 'BR', timezone: 'America/Sao_Paulo' },
+  };
+}
+
+const COPILOTO_REGRAS_DA_PESQUISA = [
+  'PESQUISA NA INTERNET (você tem a ferramenta web_search)',
+  '- Primeiro, sempre, o que o escritório já sabe: o manual, as lições, as notas aprendidas, os exemplos de verdade e a própria conversa. Se a resposta está ali, responda com ela e NÃO pesquise.',
+  '- Pesquise só quando o cliente perguntar algo de fora disso que a resposta precisa para ser certa: uma lei ou mudança na lei, uma notícia, uma regra de banco, do INSS ou de outro órgão público, um prazo ou valor fixado por lei. Não pesquise o caso do cliente (o processo dele não está na internet), nem cumprimento, agradecimento ou pedido de documento.',
+  '- Prefira fontes oficiais e confiáveis: planalto.gov.br, gov.br, câmara, senado, STF, STJ, TST, CNJ, tribunais, Banco Central, INSS; depois, veículos de imprensa conhecidos. Não use blog, fórum nem rede social como fonte.',
+  '- NÃO INVENTE. Escreva só o que a fonte que você leu confirma, sem acrescentar número de lei, data, valor ou porcentagem que não estava nela. Lei que ainda é projeto (não aprovada) se diz projeto. Se as fontes não confirmam o que o cliente ouviu, diga isso com calma (por exemplo, que não há lei assim em vigor) e, se não achou nada seguro, escreva que vai verificar e retornar.',
+  '- A mensagem continua sendo da atendente, no jeito da equipe: curta, simples, sem juridiquês, sem link, sem citar o nome do site e sem "de acordo com pesquisas". Explique em palavras do dia a dia o que muda (ou não muda) para o cliente, acolha a preocupação e diga o próximo passo, sem prometer resultado nem dar orientação jurídica sobre o caso dele.',
+  '- Devolva só a mensagem final, depois de pesquisar: sem contar que pesquisou e sem texto antes dela.',
+].join('\n');
+
 const COPILOTO_REGRAS = [
   'Você é o copiloto de uma equipe de atendimento pelo WhatsApp de um escritório de advocacia. A cada pedido, você escreve UMA mensagem: a próxima que a atendente vai mandar ao cliente nesta conversa. Ela lê, corrige se precisar e só então envia.',
   '',
@@ -10040,8 +10092,45 @@ async function lerAprendidoParaOCopiloto(telefoneId, departamentoId) {
 /** As aspas em volta do texto INTEIRO saem — é o jeito mais comum de um
  *  modelo "apresentar" a resposta, e elas iriam para o cliente. Só quando o
  *  par fecha o texto todo: `"Oi" e "tchau"` fica como está. */
-function textoDaSugestao(corpo) {
+/** Os blocos da resposta final: depois da última pesquisa, se houve. O que a
+ *  IA escreveu antes de pesquisar ("Vou verificar…") não é a mensagem. */
+function blocosDaRespostaFinal(corpo) {
   const blocos = Array.isArray(corpo && corpo.content) ? corpo.content : [];
+  let ultima = -1;
+  blocos.forEach((b, i) => {
+    if (b && (b.type === 'server_tool_use' || b.type === 'web_search_tool_result')) ultima = i;
+  });
+  return blocos.slice(ultima + 1);
+}
+
+/** As fontes que a resposta final citou (`{ titulo, url }`, sem repetir e até
+ *  cinco), para a atendente conferir. Só endereço http(s). */
+function fontesDaPesquisa(corpo) {
+  const fontes = [];
+  const vistas = new Set();
+  for (const b of blocosDaRespostaFinal(corpo)) {
+    for (const c of (b && b.type === 'text' && Array.isArray(b.citations) ? b.citations : [])) {
+      const url = String((c && c.url) || '').trim();
+      if (!/^https?:\/\//i.test(url) || vistas.has(url)) continue;
+      vistas.add(url);
+      fontes.push({ titulo: umaLinhaSemEtiqueta(String((c && c.title) || url), 160), url: url.slice(0, 500) });
+      if (fontes.length >= 5) return fontes;
+    }
+  }
+  return fontes;
+}
+
+/** Quantas pesquisas a IA fez nesta resposta. */
+function pesquisasFeitas(corpo) {
+  const u = corpo && corpo.usage && corpo.usage.server_tool_use;
+  const n = Number(u && u.web_search_requests);
+  if (Number.isFinite(n)) return Math.max(0, n);
+  return (Array.isArray(corpo && corpo.content) ? corpo.content : [])
+    .filter((b) => b && b.type === 'server_tool_use' && b.name === 'web_search').length;
+}
+
+function textoDaSugestao(corpo) {
+  const blocos = blocosDaRespostaFinal(corpo);
   let t = blocos.filter((b) => b && b.type === 'text').map((b) => String(b.text || '')).join('').trim();
   t = t.replace(/^sugest[ãa]o\s*:\s*/i, '').trim();
   for (const [abre, fecha] of [['"', '"'], ['“', '”'], ['«', '»']]) {
@@ -10180,8 +10269,12 @@ function anotarUsoDaIa({ rota, modelo, uso, ms, status }) {
   if (usoDaIaSemTabela || !uso || typeof uso !== 'object') return;
   try {
     const m = medidoresDoUso(uso);
+    // AS PESQUISAS NA INTERNET (19/11) entram no custo: US$ 0,01 cada.
+    const pesquisas = Number(uso.server_tool_use && uso.server_tool_use.web_search_requests) || 0;
+    const custo = custoDoUso(modelo, m);
     const linha = { rota: String(rota || 'outra'), modelo: String(modelo || ''), ...m,
-                    custo_usd: custoDoUso(modelo, m), ms: Math.round(ms || 0), status: status || null };
+                    custo_usd: custo == null ? null : Math.round((custo + pesquisas * PRECO_DE_UMA_PESQUISA_USD) * 1e6) / 1e6,
+                    ms: Math.round(ms || 0), status: status || null };
     supabase.from('zorvin_uso_da_ia').insert(linha).then(({ error }) => {
       if (!error) return;
       if (semATabela(error)) {
@@ -10222,7 +10315,11 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, mod
   // telefone) muda de um telefone para outro. Um texto só continua valendo.
   const partes = (Array.isArray(sistema) ? sistema : [sistema])
     .filter((x) => String(x || '').trim()).slice(0, 4);
-  const corpo = JSON.stringify({
+  // A CONVERSA COM A IA, que cresce quando a pesquisa na internet (19/11) para
+  // no meio: a Anthropic devolve `pause_turn`, e o pedido vai de novo com a
+  // resposta até ali, para ela continuar de onde parou. No máximo duas vezes.
+  const mensagens = [{ role: 'user', content: pedido }];
+  const montar = () => JSON.stringify({
     // O MODELO VEM DE QUEM PEDE (08/11): as tarefas de bastidor mandam o
     // QUAZAR_MODELO_BASTIDORES; o resto, o COPILOTO_MODELO.
     model: modelo,
@@ -10233,11 +10330,13 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, mod
     // venham antes das de 5 minutos, e misturar só traria essa conta a mais.
     system: partes.map((text) => ({ type: 'text', text, cache_control: ROTAS_COM_CACHE_DE_UMA_HORA.has(rota)
       ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' } })),
-    messages: [{ role: 'user', content: pedido }],
+    messages: mensagens,
     // O RESTO DO PEDIDO de quem não é o copiloto — a leitura das respostas
     // aos avisos manda o esforço e o formato da resposta.
     ...extra,
   });
+  let corpo = montar();
+  let pausas = 0;
   for (let tentativa = 1; ; tentativa++) {
     const inicio = Date.now();
     const r = await fetchComTimeout(`${ANTHROPIC_URL}/v1/messages`, {
@@ -10258,6 +10357,13 @@ async function pedirAoClaude(sistema, pedido, extra = {}, { prazoMs = 45000, mod
     // insistir nele só gastaria a cota.
     if ((r.status === 500 || r.status === 529) && tentativa === 1) {
       await new Promise((ok) => setTimeout(ok, 800));
+      continue;
+    }
+    if (r.ok && resposta && resposta.stop_reason === 'pause_turn' && pausas < 2
+        && Array.isArray(resposta.content)) {
+      pausas += 1;
+      mensagens.push({ role: 'assistant', content: resposta.content });
+      corpo = montar();
       continue;
     }
     // O `retry-after` vai junto: a rodada do funil (02/11) para pelo tempo
@@ -10285,9 +10391,16 @@ async function sugerirResposta(jwt, conversaId) {
   const lido = await lerParaOCopiloto(comoQuemPediu, conversa, conversaId);
   if (lido.falha) return lido.falha;
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
-  const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
+  // A PESQUISA NA INTERNET (19/11): as regras de quando usar vão no fim das
+  // regras de sempre (um texto fixo, que o cache guarda junto), e a
+  // ferramenta no pedido.
+  const pesquisa = ferramentaDePesquisa();
+  const regras = pesquisa ? `${COPILOTO_REGRAS}\n\n${COPILOTO_REGRAS_DA_PESQUISA}` : COPILOTO_REGRAS;
+  const r = await pedirAoClaude(
+    [sistemaDoCopiloto(manual, rapidas, licoes, regras), notasDoCopiloto(aprendido)],
     pedidoDoCopiloto({ mensagens, departamento: departamento.nome, grupo, exemplos }),
-    PEDIDO_DA_SUGESTAO, { rota: 'sugerir' });
+    pesquisa ? { ...PEDIDO_DA_SUGESTAO, tools: [pesquisa] } : PEDIDO_DA_SUGESTAO,
+    { rota: 'sugerir', prazoMs: pesquisa ? 90000 : 45000 });
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -10307,8 +10420,10 @@ async function sugerirResposta(jwt, conversaId) {
   console.log(`copiloto: sugestão em ${Date.now() - inicio} ms — ${mensagens.length} mensagens lidas, `
     + `${exemplos.length} exemplos de verdade; `
     + `${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
-    + `${uso.output_tokens || 0} de saída.`);
-  return { status: 200, corpo: { ok: true, sugestao } };
+    + `${uso.output_tokens || 0} de saída`
+    + `${pesquisasFeitas(r.corpo) ? `; ${pesquisasFeitas(r.corpo)} pesquisa(s) na internet` : ''}.`);
+  const fontes = fontesDaPesquisa(r.corpo);
+  return { status: 200, corpo: { ok: true, sugestao, pesquisou: pesquisasFeitas(r.corpo) > 0, fontes } };
 }
 
 /** O que a sugestão e o ajuste leem, igual nos dois: as quarenta mensagens
@@ -10530,7 +10645,10 @@ app.get('/copiloto/estado', (req, res) => {
              // O QUAZAR À NOITE (055): `noite` diz se ESTA ponte escreve as
              // respostas da noite (falso com QUAZAR_NOITE=desligado). A ponte de
              // antes não manda a chave, e a aba Fora do horário diz isso.
-             noite: !QUAZAR_NOITE_DESLIGADO });
+             noite: !QUAZAR_NOITE_DESLIGADO,
+             // A PESQUISA NA INTERNET DO "SUGERIR RESPOSTA" (19/11): falso com
+             // COPILOTO_PESQUISA=desligada.
+             pesquisa: !COPILOTO_PESQUISA_DESLIGADA });
 });
 
 app.post('/copiloto/sugerir', async (req, res) => {

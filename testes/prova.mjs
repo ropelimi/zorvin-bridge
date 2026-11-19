@@ -24648,5 +24648,138 @@ console.log("\n120. A sugestão do Quazar fica marcada — a ponte");
   }
 }
 
+// ============================================================
+// 121. O "SUGERIR RESPOSTA" PESQUISA NA INTERNET (19/11)
+//
+// Quando a pergunta do cliente é de fora do que o escritório sabe (uma lei,
+// uma notícia), a IA pode pesquisar — a ferramenta `web_search` vai no pedido,
+// com as regras de quando usar. A mensagem é só a resposta final (o que a IA
+// escreveu antes de pesquisar não vai), e as fontes voltam para a tela.
+// ============================================================
+console.log("\n121. O \"Sugerir resposta\" pesquisa na internet");
+{
+  const cena = { pausa: false, pesquisa: true };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const props = Object.keys((json && json.output_config && json.output_config.format
+        && json.output_config.format.schema && json.output_config.format.schema.properties) || {});
+      const msgs = (json && json.messages) || [];
+      const temPesquisa = ((json && json.tools) || []).some((t) => t.name === "web_search");
+      const busca = { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "lei bloqueio salário" } };
+      const resultado = { type: "web_search_tool_result", tool_use_id: "srvtoolu_1",
+        content: [{ type: "web_search_result", url: "https://www.gov.br/noticia", title: "Notícia oficial", encrypted_content: "x" }] };
+      const final = { type: "text", text: "Bom dia! Pode ficar tranquila: não existe lei em vigor que bloqueie o salário.",
+        citations: [
+          { type: "web_search_result_location", url: "https://www.gov.br/noticia", title: "Notícia oficial", cited_text: "…", encrypted_index: "x" },
+          { type: "web_search_result_location", url: "https://www.gov.br/noticia", title: "Notícia oficial", cited_text: "…", encrypted_index: "y" },
+          { type: "web_search_result_location", url: "javascript:alert(1)", title: "ruim", cited_text: "…", encrypted_index: "z" },
+        ] };
+      let content; let stop = "end_turn"; let pesquisas = 0;
+      if (props.includes("licao")) content = [{ type: "text", text: JSON.stringify({ sugestao: "Oi.", licao: "" }) }];
+      else if (!temPesquisa || !cena.pesquisa) content = [{ type: "text", text: "Bom dia! Recebido." }];
+      else if (cena.pausa && msgs.length === 1) { content = [{ type: "text", text: "Vou verificar." }, busca]; stop = "pause_turn"; pesquisas = 1; }
+      else if (cena.pausa) content = [resultado, final];
+      else { content = [{ type: "text", text: "Vou verificar isso para a senhora." }, busca, resultado, final]; pesquisas = 1; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model, content, stop_reason: stop,
+        usage: { input_tokens: 1000, output_tokens: 50, server_tool_use: { web_search_requests: pesquisas } } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const tabelas = () => ({
+    contatos: [{ id: "k1", numero: "5511999998888", nome: "Cliente" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+    mensagens: [{ id: "m1", conversa_id: "c1", origem: "contato", tipo: "texto",
+      texto: "Estou preocupada com a nova lei", criado_em: new Date().toISOString() }],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL" }],
+    zorvin_uso_da_ia: [],
+  });
+  const comChave = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, ...extra });
+  const post = (t, rota, corpo) => fetch(`http://127.0.0.1:${t.porta}${rota}`, {
+    method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) })).catch((e) => ({ status: 0, corpo: { erro: e.message } }));
+  const estado = (t) => fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`).then((r) => r.json()).catch(() => ({}));
+  const sistema = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const esperaAte = async (f, ms = 6000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+
+  // ---- 121a. a ferramenta, as regras e a resposta final ----
+  {
+    const claude = await subirClaude();
+    cena.pausa = false; cena.pesquisa = true;
+    const t = await subirTudo(comChave(claude, { COPILOTO_MODELO: "claude-sonnet-5-5" }), { tabelas: tabelas() });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const p = claude.pedidos[0] || {};
+    const ferr = ((p.tools) || [])[0] || {};
+    ok("121a a sugestão leva a ferramenta de pesquisa da versão nova, no modelo maior", ferr.type === "web_search_20260209" && ferr.name === "web_search",
+       JSON.stringify(p.tools));
+    ok("no máximo 3 pesquisas, no Brasil", ferr.max_uses === 3 && ferr.user_location && ferr.user_location.country === "BR",
+       JSON.stringify(ferr));
+    ok("e as regras: primeiro o que o escritório sabe, fontes oficiais, sem inventar",
+       /Primeiro, sempre, o que o escritório já sabe/.test(sistema(p)) && /NÃO INVENTE/.test(sistema(p)) && /planalto\.gov\.br/.test(sistema(p)),
+       sistema(p).slice(-400));
+    ok("a mensagem é só a resposta final (sem o \"Vou verificar\")",
+       r.status === 200 && r.corpo && r.corpo.sugestao === "Bom dia! Pode ficar tranquila: não existe lei em vigor que bloqueie o salário.",
+       JSON.stringify(r.corpo));
+    ok("diz que pesquisou, e as fontes vão para a tela, sem repetir e só http(s)",
+       r.corpo && r.corpo.pesquisou === true && Array.isArray(r.corpo.fontes) && r.corpo.fontes.length === 1
+       && r.corpo.fontes[0].url === "https://www.gov.br/noticia" && r.corpo.fontes[0].titulo === "Notícia oficial", JSON.stringify(r.corpo && r.corpo.fontes));
+    await esperaAte(() => (t.sb.dados.zorvin_uso_da_ia || []).length >= 1);
+    const uso = (t.sb.dados.zorvin_uso_da_ia || [])[0] || {};
+    // 1000 * 2 + 50 * 10 = 2500 por milhão = 0,0025; mais a pesquisa, 0,01
+    ok("o gasto anotado soma a pesquisa (US$ 0,01)", Math.abs(Number(uso.custo_usd) - 0.0125) < 1e-6, JSON.stringify(uso));
+    const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", pedido: "Mais curto", sugestao: "Bom dia!" });
+    const pa = claude.pedidos[claude.pedidos.length - 1] || {};
+    ok("o \"Pedir uma mudança\" não pesquisa", a.status === 200 && !(pa.tools || []).length && !/PESQUISA NA INTERNET/.test(sistema(pa)),
+       JSON.stringify(pa.tools));
+    const e = await estado(t);
+    ok("e o estado diz que a pesquisa está ligada", e.pesquisa === true, JSON.stringify(e));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 121b. a pesquisa que para no meio (pause_turn) continua ----
+  {
+    const claude = await subirClaude();
+    cena.pausa = true; cena.pesquisa = true;
+    const t = await subirTudo(comChave(claude, { COPILOTO_MODELO: "claude-sonnet-5-5" }), { tabelas: tabelas() });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const segundo = claude.pedidos[1] || {};
+    const msgs = segundo.messages || [];
+    ok("121b a pesquisa que pausou é pedida de novo, com a resposta até ali", claude.pedidos.length === 2 && msgs.length === 2
+       && msgs[1].role === "assistant" && Array.isArray(msgs[1].content) && msgs[1].content.some((b) => b.type === "server_tool_use"),
+       `${claude.pedidos.length} idas; ${JSON.stringify(msgs.map((m) => m.role))}`);
+    ok("e a mensagem é a do fim", r.status === 200 && r.corpo && /não existe lei em vigor/.test(r.corpo.sugestao)
+       && !/Vou verificar/.test(r.corpo.sugestao), JSON.stringify(r.corpo));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 121c. o Haiku usa a versão de antes; desligada, nada ----
+  {
+    const claude = await subirClaude();
+    cena.pausa = false; cena.pesquisa = false;
+    const t = await subirTudo(comChave(claude, { COPILOTO_MODELO: "claude-haiku-5-5" }), { tabelas: tabelas() });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const ferr = ((claude.pedidos[0] || {}).tools || [])[0] || {};
+    ok("121c no Haiku, a ferramenta de antes", ferr.type === "web_search_20250305", JSON.stringify(ferr));
+    ok("e, sem pesquisar, sem fontes", r.status === 200 && r.corpo.pesquisou === false && r.corpo.fontes.length === 0, JSON.stringify(r.corpo));
+    await t.parar();
+    const t2 = await subirTudo(comChave(claude, { COPILOTO_MODELO: "claude-sonnet-5-5", COPILOTO_PESQUISA: "desligada" }), { tabelas: tabelas() });
+    const antes = claude.pedidos.length;
+    const r2 = await post(t2, "/copiloto/sugerir", { conversa_id: "c1" });
+    const p2 = claude.pedidos[antes] || {};
+    ok("COPILOTO_PESQUISA=desligada: sem a ferramenta e sem as regras", r2.status === 200 && !(p2.tools || []).length
+       && !/PESQUISA NA INTERNET/.test(sistema(p2)), JSON.stringify(p2.tools));
+    const e = await estado(t2);
+    ok("e o estado diz que está desligada", e.pesquisa === false, JSON.stringify(e));
+    await t2.parar(); await claude.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
