@@ -3952,6 +3952,30 @@ pegas**: a reserva sem o período; dois cadastros aceitos; sem a regra da
 senha; o escritório fechado entrando; a noite contando o ensaio de dia; fora
 de Novos entrando; a semente religando o SAC; quem entrou mudando a chave.
 
+### Valor, resultado e pagamento só a equipe responde (19/11)
+
+Pedido do Rodrigo: *"não informamos valores de repasse, nada sobre causa
+ganha, nada do tipo [...] em casos assim o Quazar deve 'enrolar' o cliente,
+falar que ele precisa aguardar o retorno de um atendente."*
+
+Uma regra só (`regraDosAssuntosDaEquipe`), nas três regras do Quazar:
+
+| assunto | o Quazar |
+|---|---|
+| valores (repasse, acordo, indenização, condenação, depósito, alvará, cálculo, honorários) | não diz nenhum, nem aproximado, nem se é bom |
+| resultado (ganha ou perdida, a favor ou contra, chance) | não diz, e não confirma quando o cliente diz que ganhou |
+| pagamento (se saiu, quando sai, quanto recebe) | não diz |
+
+- **No lugar**, à noite e no ensaio de dia, ele diz que o cliente precisa
+  aguardar o retorno de um atendente; no "Sugerir resposta", a sugestão diz que
+  a atendente vai verificar e já retorna (quem manda é ela);
+- **sem dizer que é sigiloso, sem pistas e sem inventar motivo**;
+- **vale mesmo que o valor esteja na conversa, no caso do Vantoro ou nos
+  exemplos**. No ensaio de dia, o andamento que fala de resultado, valor ou
+  pagamento (sentença, acordo, alvará, cálculo, depósito) não é contado.
+
+Prova: seções 62, 111 e 123 conferem a regra no pedido de cada uma.
+
 ### O "Sugerir resposta" fica marcado, e tem relatório (script 060, 18/11)
 
 Pedido do Rodrigo: *"Quando for usado o 'Sugerir resposta' eu preciso saber
