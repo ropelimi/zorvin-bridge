@@ -77,6 +77,11 @@ Variáveis de ambiente (no Render):
   resposta". **Opcional: sem ela, a IA pesquisa quando a pergunta do cliente é
   de fora do que o escritório sabe.** Ver "O "Sugerir resposta" pesquisa na
   internet (19/11)".
+- `QUAZAR_DIA` — `desligado` faz o Quazar não escrever o ensaio de dia (o
+  SAC). **Opcional: sem ela, ele escreve nos telefones em ensaio** (e só com
+  `ANTHROPIC_API_KEY`). `QUAZAR_DIA_INTERVALO_MS`, `QUAZAR_DIA_PRIMEIRA_MS` e
+  `QUAZAR_DIA_QUIETO_S` são para a bancada. Ver "O Quazar de dia no SAC, em
+  ensaio (script 061, 19/11)".
 - `QUAZAR_MODELO_BASTIDORES` — o modelo das tarefas de bastidor do Quazar
   (ler as conversas para aprender e ler as respostas aos avisos). **Opcional**,
   padrão `claude-haiku-5-5`. Ver "O gasto do Quazar (script 058, 08/11)".
@@ -3900,6 +3905,52 @@ lista); o quieto padrão de 90 s no banco; a mensagem sem `automatica`; sem o
 cliente "de 1 minuto e meio" tinha justamente 90 segundos, e não separava 60
 de 90. Hoje ele escreveu há 75 segundos. O padrão do banco é a segunda guarda
 (a ponte sempre manda `p_quieto_s`), e fica conferido assim mesmo.
+
+### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
+
+Pedido do Rodrigo: *"Com o Quazar, quero a possibilidade dele ler as conversas
+do Zorvin com o contato, as intimações e andamentos do Vantoro, e todas as
+tarefas referente ao cliente em todos os processos pelo ADVBOX (atualmente) e
+também Vantoro [...]. Preciso que seja uma fase de ensaio para que o Quazar
+responda sozinho os novos clientes apenas do telefone do SAC."* Decidido com
+ele: "novo" é a conversa na aba **Novos**, e ele **pode contar o andamento**
+em linguagem simples, sem prometer prazo nem resultado.
+
+| peça | o quê |
+|---|---|
+| `zorvin_quazar_de_dia` | por telefone: `desligado` ou `ensaio`. Nasce com o **SAC** em ensaio, uma vez só (a semente `quazar:ensaio-de-dia-061`) |
+| `zorvin_quazar_noturno.periodo` | `noite` (as de sempre) ou `dia`. A resposta do ensaio de dia mora na mesma tabela, e o painel a mostra igual, com "boa" e "ruim" |
+| `zorvin_quazar_noturno.contexto` | o que ele leu do caso, só contagens ("Leu o caso no Vantoro: 2 processo(s), …") ou por que não leu |
+| `zorvin_quazar_de_dia_pendentes` | quem espera: o telefone em ensaio, a conversa em Novos, sem arquivar nem grupo, o cliente quieto há 1 minuto, o escritório **aberto** (sem horário escrito, conta como aberto), nada da equipe saindo na fila. Só a ponte chama |
+| `zorvin_quazar_noturno_pendentes` | a do 059, com `q.periodo = 'noite'`: o ensaio de dia não foi ao cliente, e a noite responde a mesma mensagem se for o caso. **É a versão de referência** (regra 5) |
+| `quazarDeDia`, no `index.js` | a rodada, de 15 em 15 segundos, até 3 conversas por volta |
+
+**O que ele lê**: o que a sugestão lê (a conversa, o manual, as rápidas, as
+lições, as notas e os exemplos) e o **caso no Vantoro**
+(`GET /clientes/<id>/contexto`, a rota nova do Vantoro): os processos com os
+últimos andamentos, as intimações e as tarefas do Vantoro e do ADVBOX. O
+cliente é o do cadastro ligado ao contato (`vantoro_cliente_id`) ou, sem ele,
+o **único** cadastro com aquele telefone.
+
+**Sem o caso, ele responde sem falar do processo** (o pedido diz "o caso NÃO
+foi lido"): mais de um cadastro com o telefone, nenhum, o Vantoro sem a rota
+(404), fora do ar, em pausa (429), ou a ponte sem o Vantoro. O registro diz o
+motivo em `contexto`.
+
+**As regras do dia** (`QUAZAR_DIA_REGRAS`): é ensaio; apresenta-se pelo nome
+na primeira mensagem; conta o último andamento em linguagem simples e pede o
+documento de uma tarefa pendente que depende do cliente; **não promete prazo,
+data, valor nem resultado**; não cita número de processo inteiro, valor nem
+juiz; **não pede senha nem código** (a equipe pede quando for usar).
+
+**Nada vai ao cliente**: nem fila, nem WhatsApp. **Só números no log.**
+`QUAZAR_DIA=desligado` desliga sem mexer no código.
+
+Provas: seção 122 (o 061 num Postgres de verdade, 21 conferências) e seção 123
+(a rodada, com um Claude e um Vantoro de mentira, 18). **8 sabotagens e 8
+pegas**: a reserva sem o período; dois cadastros aceitos; sem a regra da
+senha; o escritório fechado entrando; a noite contando o ensaio de dia; fora
+de Novos entrando; a semente religando o SAC; quem entrou mudando a chave.
 
 ### O "Sugerir resposta" fica marcado, e tem relatório (script 060, 18/11)
 
