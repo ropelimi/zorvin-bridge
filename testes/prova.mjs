@@ -9682,6 +9682,9 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     const sistema = sistemaDe(claude.pedidos[0]);
     ok("com as regras fixas, e sem a seção do manual", /Não invente/.test(sistema) && !sistema.includes("<manual>"),
        sistema.slice(0, 200));
+    ok("e a sugestão não fala de valor de repasse nem de causa ganha: escreve que vai verificar (19/11)",
+       /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sistema) && /de repasse/.test(sistema) && /se a causa está ganha ou perdida/.test(sistema)
+       && /escreva que vai verificar e já retorna/.test(sistema), sistema.slice(-1500));
     await espera(100);
     ok("e o log diz qual script falta", /024-o-copiloto\.sql/.test(t.registro.join("")));
     await t.parar(); await claude.parar();
@@ -22653,6 +22656,9 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     ok("que não diz o andamento do processo, não promete e não pede senha nem código",
        /Não diz em que pé está o processo/.test(sis) && /Não promete prazo, valor/.test(sis) && /Não pede senha nem código de confirmação/.test(sis));
     ok("que não responde robô nem o \"ok\" do fim", /QUANDO NÃO RESPONDER/.test(sis) && /responder = false/.test(sis));
+    ok("e não fala de valor, resultado nem pagamento: manda aguardar o retorno de um atendente (19/11)",
+       /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis) && /de repasse/.test(sis) && /se a causa está ganha ou perdida/.test(sis)
+       && /aguardar o retorno de um atendente/.test(sis) && /Não diga que a informação é sigilosa/.test(sis));
     ok("e não leva as regras do copiloto (que manda usar marcadores e escrever como a atendente)",
        !/Você é o copiloto/.test(sis) && !/use os marcadores \{saudacao\}/.test(sis) && sis.includes("MANUAL-DE-PROVA"));
     const ped = pedidoDe(claude.pedidos[0]);
@@ -25087,6 +25093,9 @@ console.log("\n123. O Quazar de dia no SAC, em ensaio — a rodada da ponte");
     const sis = sistemaDe(claude.pedidos[0]);
     ok("123b as regras do dia: conta o andamento em linguagem simples, não promete prazo, não pede senha, é ensaio",
        /conte o último andamento em linguagem simples/.test(sis) && /Não promete prazo/.test(sis) && /Não pede senha/.test(sis) && /ENSAIO/.test(sis), sis.slice(0, 300));
+    ok("e não fala de valor, resultado nem pagamento, nem pelo andamento: manda aguardar um atendente (19/11)",
+       /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis) && /de repasse/.test(sis) && /aguardar o retorno de um atendente/.test(sis)
+       && /Se o andamento fala de resultado, valor ou pagamento/.test(sis));
     ok("e manda ele se apresentar pelo nome, com o nome do escritório",
        ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")'), ped.slice(0, 600));
     ok("o log diz só números", /quazar de dia: resposta de ensaio escrita em \d+ ms/.test(t.registro.join(""))
