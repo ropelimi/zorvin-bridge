@@ -73,6 +73,10 @@ Variáveis de ambiente (no Render):
   variável falta. Ver "O copiloto", abaixo.
 - `COPILOTO_MODELO` — o modelo do copiloto. **Opcional**, padrão
   `claude-haiku-5-5`. Trocar aqui não pede publicação.
+- `COPILOTO_PESQUISA` — `desligada` tira a pesquisa na internet do "Sugerir
+  resposta". **Opcional: sem ela, a IA pesquisa quando a pergunta do cliente é
+  de fora do que o escritório sabe.** Ver "O "Sugerir resposta" pesquisa na
+  internet (19/11)".
 - `QUAZAR_MODELO_BASTIDORES` — o modelo das tarefas de bastidor do Quazar
   (ler as conversas para aprender e ler as respostas aos avisos). **Opcional**,
   padrão `claude-haiku-5-5`. Ver "O gasto do Quazar (script 058, 08/11)".
@@ -3937,6 +3941,46 @@ graváveis por quem entrou; e sem a guarda de quem enviou.
 contando passava porque a mensagem automática da cena não tinha quem enviou
 (o outro filtro a tirava); e `security definer` passava porque nenhuma
 mensagem estava num telefone que a pessoa não vê. Hoje a cena tem as duas.
+
+### O "Sugerir resposta" pesquisa na internet (19/11)
+
+Pedido do Rodrigo, com a foto de uma cliente preocupada com "a nova lei que
+bloqueia o salário por até 1 ano": *"Quando o contato fizer uma pergunta que
+não temos na nossa base de dados e nem na conversa, quando é algo mais
+complexo igual essa mensagem na imagem anexo, precisamos de uma forma fazer o
+Quazar pesquisar na internet quando clicarmos em 'Sugerir resposta'. Mas
+sempre antes tem que consultar nosso banco de dados e conversas, e não o deixe
+alucinar, tem que manter nossa linguagem."*
+
+- **A ferramenta é a da Anthropic** (`web_search`), que roda do lado dela:
+  a ponte a oferece no pedido do `/copiloto/sugerir` (`ferramentaDePesquisa`).
+  No Sonnet 5.5 e nos maiores, a versão de 09/02/2026, que filtra os
+  resultados antes de lê-los; no Haiku, a de antes. No máximo três pesquisas
+  por sugestão, no Brasil.
+- **Quem decide se pesquisa é a IA, pelas regras** (`COPILOTO_REGRAS_DA_PESQUISA`,
+  uma parte a mais do sistema): primeiro o manual, as lições, as notas, os
+  exemplos e a conversa, e só pesquisa quando a pergunta é de fora disso (uma
+  lei, uma notícia, uma regra de órgão público). Fontes oficiais primeiro; não
+  inventa número de lei, data nem valor que a fonte não confirma; projeto se
+  diz projeto; sem achar nada seguro, "vou verificar e retornar". A mensagem
+  continua no jeito da equipe, sem link e sem citar o site.
+- **A mensagem é só a resposta final** (`blocosDaRespostaFinal`): o que a IA
+  escreveu antes de pesquisar ("Vou verificar…") não vai.
+- **As fontes que a resposta citou voltam para a tela** (`fontes`, até cinco,
+  só http(s), sem repetir), com `pesquisou`, para a atendente conferir antes de
+  mandar.
+- **A pesquisa que para no meio** (`pause_turn`) é pedida de novo com a
+  resposta até ali, até duas vezes (`pedirAoClaude`). O prazo da sugestão com
+  pesquisa é de 90 segundos.
+- **O custo**: US$ 0,01 por pesquisa, mais as páginas lidas como tokens de
+  entrada. A pesquisa entra no custo anotado em `zorvin_uso_da_ia`.
+- **Só no "Sugerir resposta"**: o Quazar à noite responde sem ninguém conferir,
+  e o "Pedir uma mudança" refaz a mensagem que já está na caixa.
+- **`COPILOTO_PESQUISA=desligada`** tira a pesquisa sem publicar nada, e
+  `/copiloto/estado` diz `pesquisa`.
+
+Prova: seção 121 (a ferramenta e as regras no pedido, a resposta final, as
+fontes, o custo, o `pause_turn`, o Haiku, o ajuste sem pesquisa, e desligada).
 
 ### O gasto do Quazar (script 058, 08/11)
 
