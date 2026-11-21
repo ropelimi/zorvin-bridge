@@ -22679,6 +22679,33 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     await t.parar(); await claude.parar();
   }
 
+  // ---- 111b-bis. o recesso: um feriado "Recesso" no período fechado (21/11) ----
+  {
+    const hoje = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(AGORA));
+    const claude = await subirClaude();
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ zorvin_feriados: [
+      { dia: "2020-01-01", nome: "RECESSO DE OUTRO ANO" }, { dia: hoje, nome: "Recesso de fim de ano" }] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => linhas(t).some((l) => l.status === "pronta"));
+    const ped = pedidoDe(claude.pedidos[0]);
+    ok("111b-bis com um dia de recesso no período fechado, o pedido diz que o escritório está EM RECESSO e quando volta",
+       /O escritório está EM RECESSO \(fora temporariamente\)\. A equipe volta \S+/.test(ped) && !ped.includes("O escritório está fechado."), ped.slice(0, 600));
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("e as regras mandam dizer recesso e que a conversa fica guardada para a equipe",
+       /RECESSO/.test(sis) && /Use a palavra recesso/.test(sis) && /conversa dele fica guardada/.test(sis), sis.slice(-1500));
+    await t.parar(); await claude.parar();
+    // O CONTRASTE: só o recesso de outro ano, e um feriado comum hoje.
+    const claude2 = await subirClaude();
+    const t2 = await subirTudo(rapido(claude2), { tabelas: tabelas({ zorvin_feriados: [
+      { dia: "2020-01-01", nome: "Recesso de outro ano" }, { dia: hoje, nome: "Finados" }] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => linhas(t2).some((l) => l.status === "pronta"));
+    const ped2 = pedidoDe(claude2.pedidos[0]);
+    ok("sem recesso no período (um feriado comum, e o recesso de outro ano), o pedido diz fechado, e não recesso",
+       ped2.includes("O escritório está fechado.") && !/EM RECESSO/.test(ped2), ped2.slice(0, 600));
+    await t2.parar(); await claude2.parar();
+  }
+
   // ---- 111c. o ensaio de antes entra na conversa, e ele não se apresenta de novo ----
   {
     const claude = await subirClaude();

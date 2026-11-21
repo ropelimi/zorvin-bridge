@@ -11158,6 +11158,9 @@ const QUAZAR_NOITE_REGRAS = [
   '',
   regraDosAssuntosDaEquipe('diga que ele precisa aguardar o retorno de um atendente, que vai verificar quando a equipe voltar.'),
   '',
+  'RECESSO',
+  '- Quando o pedido disser que o escritório está EM RECESSO, diga ao cliente que o escritório está em recesso (fora temporariamente) e quando a equipe volta, e que a conversa dele fica guardada e a equipe continua o atendimento quando voltar. Use a palavra recesso; não diga que é fim de expediente.',
+  '',
   'QUANDO NÃO RESPONDER',
   '- Mensagem de empresa, robô, propaganda ou cobrança de terceiros, e mensagem que não pede resposta (um "ok", um "obrigado", uma figurinha no fim da conversa, a confirmação de algo que você já respondeu): responder = false, e em motivo diga por quê, numa frase curta.',
   '',
@@ -11201,6 +11204,31 @@ function quandoVoltaPorExtenso(iso, fuso) {
   return `${p.weekday}, ${p.day}/${p.month}, às ${p.hour}:${p.minute}`;
 }
 
+/** O DIA (AAAA-MM-DD) de uma hora, no fuso do departamento. */
+function diaNoFuso(d, fuso) {
+  let zona = 'America/Sao_Paulo';
+  try { new Intl.DateTimeFormat('pt-BR', { timeZone: fuso }); zona = fuso || zona; } catch (_) { /* fica o de São Paulo */ }
+  return new Intl.DateTimeFormat('en-CA', { timeZone: zona, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+
+/** O RECESSO: o período fechado de agora tem um dia cadastrado como feriado
+ *  com "recesso" no nome (sem olhar acento nem maiúscula), entre hoje e o dia
+ *  em que a equipe volta. É a mesma lista que fecha o escritório
+ *  (zorvin_feriados, do 021): quem cadastra o recesso cadastra os dias ali.
+ *  A leitura que falha vale como "não é recesso": a resposta de sempre, que
+ *  diz que o escritório está fechado e quando volta, continua certa. */
+async function emRecesso(ate, fuso, agora = new Date()) {
+  const volta = new Date(ate);
+  if (Number.isNaN(volta.getTime())) return false;
+  const { data, error } = await supabase.from('zorvin_feriados').select('dia, nome')
+    .gte('dia', diaNoFuso(agora, fuso)).lte('dia', diaNoFuso(volta, fuso));
+  if (error) {
+    console.error('quazar à noite: não consegui ler os feriados para saber se é recesso', error.code || '', error.message);
+    return false;
+  }
+  return (data || []).some((f) => semAcentoMinusculo(f.nome).includes('recesso'));
+}
+
 /** O primeiro nome que a tela mostra (a ficha, o nome que a equipe deu, o do
  *  WhatsApp), arrumado: "ANDREIA CRISTINA" vira "Andreia". A IA decide se é
  *  nome de pessoa ("Deus", o nome de uma loja). */
@@ -11219,11 +11247,13 @@ function linhaDaNoite(m) {
   return linhaParaOCopiloto(m);
 }
 
-function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, primeira, escritorio = '' }) {
+function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, primeira, escritorio = '', recesso = false }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (escritorio) linhas.push(`Nome do escritório: ${escritorio}.`);
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
-  linhas.push(`O escritório está fechado. A equipe volta ${volta || 'no próximo dia de expediente'}.`);
+  linhas.push(recesso
+    ? `O escritório está EM RECESSO (fora temporariamente). A equipe volta ${volta || 'quando o recesso terminar'}.`
+    : `O escritório está fechado. A equipe volta ${volta || 'no próximo dia de expediente'}.`);
   linhas.push(nome ? `Primeiro nome do cliente, como está no cadastro: ${nome}.` : 'Não sabemos o nome do cliente.');
   linhas.push(primeira
     ? `Esta é a sua primeira mensagem para este cliente nesta noite: apresente-se ("Sou o ${NOME_DO_ASSISTENTE}, assistente virtual do escritório${escritorio ? ` ${escritorio}` : ''}").`
@@ -11289,12 +11319,13 @@ async function escreverANoite(item) {
     && !lido.mensagens.some((m) => m.pelo_quazar
       && Date.parse(m.criado_em) >= (item.fechou_em ? Date.parse(item.fechou_em) : 0));
   const escritorio = await nomeDoEscritorio();
+  const recesso = await emRecesso(item.ate, item.fuso);
 
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_NOITE_REGRAS), notasDoCopiloto(lido.aprendido)],
     pedidoDaNoite({ mensagens, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
                     volta: quandoVoltaPorExtenso(item.ate, item.fuso), nome: primeiroNomeDoContato(contato), primeira,
-                    escritorio }),
+                    escritorio, recesso }),
     { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } },
     { rota: 'noite' });
   const uso = (r.corpo && r.corpo.usage) || {};
