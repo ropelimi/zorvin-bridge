@@ -3906,6 +3906,33 @@ cliente "de 1 minuto e meio" tinha justamente 90 segundos, e não separava 60
 de 90. Hoje ele escreveu há 75 segundos. O padrão do banco é a segunda guarda
 (a ponte sempre manda `p_quieto_s`), e fica conferido assim mesmo.
 
+### O recesso: o Quazar diz que o escritório está em recesso (21/11)
+
+Pedido do Rodrigo: *"Quazar enviar mensagem automática durante o recesso
+informando que o escritório está fora temporariamente, mas conversas
+permanecem pendentes para quando retornarmos."* E: *"Ainda não temos definido
+o período de recesso. Pode usar a palavra recesso sim."*
+
+- **O recesso é cadastrado como feriado** (`zorvin_feriados`, a mesma lista que
+  fecha o escritório, do 021), um dia por linha, com **"Recesso" no nome**. Dia
+  de semana em recesso que não está ali é dia de expediente, e o Quazar não
+  responde de dia.
+- **Com os dias cadastrados, o escritório fica fechado o recesso inteiro**, e o
+  Quazar à noite (valendo) responde a qualquer hora. A ponte pergunta se o
+  período fechado de agora tem um feriado com "recesso" no nome, de hoje até o
+  dia em que a equipe volta (`emRecesso`, sem olhar acento nem maiúscula), e o
+  pedido diz *"O escritório está EM RECESSO (fora temporariamente). A equipe
+  volta …"*. A regra RECESSO manda usar a palavra e dizer que a conversa fica
+  guardada para a equipe.
+- **A conversa continua em Novos e na fila de espera**: a mensagem do Quazar é
+  `automatica` (059), e não conta como a equipe ter respondido.
+- **A leitura dos feriados que falha vale como "não é recesso"**: o Quazar diz
+  que o escritório está fechado e quando volta, que continua certo.
+- **Nenhum SQL.** Até o Rodrigo definir as datas, nada muda.
+
+Prova: seção 111, cena 111b-bis (o recesso hoje, e o contraste do feriado comum
+e do recesso de outro ano).
+
 ### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
 
 Pedido do Rodrigo: *"Com o Quazar, quero a possibilidade dele ler as conversas
