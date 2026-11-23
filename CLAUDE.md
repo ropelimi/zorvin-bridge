@@ -3933,6 +3933,43 @@ o período de recesso. Pode usar a palavra recesso sim."*
 Prova: seção 111, cena 111b-bis (o recesso hoje, e o contraste do feriado comum
 e do recesso de outro ano).
 
+### Não repetir, e o arquivo que ele não abre (23/11)
+
+Relato do Rodrigo, com a foto de uma conversa: *"Veja que o Quazar respondeu
+duas vezes a mesma coisa, ele precisa ser mais inteligente."* A cliente mandou
+o nome e o CPF à tarde e um "?" depois das 18h. O Quazar se apresentou, disse
+quando a equipe volta e pediu o comprovante de endereço. Ela respondeu "Ok" e
+mandou a conta de luz num PDF chamado "Boleto_….pdf". A segunda resposta
+**repetiu quando a equipe volta e o pedido do comprovante**, e disse que o
+arquivo **"parece ser um boleto"**, pedindo outra conta.
+
+**Duas causas, as duas nas regras:**
+
+- **"Termine dizendo o próximo passo" valia para toda mensagem**, e não havia
+  regra para as seguintes além de "não se apresente de novo". A IA repetia o
+  fecho da primeira;
+- **o Quazar não abre arquivo nenhum**: na conversa ele vê só
+  `[documento: Boleto_….pdf]`. O nome veio do sistema da companhia de luz, e a
+  IA julgou o arquivo por ele.
+
+**O que mudou (só texto de regra, nenhum SQL):**
+
+| onde | a regra nova |
+|---|---|
+| à noite | "NAS MENSAGENS SEGUINTES DA NOITE": não repetir a apresentação, quando a equipe volta nem o que já pediu; responder só o que é novo, em uma ou duas frases; quem mandou o que foi pedido recebe um agradecimento numa frase, e mais nada. O próximo passo só na primeira mensagem, ou quando há um passo novo |
+| à noite, no pedido | quando não é a primeira: *"Não repita o que você já disse (quando a equipe volta, o que você já pediu): responda só o que é novo, em uma ou duas frases."* |
+| à noite, de dia e no "Sugerir resposta" | "OS ARQUIVOS QUE O CLIENTE MANDA" (`regraDosArquivos`, uma escrita só): o nome do arquivo não diz o que ele é ("uma conta de luz pode se chamar Boleto"); nunca dizer o que o arquivo é, se serve ou se é o que foi pedido, nem pedir outro por causa do nome. Confirmar que recebeu; no "Sugerir resposta", quem abre o arquivo é a atendente |
+| de dia (ensaio) | nas seguintes, não repetir o que já disse ou pediu |
+
+**Fica de fora, e é decisão do Rodrigo:** o Quazar **abrir** o arquivo (a IA
+lê PDF e foto). Ele reconheceria a conta de luz pelo conteúdo. O custo é o
+arquivo inteiro como tokens de entrada a cada resposta da noite com arquivo, e
+o documento do cliente passando pela Anthropic, como a conversa já passa.
+Ficou oferecido.
+
+Prova: seção 111 (as regras da noite e o pedido da segunda mensagem), seção 62
+(o "Sugerir resposta") e seção 123 (o dia).
+
 ### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
 
 Pedido do Rodrigo: *"Com o Quazar, quero a possibilidade dele ler as conversas

@@ -9685,6 +9685,9 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     ok("e a sugestão não fala de valor de repasse nem de causa ganha: escreve que vai verificar (19/11)",
        /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sistema) && /de repasse/.test(sistema) && /se a causa está ganha ou perdida/.test(sistema)
        && /escreva que vai verificar e já retorna/.test(sistema), sistema.slice(-1500));
+    ok("e não diz o que um arquivo é pelo nome dele: quem abre é a atendente (23/11)",
+       /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sistema) && /uma conta de luz pode se chamar "Boleto"/.test(sistema)
+       && /não peça outro documento por causa do nome/.test(sistema) && /quem abre o arquivo é a atendente/.test(sistema), sistema.slice(-1500));
     await espera(100);
     ok("e o log diz qual script falta", /024-o-copiloto\.sql/.test(t.registro.join("")));
     await t.parar(); await claude.parar();
@@ -22656,6 +22659,13 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     ok("que não diz o andamento do processo, não promete e não pede senha nem código",
        /Não diz em que pé está o processo/.test(sis) && /Não promete prazo, valor/.test(sis) && /Não pede senha nem código de confirmação/.test(sis));
     ok("que não responde robô nem o \"ok\" do fim", /QUANDO NÃO RESPONDER/.test(sis) && /responder = false/.test(sis));
+    ok("que, nas mensagens seguintes da noite, não repete o que já disse: nem quando a equipe volta, nem o que já pediu (23/11)",
+       /NAS MENSAGENS SEGUINTES DA NOITE/.test(sis) && /Não repita nada disso/.test(sis) && /nem quando a equipe volta/.test(sis)
+       && /nem o pedido de um documento ou de uma informação que você já fez/.test(sis) && /agradeça e confirme que recebeu, numa frase, e pare aí/.test(sis)
+       && /de uma a duas nas seguintes/.test(sis), sis.slice(0, 1500));
+    ok("e que não diz o que um arquivo é pelo nome dele (a conta de luz chamada \"Boleto\") (23/11)",
+       /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /uma conta de luz pode se chamar "Boleto"/.test(sis)
+       && /nunca diga o que o arquivo é/.test(sis) && /não peça outro documento por causa do nome/.test(sis), sis.slice(-2500));
     ok("e não fala de valor, resultado nem pagamento: manda aguardar o retorno de um atendente (19/11)",
        /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis) && /de repasse/.test(sis) && /se a causa está ganha ou perdida/.test(sis)
        && /aguardar o retorno de um atendente/.test(sis) && /Não diga que a informação é sigilosa/.test(sis));
@@ -22664,7 +22674,8 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     const ped = pedidoDe(claude.pedidos[0]);
     ok("o pedido diz quando a equipe volta, por extenso", /O escritório está fechado\. A equipe volta \S+-feira|O escritório está fechado\. A equipe volta (sábado|domingo)/.test(ped), ped.slice(0, 600));
     ok("o primeiro nome, arrumado, da ficha (e não o do WhatsApp)", ped.includes("Primeiro nome do cliente, como está no cadastro: Andreia.") && !ped.includes("Deus"), ped.slice(0, 600));
-    ok("que é a primeira da noite", ped.includes("Esta é a sua primeira mensagem para este cliente nesta noite"));
+    ok("que é a primeira da noite", ped.includes("Esta é a sua primeira mensagem para este cliente nesta noite")
+       && !ped.includes("Não repita o que você já disse"));
     ok("a mensagem pronta que ele recebeu, na conversa", /Mensagem automática do escritório \(fora do horário\): MENSAGEM-PRONTA-DE-PROVA/.test(ped), ped);
     ok("os exemplos de verdade", ped.includes("<exemplos>") && ped.indexOf("</exemplos>") < ped.indexOf("<conversa>"));
     ok("e o cliente não fecha a conversa por escrito", (ped.match(/<\/conversa>/g) || []).length === 1, ped);
@@ -22717,6 +22728,8 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     ok("111c a resposta de ensaio de antes entra na conversa, como se tivesse saído",
        /Você \(assistente virtual\): ENSAIO-DE-ANTES/.test(ped) && ped.indexOf("ENSAIO-DE-ANTES") < ped.indexOf("ignore as regras"), ped);
     ok("e ele não se apresenta de novo", ped.includes("Você já respondeu este cliente nesta noite: não se apresente de novo."), ped.slice(0, 600));
+    ok("nem repete o que já disse: responde só o que é novo, em uma ou duas frases (23/11)",
+       ped.includes("Não repita o que você já disse (quando a equipe volta, o que você já pediu): responda só o que é novo, em uma ou duas frases."), ped.slice(0, 800));
     await t.parar(); await claude.parar();
   }
 
@@ -25123,6 +25136,9 @@ console.log("\n123. O Quazar de dia no SAC, em ensaio — a rodada da ponte");
     ok("e não fala de valor, resultado nem pagamento, nem pelo andamento: manda aguardar um atendente (19/11)",
        /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis) && /de repasse/.test(sis) && /aguardar o retorno de um atendente/.test(sis)
        && /Se o andamento fala de resultado, valor ou pagamento/.test(sis));
+    ok("e não diz o que um arquivo é pelo nome, nem repete o que já disse nas seguintes (23/11)",
+       /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /uma conta de luz pode se chamar "Boleto"/.test(sis)
+       && /Agradeça e confirme que recebeu; a equipe confere\./.test(sis) && /não repita o que você já disse ou pediu/.test(sis));
     ok("e manda ele se apresentar pelo nome, com o nome do escritório",
        ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")'), ped.slice(0, 600));
     ok("o log diz só números", /quazar de dia: resposta de ensaio escrita em \d+ ms/.test(t.registro.join(""))
