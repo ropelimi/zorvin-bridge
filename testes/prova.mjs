@@ -9535,7 +9535,10 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
        conversa && conversa.autorizacao === "Bearer jwt-bom", JSON.stringify(conversa && conversa.autorizacao));
     ok("e as mensagens também", mensagens && mensagens.autorizacao === "Bearer jwt-bom",
        JSON.stringify(mensagens && mensagens.autorizacao));
-    ok("as quarenta mais novas", mensagens && /limit=40/.test(mensagens.busca) && /order=criado_em\.desc/.test(mensagens.busca),
+    // INVERTIDA em 24/11: eram as quarenta mais novas; hoje é a conversa
+    // inteira, em páginas de 500, as mais novas primeiro (ver a seção 124).
+    ok("a conversa inteira, em páginas de 500, as mais novas primeiro (e não só as quarenta últimas)",
+       mensagens && /limit=500/.test(mensagens.busca) && !/limit=40(&|$)/.test(mensagens.busca) && /order=criado_em\.desc/.test(mensagens.busca),
        mensagens && mensagens.busca);
 
     const p = claude.pedidos[0] || {};
@@ -25186,6 +25189,228 @@ console.log("\n123. O Quazar de dia no SAC, em ensaio — a rodada da ponte");
     await espera(1500);
     ok("QUAZAR_DIA=desligado: nem pergunta ao banco", perguntas === 0 && !linhas(t2).length, `${perguntas} perguntas`);
     await t2.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+// 124. O QUAZAR LÊ A CONVERSA INTEIRA (24/11)
+//
+// Pedido do Rodrigo: "Quando uma conversa for finalizada e reaberta, o Quazar
+// tem que continuar lendo toda a conversa." Ele lia as quarenta últimas
+// mensagens; agora lê a conversa toda, em páginas, e o pedido leva até 60 mil
+// caracteres, cortando pelo começo. Os atendimentos finalizados e reabertos
+// viram linhas "--- … ---" no lugar certo da conversa. Confere, nas quatro
+// portas (a sugestão, o "Pedir uma mudança", a noite e o dia):
+//    - a primeira mensagem de uma conversa de 150 vai no pedido (com as 40,
+//      ficava de fora), e a de uma conversa de 1200 também (três páginas, além
+//      do teto de 1000 do PostgREST), sem repetir nenhuma;
+//    - as marcas: "finalizado" depois da última mensagem do atendimento de
+//      antes, "reaberto" antes da mensagem que reabriu, sem o protocolo, e
+//      lidas como quem pediu;
+//    - a conversa longa demais é cortada pelo COMEÇO, e o pedido diz quantas
+//      ficaram de fora; as marcas de antes do corte saem junto;
+//    - sem a tabela dos atendimentos, ou com a leitura falhando, a resposta
+//      sai sem as marcas;
+//    - as regras das três dizem que é a mesma conversa e o mesmo cliente.
+// ============================================================
+console.log("\n124. O Quazar lê a conversa inteira");
+{
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const props = Object.keys((json && json.output_config && json.output_config.format
+        && json.output_config.format.schema && json.output_config.format.schema.properties) || {});
+      const texto = props.includes("licao") ? JSON.stringify({ sugestao: "Oi, recebido.", licao: "" })
+        : props.includes("responder") ? JSON.stringify({ responder: true, mensagem: "Boa noite! Recebido.", resumo: "Escreveu de novo.", motivo: "" })
+        : "Oi, recebido.";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: texto }], stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 40 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  // UMA CONVERSA DE `n` MENSAGENS, uma por minuto, a mais antiga primeiro. A
+  // primeira diz PRIMEIRA-DA-CONVERSA, e a última é do cliente. As do meio
+  // alternam cliente e equipe.
+  const conversaDe = (n, { textoDe = (i) => `mensagem ${i}`, inicioMin = n + 5 } = {}) => Array.from({ length: n }, (_, i) => ({
+    id: `m${String(i).padStart(5, "0")}`, conversa_id: "c1", origem: i === n - 1 || i % 2 === 0 ? "contato" : "advogado", tipo: "texto",
+    texto: i === 0 ? "PRIMEIRA-DA-CONVERSA" : i === n - 1 ? "ULTIMA-DA-CONVERSA" : textoDe(i), criado_em: haMin(inicioMin - i),
+  }));
+  const tabelas = (mensagens, extra = {}) => ({
+    contatos: [{ id: "k1", numero: "5571900000001", nome: "Cliente" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aguardando" }],
+    mensagens,
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL" }],
+    zorvin_quazar_noturno: [],
+    zorvin_respostas_automaticas: [],
+    fila_envio: [],
+    ...extra,
+  });
+  const comChave = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+    COPILOTO_PESQUISA: "desligada", ...extra });
+  const post = (t, rota, corpo) => fetch(`http://127.0.0.1:${t.porta}${rota}`, {
+    method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) })).catch((e) => ({ status: 0, corpo: { erro: e.message } }));
+  const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const conversaDoPedido = (ped) => { const a = ped.indexOf("<conversa>"); const b = ped.indexOf("</conversa>"); return a >= 0 && b > a ? ped.slice(a, b) : ""; };
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  // UM ATENDIMENTO FINALIZADO E UM REABERTO PELO CLIENTE: o de antes vai da
+  // mensagem 0 à 99 e é finalizado meio minuto depois da 99; o de agora abre
+  // na 100 (com a mesma hora dela, como o gatilho do 028 grava).
+  const atendimentos = (msgs) => [
+    { id: "a1", protocolo: "2026-000777", conversa_id: "c1", origem: "cliente", aberto_em: msgs[0].criado_em,
+      finalizado_em: new Date(Date.parse(msgs[99].criado_em) + 30000).toISOString() },
+    { id: "a2", protocolo: "2026-000888", conversa_id: "c1", origem: "cliente", aberto_em: msgs[100].criado_em, finalizado_em: null },
+  ];
+
+  // ---- 124a. o "Sugerir resposta": a conversa de 150, finalizada e reaberta ----
+  {
+    const msgs = conversaDe(150);
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(msgs, { zorvin_atendimentos: atendimentos(msgs) }) });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const ped = pedidoDe(claude.pedidos[0]);
+    const conv = conversaDoPedido(ped);
+    ok("124a a sugestão sai", r.status === 200 && r.corpo && r.corpo.sugestao === "Oi, recebido.", JSON.stringify(r));
+    ok("o pedido leva a PRIMEIRA mensagem da conversa de 150 (com as 40 últimas, ela ficava de fora)",
+       conv.includes("PRIMEIRA-DA-CONVERSA") && conv.includes("ULTIMA-DA-CONVERSA") && conv.includes(": mensagem 1\n"), conv.slice(0, 300));
+    ok("as 150, na ordem em que aconteceram, sem repetir", (conv.match(/: (mensagem \d+|PRIMEIRA-DA-CONVERSA|ULTIMA-DA-CONVERSA)\n/g) || []).length === 150
+       && conv.indexOf(": mensagem 10\n") < conv.indexOf(": mensagem 120\n"), `${(conv.match(/mensagem \d+/g) || []).length}`);
+    const iFim = conv.indexOf("atendimento finalizado pela equipe");
+    const iVolta = conv.indexOf("o cliente voltou a escrever, e o atendimento foi reaberto");
+    ok("a marca do atendimento finalizado vem depois da última mensagem dele e antes da que reabriu",
+       iFim > conv.indexOf(": mensagem 99\n") && iFim < conv.indexOf(": mensagem 100\n"), conv.slice(Math.max(0, iFim - 200), iFim + 200));
+    ok("e a do reaberto vem logo antes da mensagem que reabriu, dizendo que é a mesma conversa",
+       iVolta > iFim && iVolta < conv.indexOf(": mensagem 100\n") && /É a mesma conversa: o que veio antes continua valendo/.test(conv),
+       conv.slice(Math.max(0, iVolta - 100), iVolta + 300));
+    ok("as marcas são linhas \"--- … ---\" com a hora, e nenhuma para a abertura do primeiro atendimento",
+       /--- \d\d\/\d\d \d\d:\d\d: atendimento finalizado pela equipe\. ---/.test(conv) && (conv.match(/^--- /gm) || []).length === 2, conv.match(/^--- .*$/gm));
+    ok("sem o número do protocolo (é só da equipe)", !ped.includes("2026-000777") && !ped.includes("2026-000888"));
+    ok("e nada diz que o começo ficou de fora", !/não coube aqui/.test(ped));
+    const leu = (re, busca) => t.sb.chamadas.filter((c) => c.metodo === "GET" && re.test(c.caminho) && busca.test(c.busca));
+    const lidas = leu(/\/mensagens$/, /conversa_id=eq\.c1/);
+    ok("a conversa é lida em páginas, as mais novas primeiro, com o id desempatando",
+       lidas.length >= 1 && lidas.every((c) => /order=criado_em\.desc(%2C|,)id\.desc/.test(c.busca) && /limit=500/.test(c.busca)),
+       lidas.map((c) => c.busca).join(" | "));
+    const ats = leu(/\/zorvin_atendimentos$/, /conversa_id=eq\.c1/)[0];
+    ok("os atendimentos são lidos como quem pediu (o bilhete da pessoa)", ats && ats.autorizacao === "Bearer jwt-bom", JSON.stringify(ats && ats.autorizacao));
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("as regras dizem que é a mesma conversa e o mesmo cliente: não pedir de novo o que ele já mandou",
+       /A CONVERSA INTEIRA/.test(sis) && /é a MESMA conversa, com o MESMO cliente/.test(sis) && /não peça de novo o que ele já mandou/.test(sis)
+       && /não o trate como um cliente novo/.test(sis), sis.slice(-1500));
+    // O "PEDIR UMA MUDANÇA" lê o mesmo.
+    const a = await post(t, "/copiloto/ajustar", { conversa_id: "c1", pedido: "Mais curto", sugestao: "Oi." });
+    const pa = conversaDoPedido(pedidoDe(claude.pedidos[claude.pedidos.length - 1]));
+    ok("o \"Pedir uma mudança\" também lê a conversa inteira, com as marcas", a.status === 200 && pa.includes("PRIMEIRA-DA-CONVERSA")
+       && pa.includes("atendimento finalizado pela equipe") && pa.includes("o cliente voltou a escrever"), pa.slice(0, 300));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 124b. a conversa de 1200: três páginas, além do teto do PostgREST ----
+  {
+    const msgs = conversaDe(1200);
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(msgs) });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const conv = conversaDoPedido(pedidoDe(claude.pedidos[0]));
+    const paginas = t.sb.chamadas.filter((c) => c.metodo === "GET" && /\/mensagens$/.test(c.caminho) && /conversa_id=eq\.c1/.test(c.busca)).length;
+    ok("124b a conversa de 1200 é lida em três páginas, e a primeira mensagem vai no pedido", r.status === 200 && paginas === 3
+       && conv.includes("PRIMEIRA-DA-CONVERSA") && conv.includes("ULTIMA-DA-CONVERSA"), `${paginas} páginas`);
+    const linhasMsg = conv.match(/: (mensagem \d+|PRIMEIRA-DA-CONVERSA|ULTIMA-DA-CONVERSA)\n/g) || [];
+    ok("as 1200, sem repetir nenhuma", linhasMsg.length === 1200 && new Set(linhasMsg).size === 1200, `${linhasMsg.length} linhas, ${new Set(linhasMsg).size} diferentes`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 124c. a conversa longa demais: o corte é pelo começo ----
+  {
+    // 300 mensagens de 400 caracteres: 120 mil, o dobro do teto de 60 mil.
+    const longo = (i) => `texto-${i}-${"x".repeat(392)}`;
+    const msgs = conversaDe(300, { textoDe: longo });
+    const ats = [
+      { id: "a1", protocolo: "2026-000777", conversa_id: "c1", origem: "cliente", aberto_em: msgs[0].criado_em, finalizado_em: new Date(Date.parse(msgs[20].criado_em) + 30000).toISOString() },
+      { id: "a2", protocolo: "2026-000888", conversa_id: "c1", origem: "reabertura", aberto_em: new Date(Date.parse(msgs[20].criado_em) + 40000).toISOString(),
+        finalizado_em: new Date(Date.parse(msgs[250].criado_em) + 30000).toISOString() },
+      { id: "a3", protocolo: "2026-000999", conversa_id: "c1", origem: "cliente", aberto_em: msgs[251].criado_em, finalizado_em: null },
+    ];
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(msgs, { zorvin_atendimentos: ats }) });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const conv = conversaDoPedido(pedidoDe(claude.pedidos[0]));
+    const corpoConv = conv.replace(/^<conversa>\n?/, "");
+    const m = /\(O começo desta conversa não coube aqui: (\d+) mensagens mais antigas ficaram de fora\.\)/.exec(conv);
+    ok("124c a conversa de 120 mil caracteres é cortada: o pedido diz quantas mensagens antigas ficaram de fora", r.status === 200 && m, conv.slice(0, 300));
+    const ficaram = m ? Number(m[1]) : -1;
+    const levou = (conv.match(/: (texto-\d+-x+|PRIMEIRA-DA-CONVERSA|ULTIMA-DA-CONVERSA)\n/g) || []).length;
+    ok("e a conta fecha: as que ficaram de fora mais as que foram somam 300", ficaram + levou === 300, `${ficaram} + ${levou}`);
+    ok("o corte é pelo COMEÇO: a última vai, a primeira não", conv.includes("ULTIMA-DA-CONVERSA") && !conv.includes("PRIMEIRA-DA-CONVERSA")
+       && conv.includes(`texto-${300 - 2}-`) && !conv.includes("texto-1-"), "");
+    ok("e a conversa no pedido fica dentro do teto de 60 mil caracteres", corpoConv.length <= 60000 + 200, `${corpoConv.length}`);
+    ok("a marca do atendimento de dentro do que coube vai; as de antes do corte, não",
+       conv.includes("o cliente voltou a escrever") && !conv.includes("a equipe reabriu o atendimento"), conv.match(/^--- .*$/gm));
+    ok("a linha do corte vem primeiro, antes de qualquer mensagem", /^<conversa>\n\(O começo desta conversa não coube aqui/.test(conv), conv.slice(0, 120));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 124d. sem a tabela dos atendimentos, e com a leitura falhando ----
+  {
+    const msgs = conversaDe(60);
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude), { tabelas: tabelas(msgs), semTabelas: ["zorvin_atendimentos"] });
+    const r = await post(t, "/copiloto/sugerir", { conversa_id: "c1" });
+    const conv = conversaDoPedido(pedidoDe(claude.pedidos[0]));
+    ok("124d sem a tabela dos atendimentos, a sugestão sai com a conversa inteira e sem marcas", r.status === 200
+       && conv.includes("PRIMEIRA-DA-CONVERSA") && !/^--- /m.test(conv), JSON.stringify(r));
+    ok("e calada: a tabela que falta não é falha", !/não consegui ler os atendimentos/.test(t.registro.join("")));
+    await t.parar();
+    const t2 = await subirTudo(comChave(claude), { tabelas: tabelas(msgs, { zorvin_atendimentos: atendimentos(conversaDe(150)) }),
+      quebrar: (metodo, tabela) => metodo === "GET" && tabela === "zorvin_atendimentos" && "banco caiu" });
+    const r2 = await post(t2, "/copiloto/sugerir", { conversa_id: "c1" });
+    ok("com a leitura dos atendimentos falhando, a sugestão sai assim mesmo, sem marcas, e o log diz",
+       r2.status === 200 && !/^--- /m.test(conversaDoPedido(pedidoDe(claude.pedidos[claude.pedidos.length - 1])))
+       && /não consegui ler os atendimentos da conversa/.test(t2.registro.join("")), JSON.stringify(r2));
+    await t2.parar(); await claude.parar();
+  }
+
+  // ---- 124e. a noite e o dia leem a conversa inteira, com as marcas ----
+  {
+    const msgs = conversaDe(150);
+    const ATE = new Date(AGORA + 9 * 3600000).toISOString();
+    const ultima = msgs[msgs.length - 1];
+    const ITEM = { conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo: "ensaio",
+                   fuso: "America/Sao_Paulo", ate: ATE, fechou_em: haMin(2000), cliente_ate: ultima.criado_em, cliente_ate_id: ultima.id };
+    const pendentes = (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || []).some((q) => q.cliente_ate_id === ultima.id) ? [] : [ITEM] });
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude, { QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400" }),
+      { tabelas: tabelas(msgs, { zorvin_atendimentos: atendimentos(msgs) }), rpcs: { zorvin_quazar_noturno_pendentes: pendentes } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    const conv = conversaDoPedido(pedidoDe(claude.pedidos[0]));
+    ok("124e o Quazar à noite lê a conversa inteira, com as marcas do atendimento finalizado e do reaberto",
+       conv.includes("PRIMEIRA-DA-CONVERSA") && conv.includes("atendimento finalizado pela equipe") && conv.includes("o cliente voltou a escrever"),
+       conv.slice(0, 300));
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("e as regras da noite dizem que é a mesma conversa", /A CONVERSA INTEIRA/.test(sis) && /é a MESMA conversa, com o MESMO cliente/.test(sis));
+    await t.parar(); await claude.parar();
+
+    const ITEM_DIA = { conversa_id: "c1", advogado_id: TELEFONE.id, telefone: "SAC", departamento: "Sucesso do Cliente",
+                       fuso: "America/Sao_Paulo", cliente_ate: ultima.criado_em, cliente_ate_id: ultima.id };
+    const pendDia = (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || []).some((q) => q.cliente_ate_id === ultima.id) ? [] : [ITEM_DIA] });
+    const claude2 = await subirClaude();
+    const t2 = await subirTudo(comChave(claude2, { QUAZAR_DIA_PRIMEIRA_MS: "200", QUAZAR_DIA_INTERVALO_MS: "400", VANTORO_API_URL: "", VANTORO_API_TOKEN: "" }),
+      { tabelas: tabelas(msgs, { zorvin_atendimentos: atendimentos(msgs) }), rpcs: { zorvin_quazar_de_dia_pendentes: pendDia } });
+    await esperaAte(() => claude2.pedidos.length >= 1);
+    const conv2 = conversaDoPedido(pedidoDe(claude2.pedidos[0]));
+    ok("o Quazar de dia também", conv2.includes("PRIMEIRA-DA-CONVERSA") && conv2.includes("atendimento finalizado pela equipe")
+       && conv2.includes("o cliente voltou a escrever") && /A CONVERSA INTEIRA/.test(sistemaDe(claude2.pedidos[0])), conv2.slice(0, 300));
+    await t2.parar(); await claude2.parar();
   }
 }
 

@@ -9649,10 +9649,26 @@ const QUAZAR_MODELO_BASTIDORES = String(process.env.QUAZAR_MODELO_BASTIDORES || 
 // O nome é para a equipe: a sugestão sai como se fosse a atendente, e um
 // cliente nunca lê "Quazar".
 const NOME_DO_ASSISTENTE = 'Quazar';
-// QUANTAS MENSAGENS O COPILOTO LÊ: quarenta cobrem o vaivém de um atendimento.
-// A conversa de dois anos inteira custaria mais e diria menos sobre a próxima
-// resposta.
-const COPILOTO_MENSAGENS = 40;
+// QUANTO O QUAZAR LÊ: A CONVERSA INTEIRA (24/11). Pedido do Rodrigo: "Quando
+// uma conversa for finalizada e reaberta, o Quazar tem que continuar lendo
+// toda a conversa." Até aqui ele lia as quarenta últimas mensagens, e o
+// cliente que voltou a escrever depois de finalizado perdia o atendimento de
+// antes: o documento que ele mandou, o que foi combinado, o que já foi
+// respondido. Medido em 24/11, só contando: das 96 respostas do Quazar à
+// noite (valendo) da semana, 47 foram em conversas com mais de 40 mensagens,
+// e 41 em conversas com um atendimento anterior. E as conversas são curtas em
+// texto: das 83 que ele respondeu, a mediana tinha 2,7 mil caracteres, e a
+// maior, 503 mensagens e 21 mil.
+//
+// Agora ele lê a conversa toda, em páginas, até COPILOTO_MENSAGENS_TETO, e o
+// pedido leva até COPILOTO_TETO_CONVERSA caracteres, cortando pelo COMEÇO
+// (as mais antigas) e dizendo quantas ficaram de fora (`conversaNoPedido`).
+// Os atendimentos finalizados e reabertos entram na conversa como linhas
+// "--- … ---" (`marcosDosAtendimentos`). Vale para tudo o que lê a conversa:
+// o "Sugerir resposta", o "Pedir uma mudança", a noite e o dia.
+const COPILOTO_MENSAGENS_TETO = 2000;
+const COPILOTO_PAGINA = 500;
+const COPILOTO_TETO_CONVERSA = 60000;
 const COPILOTO_TETO_TEXTO = 1200;   // caracteres por mensagem, transcrição ou rápida
 const COPILOTO_RAPIDAS = 60;
 // O MESMO PEDIDO DUAS VEZES AO MESMO TEMPO (dois cliques da mesma pessoa na
@@ -9744,6 +9760,17 @@ function regraDosArquivos(depois) {
   ].join('\n');
 }
 
+/** A conversa inteira (24/11): o Quazar lê desde o começo, e não só o
+ *  atendimento de agora. Uma escrita só, nas três regras. */
+function regraDaConversaInteira() {
+  return [
+    'A CONVERSA INTEIRA',
+    '- Em <conversa> está a conversa com este cliente desde o começo, e não só o atendimento de agora. As linhas "--- … ---" marcam quando um atendimento foi finalizado pela equipe e quando o cliente (ou a equipe) voltou a escrever depois.',
+    '- Um atendimento finalizado e reaberto é a MESMA conversa, com o MESMO cliente: o que ele já disse, mandou ou combinou antes continua valendo. Use isso: não peça de novo o que ele já mandou, não pergunte o que ele já respondeu e não o trate como um cliente novo. Responda o que ele pede agora.',
+    '- Se o começo da conversa não coube, o pedido diz quantas mensagens antigas ficaram de fora.',
+  ].join('\n');
+}
+
 const COPILOTO_REGRAS = [
   'Você é o copiloto de uma equipe de atendimento pelo WhatsApp de um escritório de advocacia. A cada pedido, você escreve UMA mensagem: a próxima que a atendente vai mandar ao cliente nesta conversa. Ela lê, corrige se precisar e só então envia.',
   '',
@@ -9769,6 +9796,8 @@ const COPILOTO_REGRAS = [
   regraDosAssuntosDaEquipe('escreva que vai verificar e já retorna.'),
   '',
   regraDosArquivos('Se a resposta depende do que está no arquivo, escreva só que recebeu: quem abre o arquivo é a atendente.'),
+  '',
+  regraDaConversaInteira(),
   '',
   'O QUE A EQUIPE JÁ TE ENSINOU',
   '- As lições (em <licoes>) são correções que a equipe já fez nas suas sugestões. Siga sempre: elas valem mais do que o manual e do que as notas aprendidas, porque são as mais recentes.',
@@ -10002,11 +10031,11 @@ function blocoDosExemplos(exemplos) {
     '<exemplos>', ...exemplos.map(exemploParaOCopiloto), '</exemplos>', ''];
 }
 
-function pedidoDoCopiloto({ mensagens, departamento, grupo, exemplos = [] }) {
+function pedidoDoCopiloto({ mensagens, marcos = [], departamento, grupo, exemplos = [] }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
   if (grupo) linhas.push('Esta conversa é um GRUPO do WhatsApp: a mensagem vai para todos os participantes.');
-  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...mensagens.map(linhaParaOCopiloto), '</conversa>', '',
+  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...conversaNoPedido(mensagens, linhaParaOCopiloto, marcos), '</conversa>', '',
     'Escreva a próxima mensagem da atendente.');
   return linhas.join('\n');
 }
@@ -10430,7 +10459,7 @@ async function sugerirResposta(jwt, conversaId) {
   const regras = pesquisa ? `${COPILOTO_REGRAS}\n\n${COPILOTO_REGRAS_DA_PESQUISA}` : COPILOTO_REGRAS;
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(manual, rapidas, licoes, regras), notasDoCopiloto(aprendido)],
-    pedidoDoCopiloto({ mensagens, departamento: departamento.nome, grupo, exemplos }),
+    pedidoDoCopiloto({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, exemplos }),
     pesquisa ? { ...PEDIDO_DA_SUGESTAO, tools: [pesquisa] } : PEDIDO_DA_SUGESTAO,
     { rota: 'sugerir', prazoMs: pesquisa ? 90000 : 45000 });
   if (!r.ok) {
@@ -10458,18 +10487,98 @@ async function sugerirResposta(jwt, conversaId) {
   return { status: 200, corpo: { ok: true, sugestao, pesquisou: pesquisasFeitas(r.corpo) > 0, fontes } };
 }
 
-/** O que a sugestão e o ajuste leem, igual nos dois: as quarenta mensagens
- *  (como quem pediu), o manual, as rápidas, o departamento, as lições e o que
- *  o copiloto aprendeu no telefone e no departamento. Devolve `falha` com a
- *  resposta pronta quando algo que importa não veio. */
+/** As mensagens da conversa INTEIRA (24/11), em páginas, das mais novas para
+ *  as mais antigas, até COPILOTO_MENSAGENS_TETO. O `id` desempata as da mesma
+ *  hora (o álbum de fotos): sem ele, uma página poderia repetir uma e pular
+ *  outra. Devolve `{ data, error }`, como uma leitura só, com as mais novas
+ *  primeiro. */
+async function lerMensagensParaOCopiloto(comoQuemPediu, conversaId) {
+  const vistas = new Set();
+  const data = [];
+  for (let de = 0; de < COPILOTO_MENSAGENS_TETO; de += COPILOTO_PAGINA) {
+    const ate = Math.min(de + COPILOTO_PAGINA, COPILOTO_MENSAGENS_TETO) - 1;
+    const { data: pagina, error } = await comoQuemPediu.from('mensagens').select('*').eq('conversa_id', conversaId)
+      .order('criado_em', { ascending: false }).order('id', { ascending: false }).range(de, ate);
+    if (error) return { data: null, error };
+    for (const m of pagina || []) {
+      if (vistas.has(m.id)) continue;
+      vistas.add(m.id);
+      data.push(m);
+    }
+    if (!pagina || pagina.length < ate - de + 1) break;
+  }
+  return { data, error: null };
+}
+
+/** Os atendimentos (028) viram linhas "--- … ---" na conversa: quando a
+ *  equipe finalizou, e quando a conversa foi reaberta. Sem o protocolo: ele é
+ *  só da equipe, e o Quazar não o diria a ninguém. O primeiro atendimento não
+ *  ganha linha de abertura (é o começo da conversa). Lidos COMO QUEM PEDIU.
+ *  Sem a tabela, ou com a leitura falhando, nenhuma linha: elas ajudam, e não
+ *  seguram a resposta. */
+async function marcosDosAtendimentos(comoQuemPediu, conversaId) {
+  const { data, error } = await comoQuemPediu.from('zorvin_atendimentos')
+    .select('aberto_em, origem, finalizado_em').eq('conversa_id', conversaId).order('aberto_em', { ascending: true });
+  if (error) {
+    if (!semATabela(error)) console.error('copiloto: não consegui ler os atendimentos da conversa — leio sem as marcas', error.code || '', error.message);
+    return [];
+  }
+  const marcos = [];
+  (data || []).forEach((a, i) => {
+    if (i > 0 && a.aberto_em) {
+      const quem = a.origem === 'reabertura' ? 'a equipe reabriu o atendimento'
+        : a.origem === 'equipe' ? 'a equipe voltou a escrever, e um atendimento novo começou'
+        : 'o cliente voltou a escrever, e o atendimento foi reaberto';
+      marcos.push({ marco: true, criado_em: a.aberto_em,
+        texto: `--- ${quandoCurto(a.aberto_em)}: ${quem}. É a mesma conversa: o que veio antes continua valendo. ---` });
+    }
+    if (a.finalizado_em) {
+      marcos.push({ marco: true, criado_em: a.finalizado_em,
+        texto: `--- ${quandoCurto(a.finalizado_em)}: atendimento finalizado pela equipe. ---` });
+    }
+  });
+  return marcos;
+}
+
+/** As linhas da conversa no pedido (24/11): as mensagens (e o que a noite e
+ *  o dia acrescentam) e as marcas dos atendimentos, na ordem em que
+ *  aconteceram — a marca vem antes da mensagem da mesma hora (a que reabriu o
+ *  atendimento). Cabem até COPILOTO_TETO_CONVERSA caracteres: o corte é pelo
+ *  COMEÇO, e uma linha diz quantas mensagens antigas ficaram de fora (as
+ *  marcas de antes do corte saem junto). */
+function conversaNoPedido(itens, linha, marcos = []) {
+  const quando = (x) => { const t = Date.parse(x && x.criado_em); return Number.isNaN(t) ? 0 : t; };
+  const todos = [...(itens || []), ...(marcos || [])]
+    .map((x, i) => ({ x, i }))
+    .sort((a, b) => (quando(a.x) - quando(b.x)) || ((b.x.marco ? 1 : 0) - (a.x.marco ? 1 : 0)) || (a.i - b.i))
+    .map((o) => o.x);
+  const linhas = todos.map((x) => (x.marco ? x.texto : linha(x)));
+  let usado = 0;
+  let inicio = linhas.length;
+  while (inicio > 0 && (usado + linhas[inicio - 1].length + 1 <= COPILOTO_TETO_CONVERSA || inicio === linhas.length)) {
+    usado += linhas[inicio - 1].length + 1;
+    inicio -= 1;
+  }
+  const ficaram = todos.slice(0, inicio).filter((x) => !x.marco).length;
+  const cabem = linhas.slice(inicio);
+  return ficaram
+    ? [`(O começo desta conversa não coube aqui: ${ficaram} ${ficaram === 1 ? 'mensagem mais antiga ficou' : 'mensagens mais antigas ficaram'} de fora.)`, ...cabem]
+    : cabem;
+}
+
+/** O que a sugestão e o ajuste leem, igual nos dois: a conversa inteira
+ *  (como quem pediu), as marcas dos atendimentos, o manual, as rápidas, o
+ *  departamento, as lições e o que o copiloto aprendeu no telefone e no
+ *  departamento. Devolve `falha` com a resposta pronta quando algo que
+ *  importa não veio. */
 async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
-  const [lidas, manual, rapidas, departamento, licoes] = await Promise.all([
-    comoQuemPediu.from('mensagens').select('*').eq('conversa_id', conversaId)
-      .order('criado_em', { ascending: false }).limit(COPILOTO_MENSAGENS),
+  const [lidas, manual, rapidas, departamento, licoes, marcos] = await Promise.all([
+    lerMensagensParaOCopiloto(comoQuemPediu, conversaId),
     lerManualDoCopiloto(),
     lerRapidasParaOCopiloto(),
     departamentoDoTelefone(comoQuemPediu, conversa.advogado_id),
     lerLicoesDoCopiloto(),
+    marcosDosAtendimentos(comoQuemPediu, conversaId),
   ]);
   if (lidas.error) {
     console.error('copiloto: não consegui ler as mensagens', lidas.error.message);
@@ -10486,8 +10595,8 @@ async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
     return { falha: { status: 502, corpo: { ok: false,
       erro: `Não consegui ler as lições do ${NOME_DO_ASSISTENTE}${licoes.erro.code ? ` (código ${licoes.erro.code})` : ''}. Tente de novo.` } } };
   }
-  // A MAIS NOVA VEIO PRIMEIRO (são as quarenta últimas); o modelo lê na ordem
-  // em que a conversa aconteceu.
+  // A MAIS NOVA VEIO PRIMEIRO; o modelo lê na ordem em que a conversa
+  // aconteceu.
   const mensagens = (lidas.data || []).slice().reverse();
   if (!mensagens.length) {
     return { falha: { status: 409, corpo: { ok: false, erro: 'Esta conversa ainda não tem mensagem — não há o que responder.' } } };
@@ -10497,7 +10606,7 @@ async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
     lerExemplosDoCopiloto(comoQuemPediu, conversaId, mensagens),
   ]);
   const grupo = String((conversa.contato && conversa.contato.numero) || '').startsWith('grupo:');
-  return { mensagens, manual: manual.manual, rapidas, departamento, licoes: licoes.licoes, aprendido, grupo, exemplos };
+  return { mensagens, marcos, manual: manual.manual, rapidas, departamento, licoes: licoes.licoes, aprendido, grupo, exemplos };
 }
 
 // ============================================================
@@ -10543,11 +10652,11 @@ function formatoDoAjuste() {
   };
 }
 
-function pedidoDoAjuste({ mensagens, departamento, grupo, mensagemDeAgora, pedido, exemplos = [] }) {
+function pedidoDoAjuste({ mensagens, marcos = [], departamento, grupo, mensagemDeAgora, pedido, exemplos = [] }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
   if (grupo) linhas.push('Esta conversa é um GRUPO do WhatsApp: a mensagem vai para todos os participantes.');
-  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...mensagens.map(linhaParaOCopiloto), '</conversa>', '');
+  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...conversaNoPedido(mensagens, linhaParaOCopiloto, marcos), '</conversa>', '');
   if (mensagemDeAgora) {
     linhas.push('A MENSAGEM DE AGORA, na caixa de escrever da atendente:', '<sugestao>', semAEtiqueta(mensagemDeAgora), '</sugestao>', '');
   } else {
@@ -10589,7 +10698,7 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   if (lido.falha) return lido.falha;
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
   const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
-    pedidoDoAjuste({ mensagens, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos }),
+    pedidoDoAjuste({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos }),
     { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } },
     { rota: 'ajustar' });
   if (!r.ok) {
@@ -11181,6 +11290,8 @@ const QUAZAR_NOITE_REGRAS = [
   '',
   regraDosArquivos('Agradeça e confirme que recebeu; a equipe confere quando voltar (se você já disse quando ela volta, não repita).'),
   '',
+  regraDaConversaInteira(),
+  '',
   'RECESSO',
   '- Quando o pedido disser que o escritório está EM RECESSO, diga ao cliente que o escritório está em recesso (fora temporariamente) e quando a equipe volta, e que a conversa dele fica guardada e a equipe continua o atendimento quando voltar. Use a palavra recesso; não diga que é fim de expediente.',
   '',
@@ -11270,7 +11381,7 @@ function linhaDaNoite(m) {
   return linhaParaOCopiloto(m);
 }
 
-function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, primeira, escritorio = '', recesso = false }) {
+function pedidoDaNoite({ mensagens, marcos = [], departamento, exemplos = [], volta, nome, primeira, escritorio = '', recesso = false }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (escritorio) linhas.push(`Nome do escritório: ${escritorio}.`);
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
@@ -11281,7 +11392,7 @@ function pedidoDaNoite({ mensagens, departamento, exemplos = [], volta, nome, pr
   linhas.push(primeira
     ? `Esta é a sua primeira mensagem para este cliente nesta noite: apresente-se ("Sou o ${NOME_DO_ASSISTENTE}, assistente virtual do escritório${escritorio ? ` ${escritorio}` : ''}").`
     : 'Você já respondeu este cliente nesta noite: não se apresente de novo. Não repita o que você já disse (quando a equipe volta, o que você já pediu): responda só o que é novo, em uma ou duas frases.');
-  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...mensagens.map(linhaDaNoite), '</conversa>', '',
+  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...conversaNoPedido(mensagens, linhaDaNoite, marcos), '</conversa>', '',
     'Responda a última mensagem do cliente, como o assistente virtual, ou diga por que não responder.');
   return linhas.join('\n');
 }
@@ -11346,7 +11457,7 @@ async function escreverANoite(item) {
 
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_NOITE_REGRAS), notasDoCopiloto(lido.aprendido)],
-    pedidoDaNoite({ mensagens, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
+    pedidoDaNoite({ mensagens, marcos: lido.marcos, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
                     volta: quandoVoltaPorExtenso(item.ate, item.fuso), nome: primeiroNomeDoContato(contato), primeira,
                     escritorio, recesso }),
     { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } },
@@ -11600,6 +11711,8 @@ const QUAZAR_DIA_REGRAS = [
   '',
   regraDosArquivos('Agradeça e confirme que recebeu; a equipe confere.'),
   '',
+  regraDaConversaInteira(),
+  '',
   'QUANDO NÃO RESPONDER',
   '- Mensagem de empresa, robô, propaganda ou cobrança de terceiros, e mensagem que não pede resposta (um "ok", um "obrigado", uma figurinha): responder = false, e em motivo diga por quê, numa frase curta.',
   '',
@@ -11667,7 +11780,7 @@ function textoDoCaso(c) {
   };
 }
 
-function pedidoDeDia({ mensagens, departamento, exemplos = [], nome, primeira, escritorio = '', caso }) {
+function pedidoDeDia({ mensagens, marcos = [], departamento, exemplos = [], nome, primeira, escritorio = '', caso }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (escritorio) linhas.push(`Nome do escritório: ${escritorio}.`);
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
@@ -11680,7 +11793,7 @@ function pedidoDeDia({ mensagens, departamento, exemplos = [], nome, primeira, e
     ? (caso.texto || 'O cadastro foi lido, e não há processo, intimação nem tarefa nele.')
     : `O caso NÃO foi lido (${(caso && caso.motivo) || 'motivo desconhecido'}). Não diga nada sobre o processo: diga que a equipe confere.`,
   '</caso>');
-  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...mensagens.map(linhaDaNoite), '</conversa>', '',
+  linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...conversaNoPedido(mensagens, linhaDaNoite, marcos), '</conversa>', '',
     'Responda a última mensagem do cliente, como o assistente virtual, ou diga por que não responder.');
   return linhas.join('\n');
 }
@@ -11715,7 +11828,7 @@ async function escreverDeDia(item) {
 
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_DIA_REGRAS), notasDoCopiloto(lido.aprendido)],
-    pedidoDeDia({ mensagens, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
+    pedidoDeDia({ mensagens, marcos: lido.marcos, departamento: lido.departamento.nome || item.departamento, exemplos: lido.exemplos,
                   nome: primeiroNomeDoContato(contato), primeira: !extras.length, escritorio, caso }),
     { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } },
     { rota: 'dia' });
