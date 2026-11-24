@@ -9783,6 +9783,20 @@ function regraDaConversaInteira() {
   ].join('\n');
 }
 
+/** Como tratar o cliente (24/11, caso de uma resposta do ensaio de dia que
+ *  saiu com "vai verificar com o senhor... com a senhora como seguir"). A IA
+ *  escreve de uma vez e não apaga: quando muda de ideia no meio, a correção
+ *  fica no texto. Uma escrita só, nas três regras. A segunda guarda, que não
+ *  depende de a IA obedecer, é `semTropecoDoTratamento`. */
+function regraDoTratamento() {
+  return [
+    'COMO TRATAR O CLIENTE',
+    '- Decida antes de escrever se vai usar "o senhor" ou "a senhora", pelo nome do cliente ou pelo que a conversa mostra. Na dúvida, use "o(a) senhor(a)" (e "do(a) senhor(a)", "ao(à) senhor(a)").',
+    '- A mensagem tem de sair pronta: nunca se corrija no meio do texto ("com o senhor... com a senhora"), não use reticências de hesitação e não recomece uma frase. Escreva a forma certa de uma vez.',
+    '- Não escreva as duas formas com barra ("o senhor/a senhora").',
+  ].join('\n');
+}
+
 /** Os arquivos que o cliente manda, para o Quazar que ABRE as fotos e os
  *  PDFs (24/11): a noite e o dia. A sugestão continua com `regraDosArquivos`
  *  (lá quem abre o arquivo é a atendente). `depois` diz o que fazer com o
@@ -9826,6 +9840,8 @@ const COPILOTO_REGRAS = [
   regraDosArquivos('Se a resposta depende do que está no arquivo, escreva só que recebeu: quem abre o arquivo é a atendente.'),
   '',
   regraDaConversaInteira(),
+  '',
+  regraDoTratamento(),
   '',
   'O QUE A EQUIPE JÁ TE ENSINOU',
   '- As lições (em <licoes>) são correções que a equipe já fez nas suas sugestões. Siga sempre: elas valem mais do que o manual e do que as notas aprendidas, porque são as mais recentes.',
@@ -10219,6 +10235,51 @@ function pesquisasFeitas(corpo) {
     .filter((b) => b && b.type === 'server_tool_use' && b.name === 'web_search').length;
 }
 
+// O TRATAMENTO NÃO SE CORRIGE NO MEIO DO TEXTO (24/11). A IA escreve de uma
+// vez e não apaga: quando muda de ideia entre "o senhor" e "a senhora", a
+// correção fica no texto ("vai verificar com o senhor... com a senhora como
+// seguir", numa resposta do ensaio de dia). A regra (`regraDoTratamento`) pede
+// para decidir antes; esta é a segunda guarda, e não depende de a IA obedecer.
+// Na dúvida, "o(a) senhor(a)" (pedido do Rodrigo): as formas emendadas por
+// reticências viram uma só, com o gênero em aberto ("com o(a) senhor(a) como
+// seguir"). Só age quando o que vem depois das reticências é uma forma de
+// tratamento do OUTRO gênero: "Vou verificar... e já retorno", "o senhor... o
+// senhor pode" (uma frase nova, talvez) e "o senhor... e a senhora" (os dois)
+// ficam como estão.
+const PREPOSICAO_DO_TRATAMENTO = '(?:com|para|pra|de|em)';
+const ARTIGO_DO_TRATAMENTO = '(?:o|a|os|as|do|da|dos|das|ao|à|aos|às|pelo|pela|pelos|pelas|no|na|nos|nas)';
+const FORMA_DO_TRATAMENTO = `(?:${PREPOSICAO_DO_TRATAMENTO}\\s+)?(?:${ARTIGO_DO_TRATAMENTO}\\s+)?senhor(?:a|es|as)?`;
+const RETICENCIAS_DO_TRATAMENTO = '\\s*(?:\\.{2,}|…)\\s*';
+const TROPECO_DO_TRATAMENTO = new RegExp(`(?<![\\p{L}\\p{N}])${FORMA_DO_TRATAMENTO}`
+  + `(?:${RETICENCIAS_DO_TRATAMENTO}${FORMA_DO_TRATAMENTO})+(?![\\p{L}\\p{N}])`, 'giu');
+const PEDACOS_DA_FORMA = new RegExp(`^(?:(${PREPOSICAO_DO_TRATAMENTO})\\s+)?(?:(${ARTIGO_DO_TRATAMENTO})\\s+)?(senhor(?:a|es|as)?)$`, 'iu');
+const ARTIGO_EM_ABERTO = {
+  o: 'o(a)', a: 'o(a)', os: 'os(as)', as: 'os(as)', do: 'do(a)', da: 'do(a)', dos: 'dos(as)', das: 'dos(as)',
+  ao: 'ao(à)', 'à': 'ao(à)', aos: 'aos(às)', 'às': 'aos(às)', pelo: 'pelo(a)', pela: 'pelo(a)',
+  pelos: 'pelos(as)', pelas: 'pelos(as)', no: 'no(a)', na: 'no(a)', nos: 'nos(as)', nas: 'nos(as)',
+};
+function umaFormaDoTratamento(emendadas) {
+  const formas = emendadas.split(new RegExp(RETICENCIAS_DO_TRATAMENTO, 'u'))
+    .map((f) => PEDACOS_DA_FORMA.exec(f.trim())).filter(Boolean)
+    .map(([, prep, art, nome]) => ({ prep: prep && prep.toLowerCase(), art: art && art.toLowerCase(), nome: nome.toLowerCase() }));
+  if (!formas.length) return emendadas;
+  const ultima = formas[formas.length - 1];
+  // A preposição e o artigo da última forma; faltando nela, os de antes:
+  // "com o senhor... a senhora" é "com o(a) senhor(a)".
+  const prep = [...formas].reverse().map((f) => f.prep).find(Boolean);
+  const art = ultima.art || [...formas].reverse().map((f) => f.art).find(Boolean);
+  const feminina = (f) => /a$|as$/.test(f.nome);
+  if (formas.every((f) => feminina(f) === feminina(ultima))) return emendadas;
+  const plural = /es$|as$/.test(ultima.nome);
+  const nome = plural ? 'senhores(as)' : 'senhor(a)';
+  const artigo = art ? ARTIGO_EM_ABERTO[art] || art : '';
+  const texto = [prep, artigo, nome].filter(Boolean).join(' ');
+  return /^\p{Lu}/u.test(emendadas) ? texto[0].toUpperCase() + texto.slice(1) : texto;
+}
+function semTropecoDoTratamento(texto) {
+  return String(texto || '').replace(TROPECO_DO_TRATAMENTO, (emendadas) => umaFormaDoTratamento(emendadas));
+}
+
 function textoDaSugestao(corpo) {
   const blocos = blocosDaRespostaFinal(corpo);
   let t = blocos.filter((b) => b && b.type === 'text').map((b) => String(b.text || '')).join('').trim();
@@ -10231,7 +10292,7 @@ function textoDaSugestao(corpo) {
       break;
     }
   }
-  return t;
+  return semTropecoDoTratamento(t);
 }
 
 /** A frase de cada recusa da Anthropic — dita para quem atende, com o que fazer. */
@@ -11855,6 +11916,8 @@ const QUAZAR_NOITE_REGRAS = [
   '',
   regraDaConversaInteira(),
   '',
+  regraDoTratamento(),
+  '',
   'RECESSO',
   '- Quando o pedido disser que o escritório está EM RECESSO, diga ao cliente que o escritório está em recesso (fora temporariamente) e quando a equipe volta, e que a conversa dele fica guardada e a equipe continua o atendimento quando voltar. Use a palavra recesso; não diga que é fim de expediente.',
   '',
@@ -12405,6 +12468,8 @@ const QUAZAR_DIA_REGRAS = [
   regraDosArquivosAbertos('Agradeça e confirme que recebeu; a equipe confere.'),
   '',
   regraDaConversaInteira(),
+  '',
+  regraDoTratamento(),
   '',
   'QUANDO NÃO RESPONDER',
   '- Mensagem de empresa, robô, propaganda ou cobrança de terceiros, e mensagem que não pede resposta (um "ok", um "obrigado", uma figurinha): responder = false, e em motivo diga por quê, numa frase curta.',

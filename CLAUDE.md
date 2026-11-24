@@ -3977,6 +3977,64 @@ resposta" a régua daqui continua: lá quem abre o arquivo é a atendente.
 Prova: seção 111 (as regras da noite e o pedido da segunda mensagem), seção 62
 (o "Sugerir resposta") e seção 123 (o dia).
 
+### O Quazar não se corrige no meio do texto (24/11)
+
+Pedido do Rodrigo, depois de ver os exemplos do ensaio de dia: *"Corrija esse
+tropeço do 'com o senhor... com a senhora'"*. Uma resposta do ensaio de dia
+(23/11, avaliada como boa) saiu com *"A equipe … vai verificar com o senhor...
+com a senhora como seguir"*. A IA escreve de uma vez e não apaga: quando muda
+de ideia no meio, a correção fica no texto. No ensaio ninguém recebeu; à noite
+(valendo), uma resposta assim iria ao cliente.
+
+E, sobre o que fazer na dúvida, a escolha dele: *"na dúvida ao invés de ficar
+só a última forma, é melhor fazer o tratamento como 'senhor(a)'"*.
+
+**Duas guardas, e a segunda não depende da primeira:**
+
+| onde | o quê |
+|---|---|
+| as três regras (a sugestão, a noite e o dia) | **COMO TRATAR O CLIENTE** (`regraDoTratamento`, uma escrita só): decidir antes de escrever se é "o senhor" ou "a senhora", pelo nome ou pelo que a conversa mostra; **na dúvida, "o(a) senhor(a)"** ("do(a) senhor(a)", "ao(à) senhor(a)"); nunca se corrigir no meio do texto, sem reticências de hesitação nem frase recomeçada; e nada de "o senhor/a senhora" |
+| o texto que volta da IA (`textoDaSugestao`) | `semTropecoDoTratamento`: as formas de gêneros diferentes emendadas por reticências viram uma só, em aberto ("com o senhor... com a senhora como seguir" vira "com o(a) senhor(a) como seguir") |
+
+- **A guarda vale para tudo que passa por `textoDaSugestao`**: o "Sugerir
+  resposta", o "Pedir uma mudança", o "Melhorar o texto", o Quazar à noite (o
+  ensaio e o valendo) e o de dia.
+- **A forma em aberto acompanha a preposição e o artigo**: "o(a)", "do(a)",
+  "ao(à)", "pelo(a)", "no(a)", e no plural "aos(às) senhores(as)". A preposição
+  vem da última forma ou, faltando nela, da de antes ("para o senhor... a
+  senhora" vira "para o(a) senhor(a)"). No começo da frase, com maiúscula.
+- **Ela só age quando as formas são de gêneros diferentes.** Ficam como estão:
+  "Vou verificar... e já retorno", "Fale com a senhora... ela sabe", "o
+  senhor... o senhor pode" (o mesmo gênero; pode ser uma frase nova) e "o
+  senhor... e a senhora também" (os dois, de propósito).
+- **Duas correções seguidas** ("O senhor... A senhora... o senhor pode")
+  viram uma forma só ("O(a) senhor(a) pode").
+- **A primeira escrita deixava só a última forma** ("com a senhora"), e foi
+  trocada pela forma em aberto a pedido do Rodrigo, antes da PR.
+- **Nenhum SQL.** As regras mudaram, e a primeira chamada de cada uma escreve
+  o cache de novo (uma vez).
+
+Prova: seção 131 (a guarda pela sugestão e pelo "Melhorar o texto", catorze
+casos; a regra nas duas; e o ensaio de dia guardando a resposta já com "o(a)
+senhor(a)"), e a 111b confere a regra na noite.
+
+**14 sabotagens e 14 pegas**, rodadas em cópias e lidas uma a uma (e a cópia
+de controle passou inteira):
+
+- a ponte de antes inteira (14 reprovações);
+- **a regra:** sem ela nas três; sem ela só na noite; a regra da primeira
+  escrita (na dúvida, sem pronome);
+- **a guarda:** sem ela (10); ficando com a última forma, a primeira escrita
+  (10); sem a maiúscula da frase; sem a preposição da forma de antes; sem o
+  artigo em aberto (10); o mesmo gênero também virando a forma em aberto; o
+  plural virando singular; a reticência de um caractere não contando; o "e"
+  contando como preposição; e a guarda só na sugestão, sem o JSON da noite e
+  do dia (pega pela 131b).
+
+**A primeira rodada não mediu nada**: o script das sabotagens rodava as
+seções da voz (56, 126 a 128), de uma rodada anterior, e as quinze "vazaram".
+Apontado para a 111 e a 131, a rodada foi refeita inteira.
+
 ### O Quazar lê a conversa inteira, também a finalizada e reaberta (24/11)
 
 Pedido do Rodrigo: *"Quando uma conversa for finalizada e reaberta, o Quazar
