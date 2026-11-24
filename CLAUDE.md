@@ -4018,6 +4018,23 @@ Prova: seção 131 (a guarda pela sugestão e pelo "Melhorar o texto", catorze
 casos; a regra nas duas; e o ensaio de dia guardando a resposta já com "o(a)
 senhor(a)"), e a 111b confere a regra na noite.
 
+**14 sabotagens e 14 pegas**, rodadas em cópias e lidas uma a uma (e a cópia
+de controle passou inteira):
+
+- a ponte de antes inteira (14 reprovações);
+- **a regra:** sem ela nas três; sem ela só na noite; a regra da primeira
+  escrita (na dúvida, sem pronome);
+- **a guarda:** sem ela (10); ficando com a última forma, a primeira escrita
+  (10); sem a maiúscula da frase; sem a preposição da forma de antes; sem o
+  artigo em aberto (10); o mesmo gênero também virando a forma em aberto; o
+  plural virando singular; a reticência de um caractere não contando; o "e"
+  contando como preposição; e a guarda só na sugestão, sem o JSON da noite e
+  do dia (pega pela 131b).
+
+**A primeira rodada não mediu nada**: o script das sabotagens rodava as
+seções da voz (56, 126 a 128), de uma rodada anterior, e as quinze "vazaram".
+Apontado para a 111 e a 131, a rodada foi refeita inteira.
+
 ### O Quazar lê a conversa inteira, também a finalizada e reaberta (24/11)
 
 Pedido do Rodrigo: *"Quando uma conversa for finalizada e reaberta, o Quazar
