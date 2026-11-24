@@ -10599,8 +10599,10 @@ function conversaNoPedido(itens, linha, marcos = []) {
  *  (como quem pediu), as marcas dos atendimentos, o manual, as rápidas, o
  *  departamento, as lições e o que o copiloto aprendeu no telefone e no
  *  departamento. Devolve `falha` com a resposta pronta quando algo que
- *  importa não veio. */
-async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
+ *  importa não veio. `semMensagensServe` (o "Melhorar o texto", 24/11): a
+ *  conversa sem mensagem não é falha, porque o texto da atendente pode ser o
+ *  primeiro dela. */
+async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId, { semMensagensServe = false } = {}) {
   const [lidas, manual, rapidas, departamento, licoes, marcos] = await Promise.all([
     lerMensagensParaOCopiloto(comoQuemPediu, conversaId),
     lerManualDoCopiloto(),
@@ -10627,7 +10629,7 @@ async function lerParaOCopiloto(comoQuemPediu, conversa, conversaId) {
   // A MAIS NOVA VEIO PRIMEIRO; o modelo lê na ordem em que a conversa
   // aconteceu.
   const mensagens = (lidas.data || []).slice().reverse();
-  if (!mensagens.length) {
+  if (!mensagens.length && !semMensagensServe) {
     return { falha: { status: 409, corpo: { ok: false, erro: 'Esta conversa ainda não tem mensagem — não há o que responder.' } } };
   }
   const [aprendido, exemplos] = await Promise.all([
@@ -10820,6 +10822,10 @@ app.get('/copiloto/estado', (req, res) => {
              // conversas está ligada (falso com COPILOTO_APRENDER=desligado).
              ajustar: true,
              aprende: !COPILOTO_APRENDER_DESLIGADO,
+             // O "MELHORAR O TEXTO" (24/11): `melhorar` diz que ESTA ponte
+             // melhora o texto que a atendente escreveu. A ponte de antes não
+             // manda a chave, e o painel não oferece o Quazar com texto na caixa.
+             melhorar: true,
              // O QUAZAR À NOITE (055): `noite` diz se ESTA ponte escreve as
              // respostas da noite (falso com QUAZAR_NOITE=desligado). A ponte de
              // antes não manda a chave, e a aba Fora do horário diz isso.
@@ -10910,6 +10916,151 @@ app.post('/copiloto/ajustar', async (req, res) => {
     const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
       ? 'A Anthropic demorou demais para responder. Tente de novo.'
       : `O ${NOME_DO_ASSISTENTE} não conseguiu mudar a mensagem: ${String((e && e.message) || e).slice(0, 160)}`;
+    console.error('copiloto:', (e && e.message) || e);
+    return res.status(502).json({ ok: false, erro: motivo });
+  }
+});
+
+// ============================================================
+//  "MELHORAR O TEXTO" (24/11)
+//
+//  Pedido do Rodrigo: "uma atualização onde após digitar um texto na
+//  conversa, a opção do Quazar estar disponível para melhorar o texto."
+//
+//  A atendente escreveu a mensagem, e o Quazar a devolve melhorada: a escrita
+//  corrigida (ortografia, acentos, pontuação, concordância), clara e no jeito
+//  da equipe, SEM MUDAR O SENTIDO. Ele lê o mesmo que a sugestão lê (a
+//  conversa, o manual, as lições, as notas e os exemplos de verdade), para
+//  saber o caso e o jeito de escrever; mas o que vale é o que ela escreveu:
+//  nada acrescentado (prazo, valor, data, promessa), nada tirado, e os nomes
+//  como ela escreveu. Um valor ou um resultado que está no texto dela fica:
+//  a regra de não dizer valor é para o que o Quazar escreve sozinho.
+//
+//  NÃO HÁ LIÇÃO: o pedido é sempre o mesmo ("melhore"), e não ensina regra
+//  nenhuma ao escritório. Quem quiser ensinar usa o "Pedir uma mudança",
+//  que o painel oferece logo depois.
+//
+//  A MELHORADA NÃO SAI SOZINHA: volta para a caixa, à vista de quem escreveu.
+//  O pedido que deu certo é anotado ('melhorar', aceito desde o 063), e a
+//  mensagem que sai com o texto melhorado leva a marca 'melhorada' (quem
+//  marca é o painel, na fila).
+//
+//  A CONVERSA SEM MENSAGEM SERVE (`semMensagensServe`): o texto pode ser o
+//  primeiro da conversa (a "Nova conversa"). Melhorar não depende de haver o
+//  que responder.
+//
+//  O SISTEMA É O DO "PEDIR UMA MUDANÇA" (as regras, o manual, as rápidas, as
+//  lições e as notas), com o cache de 5 minutos: os dois guardam o mesmo
+//  começo de pedido, e um reaproveita o do outro. As instruções de melhorar
+//  vão no pedido, e não nas regras: no sistema, elas iriam em toda sugestão.
+// ============================================================
+const melhoriasEmVoo = new Map();
+
+function pedidoDaMelhoria({ mensagens, marcos = [], departamento, grupo, texto, exemplos = [] }) {
+  const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
+  if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
+  if (grupo) linhas.push('Esta conversa é um GRUPO do WhatsApp: a mensagem vai para todos os participantes.');
+  linhas.push('', ...blocoDosExemplos(exemplos));
+  if (mensagens.length) {
+    linhas.push('<conversa>', ...conversaNoPedido(mensagens, linhaParaOCopiloto, marcos), '</conversa>', '');
+  } else {
+    linhas.push('Esta conversa ainda não tem mensagem: o texto da atendente vai ser o primeiro.', '');
+  }
+  linhas.push('O TEXTO QUE A ATENDENTE ESCREVEU, na caixa de escrever:', '<sugestao>', semAEtiqueta(texto), '</sugestao>', '',
+    'A atendente pediu para MELHORAR o texto dela. Devolva só o texto melhorado, pronto para enviar, sem aspas e sem explicação:',
+    '- corrija a escrita: ortografia, acentos, pontuação, concordância e letra maiúscula;',
+    '- deixe claro, educado e no jeito da equipe (os exemplos), com o tom dela;',
+    '- NÃO mude o sentido: o que ela disse, perguntou, pediu ou prometeu continua igual. Não acrescente informação que ela não escreveu (número de processo, valor, data, prazo, nome, promessa, pedido de documento) e não tire nada do que ela escreveu;',
+    '- o que ela escreveu é decisão dela: um valor, um resultado, um prazo ou um dado que está no texto dela fica como está (as regras de não dizer valor e resultado valem para o que você escreve sozinho, e não para o texto dela);',
+    '- mantenha os nomes como ela escreveu, sem trocar por marcadores entre chaves, e não acrescente cumprimento nem despedida que ela não pôs;',
+    '- mantenha o tamanho parecido: não transforme duas linhas num texto longo, e não divida em lista;',
+    '- se o texto já está bom, devolva igual, só com as correções que precisar.');
+  return linhas.join('\n');
+}
+
+/** Mesma escrita para o texto que entrou e o que voltou, para dizer se o
+ *  Quazar não mudou nada: os espaços de sobra não contam. */
+const mesmoTexto = (a, b) => String(a || '').replace(/\s+/g, ' ').trim() === String(b || '').replace(/\s+/g, ' ').trim();
+
+async function melhorarTexto(jwt, conversaId, texto) {
+  const inicio = Date.now();
+  const comoQuemPediu = bancoComo(jwt);
+  const { data: conversas, error: erroConversa } = await comoQuemPediu
+    .from('conversas').select('id, advogado_id, contato:contato_id(numero)').eq('id', conversaId).limit(1);
+  if (erroConversa) {
+    console.error('copiloto: não consegui ler a conversa', erroConversa.message);
+    return { status: 502, corpo: { ok: false,
+      erro: `Não consegui ler a conversa${erroConversa.code ? ` (código ${erroConversa.code})` : ''}.` } };
+  }
+  const conversa = (conversas || [])[0];
+  if (!conversa) return { status: 404, corpo: { ok: false, erro: 'Não achei esta conversa.' } };
+
+  const lido = await lerParaOCopiloto(comoQuemPediu, conversa, conversaId, { semMensagensServe: true });
+  if (lido.falha) return lido.falha;
+  const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
+  const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
+    pedidoDaMelhoria({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, texto, exemplos }),
+    PEDIDO_DA_SUGESTAO, { rota: 'melhorar' });
+  if (!r.ok) {
+    console.error(`copiloto: a Anthropic respondeu ${r.status}`,
+      JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
+    return { status: 502, corpo: { ok: false, erro: explicarFalhaDaAnthropic(r.status, r.corpo) } };
+  }
+  if (r.corpo && r.corpo.stop_reason === 'refusal') {
+    return { status: 502, corpo: { ok: false,
+      erro: `O ${NOME_DO_ASSISTENTE} preferiu não mexer neste texto. Envie como está, ou corrija à mão.` } };
+  }
+  if (r.corpo && r.corpo.stop_reason === 'max_tokens') {
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não terminou de responder desta vez. Tente de novo.` } };
+  }
+  const sugestao = textoDaSugestao(r.corpo);
+  if (!sugestao) {
+    return { status: 502, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} não devolveu o texto desta vez. Tente de novo.` } };
+  }
+  // SÓ NÚMEROS NO LOG: o que a atendente escreveu e o que voltou não vão
+  // para lá (a régua da mídia recebida).
+  const uso = (r.corpo && r.corpo.usage) || {};
+  console.log(`copiloto: texto melhorado em ${Date.now() - inicio} ms — ${mensagens.length} mensagens lidas, `
+    + `${texto.length} caracteres escritos, ${sugestao.length} devolvidos; `
+    + `${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
+    + `${uso.output_tokens || 0} de saída.`);
+  return { status: 200, corpo: { ok: true, sugestao, igual: mesmoTexto(sugestao, texto) } };
+}
+
+app.post('/copiloto/melhorar', async (req, res) => {
+  liberarCors(res);
+  try {
+    const usuario = await exigirLogin(req, res);
+    if (!usuario) return;
+    const conversaId = String((req.body && req.body.conversa_id) || '').trim();
+    const texto = String((req.body && req.body.texto) || '').trim();
+    if (!conversaId) return res.status(400).json({ ok: false, erro: 'Informe a conversa.' });
+    if (!texto) return res.status(400).json({ ok: false, erro: `Escreva o texto antes de pedir ao ${NOME_DO_ASSISTENTE} para melhorar.` });
+    if (texto.length > COPILOTO_TETO_MENSAGEM_DE_AGORA) {
+      return res.status(400).json({ ok: false, erro: `O texto passa de ${COPILOTO_TETO_MENSAGEM_DE_AGORA} caracteres.` });
+    }
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(503).json({ ok: false, erro:
+        `O ${NOME_DO_ASSISTENTE} ainda não está ligado: falta a variável ANTHROPIC_API_KEY na Render (serviço da ponte).` });
+    }
+    const jwt = String(req.headers.authorization || '').slice(7).trim();
+    // O MESMO TEXTO DUAS VEZES (o duplo clique) é uma ida só, e um pedido
+    // anotado; outro texto é outra ida.
+    const chave = `${usuario.id}:${conversaId}:${crypto.createHash('sha256').update(texto).digest('hex')}`;
+    let promessa = melhoriasEmVoo.get(chave);
+    if (!promessa) {
+      promessa = melhorarTexto(jwt, conversaId, texto).then((r) => {
+        if (r && r.status === 200 && r.corpo && r.corpo.sugestao) anotarSugestao(usuario.id, conversaId, 'melhorar');
+        return r;
+      }).finally(() => melhoriasEmVoo.delete(chave));
+      melhoriasEmVoo.set(chave, promessa);
+    }
+    const r = await promessa;
+    return res.status(r.status).json(r.corpo);
+  } catch (e) {
+    const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
+      ? 'A Anthropic demorou demais para responder. Tente de novo.'
+      : `O ${NOME_DO_ASSISTENTE} não conseguiu melhorar o texto: ${String((e && e.message) || e).slice(0, 160)}`;
     console.error('copiloto:', (e && e.message) || e);
     return res.status(502).json({ ok: false, erro: motivo });
   }

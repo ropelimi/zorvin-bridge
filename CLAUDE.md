@@ -4120,6 +4120,85 @@ Hoje o `webm` vem antes, e o nome diz o que o arquivo é.
 Prova: seção 126, 23 conferências, com um Groq de mentira que guarda cada
 pedido.
 
+### "Melhorar o texto" (script 063, 24/11)
+
+Pedido do Rodrigo: *"O que eu preciso agora é de uma atualização onde após
+digitar um texto na conversa, a opção do Quazar estar disponível para melhorar
+o texto."*
+
+`POST /copiloto/melhorar` (`{ conversa_id, texto }`, com login) devolve
+`{ ok, sugestao, igual }`: o texto que a atendente escreveu, melhorado. A tela
+está no CLAUDE.md do painel ("O Quazar melhora o texto").
+
+- **Sem mudar o sentido.** As instruções vão no pedido (`pedidoDaMelhoria`):
+  corrigir a escrita (ortografia, acentos, pontuação, concordância), deixar
+  claro e no jeito da equipe; não acrescentar o que ela não escreveu (processo,
+  valor, data, prazo, nome, promessa, pedido de documento) e não tirar nada;
+  os nomes como ela escreveu, sem marcadores, sem cumprimento nem despedida a
+  mais, e o tamanho parecido. Se já está bom, volta igual.
+- **O que ela escreveu é decisão dela**: um valor ou um resultado que está no
+  texto dela fica. A regra dos assuntos da equipe (19/11) é para o que o
+  Quazar escreve sozinho.
+- **Lê o mesmo que a sugestão**: a conversa inteira, o manual, as rápidas, as
+  lições, as notas e os exemplos, como quem pediu. **A conversa sem mensagem
+  serve** (`semMensagensServe`, em `lerParaOCopiloto`): o texto pode ser o
+  primeiro dela, e o pedido diz isso.
+- **O sistema é o do "Pedir uma mudança"**, com o cache de 5 minutos: os dois
+  guardam o mesmo começo de pedido. As instruções de melhorar ficam no pedido,
+  e não nas regras, que iriam em toda sugestão. O teto e o esforço são os da
+  sugestão (`PEDIDO_DA_SUGESTAO`), e não há pesquisa na internet.
+- **Não há lição**: o pedido é sempre o mesmo, e não ensina regra nenhuma.
+  Quem quiser ensinar usa o "Pedir uma mudança", que o painel oferece depois.
+- **`igual`** diz que o Quazar não mudou nada (os espaços de sobra não
+  contam), para a tela dizer isso em vez de parecer que não fez nada.
+- **O texto não fecha o bloco por escrito** (`semAEtiqueta`). Teto de 4000
+  caracteres, como a mensagem de agora do ajuste.
+- **O pedido que deu certo é anotado** (`zorvin_sugestoes`, tipo
+  `'melhorar'`); dois cliques com o mesmo texto são uma ida e um pedido
+  (`melhoriasEmVoo`). A recusa da IA e a resposta cortada no teto não são
+  anotadas, e a recusa diz *"Envie como está, ou corrija à mão"*.
+- **Só números no log.** `/copiloto/estado` diz `melhorar: true`: a ponte de
+  antes não diz, e o painel não oferece o Quazar com texto na caixa.
+
+**O script 063** (`sql/automaticos/063-o-quazar-melhora-o-texto.sql`):
+
+| peça | o quê |
+|---|---|
+| `fila_envio.sugestao_quazar`, `mensagens.sugestao_quazar` | aceitam `'melhorada'`: a mensagem que a pessoa escreveu e o Quazar melhorou. Quem marca é o painel; a ponte já copia a marca da fila para a mensagem, qualquer que seja |
+| `zorvin_sugestoes.tipo` | aceita `'melhorar'`. A regra nasceu sem nome no 060 (`zorvin_sugestoes_tipo_check`): sai toda regra da tabela que fala do tipo, e entra uma com nome (`zorvin_sugestoes_tipo_valido`) |
+| `zorvin_relatorio_sugestoes` | `melhorias` (pedidos) e `melhoradas` (mensagens), no total, por pessoa, por dia e no período anterior. **`usadas` passa a contar só `'igual'` e `'editada'`**: com as melhoradas dentro, a parte das pedidas passaria de 100%. Para os dados de antes, nada muda |
+
+- **O 063 é a versão de referência do relatório** (regra 5): o 060 rodado de
+  novo depois dele põe a conta sem as melhorias, e o 063, na ordem da pasta, a
+  devolve.
+- **Sem o 060**, diz que falta e não mexe em nada.
+- **A conferência chama o relatório no papel de quem atende**, e exige as
+  melhoradas na resposta.
+
+Provas: seção 129 (o 063 num Postgres de verdade, 23 conferências) e seção 130
+(a rota, 32). **19 sabotagens e 19 pegas**, rodadas em cópias e lidas uma a
+uma:
+
+- **a rota:** a ponte de antes (sem a rota, 26 reprovações); anotando
+  `'sugerir'`; sem a conversa vazia servir; o texto sem `semAEtiqueta`; o cache
+  de 1 hora; sem juntar os cliques; sem a regra da decisão dela; sem o "NÃO
+  mude o sentido"; o `igual` sem normalizar os espaços; o log com o texto; o
+  estado sem `melhorar`; sem o corte no teto;
+- **o 063:** `usadas` contando as melhoradas; sem tirar a regra antiga do tipo
+  (`'melhorar'` recusado, e duas regras); a mensagem sem `'melhorada'`; a fila
+  sem `'melhorada'`; por pessoa sem as melhoradas; o período anterior sem as
+  melhoradas; sem a guarda do 060.
+
+**Duas lições desta rodada, as duas da prova:**
+
+- **a anotação sai por fora, depois da resposta**: a conferência de que a
+  recusa e o corte não são anotados contava também a anotação atrasada do
+  pedido anterior, e reprovou com a ponte certa. Hoje ela espera as três
+  anotações de antes chegarem;
+- **a sabotagem da guarda do 060 vazou, e a culpa era dela**: `if false and A
+  or B` ainda avalia `B`, porque o `and` vem antes do `or`. Refeita tirando a
+  frase e o `return` da guarda, ela é pega. É a lição do 044 outra vez.
+
 ### A voz do Quazar (script 062, 24/11)
 
 Pedido do Rodrigo: *"no ícone de pergaminho onde temos o resumo da conversa,
@@ -4292,6 +4371,11 @@ relatório para isso."*
 | `fila_envio.sugestao_quazar` e `mensagens.sugestao_quazar` | `'igual'` (saiu como o Quazar escreveu), `'editada'` (a pessoa mexeu antes de mandar) ou nulo (escrita sem ele). Quem marca é o painel, na fila; a ponte copia para a mensagem ao gravá-la (`gravarEnviadaNoHistorico`) |
 | `zorvin_sugestoes` | cada "Sugerir resposta" (`sugerir`) e "Pedir uma mudança" (`ajustar`) que deu certo: quem pediu, qual conversa, quando. Só a ponte escreve (`anotarSugestao`) |
 | `zorvin_relatorio_sugestoes(desde, ate, quem, fuso, telefone, departamento)` | pedidas, mudanças pedidas, usadas (sem mudança e editadas) e escritas (as mensagens de texto que a pessoa mandou pelo painel), por pessoa e por dia, e o período anterior |
+
+**Desde 24/11 (o 063) há uma terceira marca, `'melhorada'`, e um terceiro
+pedido, `'melhorar'`**: o "Melhorar o texto". O relatório os conta à parte, e
+o 063 é a versão de referência dele — ver "Melhorar o texto (script 063,
+24/11)".
 
 - **O cliente não recebe nada disto**: a marca é uma coluna, e o que vai à
   Uazapi continua sendo só o texto (a seção 120 confere).
