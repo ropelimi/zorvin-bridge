@@ -22666,6 +22666,8 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
        /NAS MENSAGENS SEGUINTES DA NOITE/.test(sis) && /Não repita nada disso/.test(sis) && /nem quando a equipe volta/.test(sis)
        && /nem o pedido de um documento ou de uma informação que você já fez/.test(sis) && /agradeça e confirme que recebeu, numa frase, e pare aí/.test(sis)
        && /de uma a duas nas seguintes/.test(sis), sis.slice(0, 1500));
+    ok("e que decide antes se é \"o senhor\" ou \"a senhora\", sem se corrigir no meio do texto (24/11)",
+       /COMO TRATAR O CLIENTE/.test(sis) && /nunca se corrija no meio do texto/.test(sis), sis.slice(-2500));
     ok("e que não diz o que um arquivo é pelo nome dele (a conta de luz chamada \"Boleto\") (23/11)",
        /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /uma conta de luz pode se chamar "Boleto"/.test(sis)
        && /nunca diga o que o arquivo é/.test(sis) && /não peça outro documento por causa do nome/.test(sis), sis.slice(-2500));
@@ -26476,6 +26478,124 @@ console.log("\n130. O Quazar melhora o texto — a ponte");
        pv.slice(0, 600));
     const naoVe = await post(t, { conversa_id: "c-que-nao-existe", texto: "oi" });
     ok("e a conversa que a pessoa não alcança: 'não achei'", naoVe.status === 404, JSON.stringify(naoVe));
+    await t.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+//  131. O QUAZAR NÃO SE CORRIGE NO MEIO DO TEXTO (24/11)
+//
+//  Caso de verdade: uma resposta do ensaio de dia saiu com "vai verificar
+//  com o senhor... com a senhora como seguir". A seção guarda:
+//    - a regra do tratamento nas três regras (a sugestão, a noite e o dia);
+//    - a regra diz: na dúvida, "o(a) senhor(a)" (pedido do Rodrigo);
+//    - a guarda no texto que volta da IA: as formas de gêneros diferentes
+//      emendadas por reticências viram uma só, "o(a) senhor(a)", com a
+//      preposição e o artigo certos ("ao(à)", "do(a)", "aos(às) senhores(as)")
+//      e a maiúscula do começo da frase;
+//    - o que fica como está: reticências que não são correção, o mesmo gênero
+//      nas duas formas, e os dois tratamentos juntos ("o senhor... e a
+//      senhora");
+//    - a resposta do ensaio de dia é guardada já limpa.
+// ============================================================
+console.log("\n131. O Quazar não se corrige no meio do texto");
+{
+  const cena = { texto: "" };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      // O ensaio de dia pede JSON (o formato da resposta); a sugestão e o
+      // "Melhorar o texto", só o texto.
+      const querJson = Boolean(json && json.output_config && json.output_config.format);
+      const texto = querJson ? JSON.stringify({ responder: true, mensagem: cena.texto, resumo: "Quis saber do processo.", motivo: "" }) : cena.texto;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: texto }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const tabelas = () => ({
+    contatos: [{ id: "k1", numero: "5571900000001", nome: "Cliente de Prova" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aguardando" }],
+    mensagens: [{ id: "m3", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Bom dia, pode verificar a taxa?", criado_em: haMin(5) }],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+    zorvin_quazar_noturno: [],
+    zorvin_sugestoes: [],
+    fila_envio: [],
+  });
+  const post = (t, rota, corpo) => fetch(`http://127.0.0.1:${t.porta}${rota}`, {
+    method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => null) })).catch((e) => ({ status: 0, corpo: { erro: e.message } }));
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const regraNoSistema = (sis) => /COMO TRATAR O CLIENTE/.test(sis)
+    && /Decida antes de escrever se vai usar "o senhor" ou "a senhora"/.test(sis)
+    && /nunca se corrija no meio do texto \("com o senhor\.\.\. com a senhora"\)/.test(sis)
+    && /Na dúvida, use "o\(a\) senhor\(a\)"/.test(sis)
+    && !/Não use formas com parênteses/.test(sis);
+
+  // ---- 131a. a sugestão e o "Melhorar o texto": a regra, e o texto limpo ----
+  {
+    const claude = await subirClaude();
+    let i = 0;
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_PESQUISA: "desligada" },
+      { tabelas: tabelas() });
+    const casos = [
+      ["Bom dia! A equipe vai verificar com o senhor... com a senhora como seguir.", "Bom dia! A equipe vai verificar com o(a) senhor(a) como seguir.",
+       "as duas formas viram \"o(a) senhor(a)\", com a preposição (o caso de verdade)"],
+      ["O senhor... A senhora pode mandar o comprovante?", "O(a) senhor(a) pode mandar o comprovante?", "no começo do texto, com a maiúscula"],
+      ["Recebi, obrigada. O senhor… a senhora já tem o comprovante?", "Recebi, obrigada. O(a) senhor(a) já tem o comprovante?",
+       "com a reticência de um caractere só, no começo da frase"],
+      ["Vou explicar à senhora... ao senhor o que aconteceu.", "Vou explicar ao(à) senhor(a) o que aconteceu.", "ao contrário (a senhora, depois o senhor), com \"ao(à)\""],
+      ["Ele falou da senhora...do senhor também.", "Ele falou do(a) senhor(a) também.", "com \"do(a)\", sem espaço depois das reticências"],
+      ["A equipe agradece aos senhores... às senhoras.", "A equipe agradece aos(às) senhores(as).", "no plural"],
+      ["Vou ligar para o senhor... a senhora amanhã.", "Vou ligar para o(a) senhor(a) amanhã.", "a preposição da primeira forma fica, quando a última não tem"],
+      ["Vou verificar com o senhor ...com a senhora e já retorno.", "Vou verificar com o(a) senhor(a) e já retorno.", "com o espaço antes das reticências"],
+      ["O senhor... A senhora... o senhor pode aguardar.", "O(a) senhor(a) pode aguardar.", "duas correções seguidas viram uma forma só"],
+      ["Vou verificar com o senhor... o senhor pode aguardar.", "Vou verificar com o senhor... o senhor pode aguardar.", "o mesmo gênero nas duas fica (pode ser uma frase nova)"],
+      ["Vou verificar... e já retorno.", "Vou verificar... e já retorno.", "reticências que não são correção ficam"],
+      ["O senhor pode aguardar o retorno.", "O senhor pode aguardar o retorno.", "o tratamento sem reticências fica"],
+      ["Fale com a senhora... ela sabe do caso.", "Fale com a senhora... ela sabe do caso.", "reticências depois do tratamento, sem outro depois, ficam"],
+      ["Isso vale para o senhor... e a senhora também.", "Isso vale para o senhor... e a senhora também.", "os dois tratamentos juntos (\"e a senhora\") ficam"],
+    ];
+    for (const [veio, fica, nome] of casos) {
+      cena.texto = veio;
+      const rota = (i++ % 2) ? "/copiloto/melhorar" : "/copiloto/sugerir";
+      const corpo = rota === "/copiloto/melhorar" ? { conversa_id: "c1", texto: `texto ${i}` } : { conversa_id: "c1" };
+      const r = await post(t, rota, corpo);
+      ok(`131a ${nome} (${rota.replace("/copiloto/", "")})`, r.status === 200 && r.corpo && r.corpo.sugestao === fica, JSON.stringify(r.corpo && r.corpo.sugestao));
+    }
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("a sugestão leva a regra do tratamento: decidir antes, na dúvida \"o(a) senhor(a)\", e nunca se corrigir no meio", regraNoSistema(sis), sis.slice(-2500));
+    ok("e o \"Melhorar o texto\" também", regraNoSistema(sistemaDe(claude.pedidos[1])));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 131b. o ensaio de dia: guardado já limpo, com a regra ----
+  {
+    cena.texto = "Bom dia! Sou o Quazar, assistente virtual do escritório. A equipe vai verificar com o senhor... com a senhora como seguir. Pode aguardar o retorno de um atendente por aqui, tudo bem?";
+    const claude = await subirClaude();
+    const ITEM = { conversa_id: "c1", advogado_id: TELEFONE.id, telefone: "SAC", departamento: "Sucesso do Cliente",
+                   fuso: "America/Sao_Paulo", cliente_ate: haMin(5), cliente_ate_id: "m3" };
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: "", VANTORO_API_TOKEN: "", QUAZAR_DIA_PRIMEIRA_MS: "200", QUAZAR_DIA_INTERVALO_MS: "400" },
+      { tabelas: tabelas(), rpcs: { zorvin_quazar_de_dia_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || [])
+        .some((q) => q.conversa_id === "c1" && q.cliente_ate_id === "m3") ? [] : [ITEM] }) } });
+    const linhas = () => (t.sb.dados.zorvin_quazar_noturno || []);
+    await esperaAte(() => linhas().some((l) => l.status === "pronta"));
+    const l = linhas()[0] || {};
+    ok("131b o ensaio de dia guarda a resposta já sem a correção, com \"o(a) senhor(a)\"", l.status === "pronta"
+       && l.texto === "Bom dia! Sou o Quazar, assistente virtual do escritório. A equipe vai verificar com o(a) senhor(a) como seguir. Pode aguardar o retorno de um atendente por aqui, tudo bem?",
+       JSON.stringify(l.texto));
+    ok("e as regras do dia levam a regra do tratamento", regraNoSistema(sistemaDe(claude.pedidos[0])), sistemaDe(claude.pedidos[0]).slice(-2500));
     await t.parar(); await claude.parar();
   }
 }
