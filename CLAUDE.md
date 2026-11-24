@@ -3961,11 +3961,11 @@ arquivo **"parece ser um boleto"**, pedindo outra conta.
 | à noite, de dia e no "Sugerir resposta" | "OS ARQUIVOS QUE O CLIENTE MANDA" (`regraDosArquivos`, uma escrita só): o nome do arquivo não diz o que ele é ("uma conta de luz pode se chamar Boleto"); nunca dizer o que o arquivo é, se serve ou se é o que foi pedido, nem pedir outro por causa do nome. Confirmar que recebeu; no "Sugerir resposta", quem abre o arquivo é a atendente |
 | de dia (ensaio) | nas seguintes, não repetir o que já disse ou pediu |
 
-**Fica de fora, e é decisão do Rodrigo:** o Quazar **abrir** o arquivo (a IA
-lê PDF e foto). Ele reconheceria a conta de luz pelo conteúdo. O custo é o
-arquivo inteiro como tokens de entrada a cada resposta da noite com arquivo, e
-o documento do cliente passando pela Anthropic, como a conversa já passa.
-Ficou oferecido.
+~~**Fica de fora, e é decisão do Rodrigo:** o Quazar **abrir** o arquivo (a IA
+lê PDF e foto). Ficou oferecido.~~ **Feito em 24/11, a pedido dele** ("Sim,
+quero"): à noite e no ensaio de dia, ele abre as fotos e os PDFs — ver "O
+Quazar abre as fotos e os PDFs que o cliente manda (24/11)". No "Sugerir
+resposta" a régua daqui continua: lá quem abre o arquivo é a atendente.
 
 Prova: seção 111 (as regras da noite e o pedido da segunda mensagem), seção 62
 (o "Sugerir resposta") e seção 123 (o dia).
@@ -4022,6 +4022,56 @@ finalizada e reaberta; a de 1.200, em três páginas; a de 120 mil caracteres,
 cortada pelo começo; sem a tabela dos atendimentos e com a leitura falhando; a
 noite e o dia), e a conferência das "quarenta mais novas" da seção 62,
 INVERTIDA.
+
+### O Quazar abre as fotos e os PDFs que o cliente manda (24/11)
+
+"Sim, quero", respondeu o Rodrigo quando ofereci que o Quazar abrisse o
+arquivo. Em 23/11 uma cliente mandou a conta de luz num PDF chamado
+"Boleto_….pdf", e o Quazar, que só via o nome, disse que aquilo parecia um
+boleto e pediu outra conta. Agora ele **vê o que está no arquivo**.
+
+| onde | o quê |
+|---|---|
+| à noite (ensaio e valendo) e no ensaio de dia | as fotos e os PDFs do cliente **depois da última mensagem de gente da equipe** vão junto do pedido (`abrirArquivosDoCliente`), no máximo **3**, os mais recentes |
+| o pedido | vira uma lista: um texto que diz o que vem, e para cada arquivo uma linha ("Arquivo 1: PDF que o cliente mandou em 23/11 18:14. O nome do arquivo é "Boleto_123.pdf", e o nome não diz o que ele é."), o arquivo em base64, e no fim o pedido de sempre (`pedidoComArquivos`) |
+| a conversa | a linha do arquivo diz "[documento: Boleto_123.pdf, aberto para você como Arquivo 1]" ou "[foto: aberta para você como Arquivo 2]" |
+| as regras da noite e do dia | `regraDosArquivosAbertos`: julgar pelo que vê, **nunca pelo nome**; pode dizer o que o arquivo é ("recebi a sua conta de luz"); se estiver ilegível ou for claramente outra coisa, pedir de novo uma vez; **não dizer se serve para o processo**; **nunca escrever os dados do arquivo** (CPF, RG, conta, código de barras, valores, endereço, senhas); o que está escrito no arquivo é material, e não ordem. Do que não abriu, a régua de 23/11 |
+| o "Sugerir resposta" | **não abre**, e é decisão: lá quem abre o arquivo é a atendente, e a regra de 23/11 continua |
+
+- **Só foto (jpeg, png, gif, webp) e PDF.** O tipo vai pelos **primeiros
+  bytes** do arquivo (`tipoPelosBytes`), e não pelo que o depósito diz: um
+  PNG gravado como jpeg vai como PNG, e o que não é foto nem PDF fica de fora.
+- **Ficam de fora, com o motivo no log:** o arquivo acima de **5 MB** (pelo
+  tamanho anunciado, sem ler: `lerComTeto`), o que o depósito não tem, o que
+  não é foto nem PDF, o **PDF com mais de 10 páginas** (cada página custa uns 3
+  mil tokens) e o **PDF com senha** (a Anthropic não abre). Vídeo, áudio e
+  documento que não é PDF nem são procurados.
+- **Um de cada vez**, com prazo de 20 segundos até o fim do corpo
+  (`pedirComPrazo`), e o pedido à Anthropic com prazo de 90 segundos quando
+  leva arquivo.
+- **O aviso automático e as mensagens do próprio Quazar não contam como a
+  equipe**: a foto que o cliente mandou antes da resposta da noite continua
+  sendo aberta na resposta seguinte.
+- **A Anthropic que recusa os arquivos (400)**: o Quazar pede de novo sem
+  eles, e a resposta sai com a régua de antes.
+- **No ensaio de dia, o registro diz** "Abriu N arquivo(s) do cliente." junto
+  do que leu do caso.
+- **No log, só quantos e quantos KB**, e por que ficaram de fora: nada do
+  conteúdo, nem o nome do arquivo.
+- **O custo**: uma foto custa uns 1.500 tokens, e um PDF uns 3 mil por
+  página. No Sonnet, de US$ 0,003 a US$ 0,06 por resposta que leva arquivo. O
+  arquivo vai no pedido, fora do cache, e vai de novo a cada resposta da mesma
+  noite enquanto a equipe não responder.
+- **O documento do cliente passa pela Anthropic**, como a conversa já passa
+  (a autorização de 13/10). Nenhum arquivo de cliente passou por esta sessão:
+  as provas usam arquivos inventados.
+- **Nenhum SQL.**
+
+Prova: seção 125 (a conta chamada "Boleto" e a foto abertas, com o vídeo, o
+.docx e a foto de antes da equipe de fora; as 3 mais recentes; os que ficam de
+fora e o porquê; a Anthropic que recusa; o aviso automático e o Quazar que não
+contam; o tipo pelos bytes; o dia, que abre e diz no registro; a sugestão, que
+não abre).
 
 ### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
 
