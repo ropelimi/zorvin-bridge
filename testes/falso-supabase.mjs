@@ -483,8 +483,11 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
       for (const [k, v] of url.searchParams.entries()) {
         if (k === "select") { sel = v; pedidas.push(...colunasDoSelect(v)); continue; }
         if (k === "order") {
-          const [c, d] = v.split("."); ordem = { c, asc: d !== "desc" };
-          pedidas.push(c); continue;
+          // VÁRIAS COLUNAS (`order=criado_em.desc,id.desc`), na ordem em que
+          // vieram: a primeira manda, e as seguintes desempatam. Lida como uma
+          // só, "desc,id" não era "desc" e a ordem saía ao contrário (24/11).
+          ordem = v.split(",").map((parte) => { const [c, d] = parte.split("."); return { c, asc: d !== "desc" }; });
+          pedidas.push(...ordem.map((o) => o.c)); continue;
         }
         if (k === "limit") { limite = Number(v); continue; }
         if (k === "offset") { deslocamento = Number(v); continue; }
@@ -552,9 +555,12 @@ export function subirFalsoSupabase({ tabelas, usuarios = [], porta = 0, aoGravar
           }
         }
         if (ordem) saida = saida.slice().sort((a, b) => {
-          const x = a[ordem.c], y = b[ordem.c];
-          const cmp = x === y ? 0 : (x > y ? 1 : -1);
-          return ordem.asc ? cmp : -cmp;
+          for (const o of ordem) {
+            const x = a[o.c], y = b[o.c];
+            const cmp = x === y ? 0 : (x > y ? 1 : -1);
+            if (cmp) return o.asc ? cmp : -cmp;
+          }
+          return 0;
         });
         saida = saida.slice(deslocamento, deslocamento + Math.min(limite, TETO_POSTGREST));
         // O QUE O SELECT PEDE DE DENTRO DE UM JSON volta com o nome pedido. A

@@ -3970,6 +3970,59 @@ Ficou oferecido.
 Prova: seção 111 (as regras da noite e o pedido da segunda mensagem), seção 62
 (o "Sugerir resposta") e seção 123 (o dia).
 
+### O Quazar lê a conversa inteira, também a finalizada e reaberta (24/11)
+
+Pedido do Rodrigo: *"Quando uma conversa for finalizada e reaberta, o Quazar
+tem que continuar lendo toda a conversa."*
+
+**Ele lia só as 40 últimas mensagens** (`COPILOTO_MENSAGENS`), e o cliente que
+voltou a escrever depois de finalizado perdia o atendimento de antes: o
+documento que mandou, o que foi combinado, o que já foi respondido. **Medido
+em 24/11, só contando:** das 96 respostas do Quazar à noite (valendo) da
+semana, 47 foram em conversas com mais de 40 mensagens, e 41 em conversas com
+um atendimento anterior. E as conversas são curtas em texto: das 83 que ele
+respondeu, a mediana tinha 2,7 mil caracteres, e a maior, 503 mensagens e 21
+mil caracteres.
+
+| | antes | agora |
+|---|---|---|
+| o que ele lê | as 40 últimas mensagens | a conversa inteira, em páginas de 500 (`lerMensagensParaOCopiloto`), até 2.000 mensagens |
+| quanto vai no pedido | as 40 | até 60 mil caracteres, **cortando pelo começo**, com uma linha que diz quantas mensagens antigas ficaram de fora (`conversaNoPedido`) |
+| os atendimentos | não apareciam | linhas `--- 20/11 15:02: atendimento finalizado pela equipe. ---` e `--- …: o cliente voltou a escrever, e o atendimento foi reaberto. É a mesma conversa: o que veio antes continua valendo. ---`, no lugar certo da conversa (`marcosDosAtendimentos`) |
+| as regras | — | **A CONVERSA INTEIRA** (`regraDaConversaInteira`, nas três: a sugestão, a noite e o dia): a conversa reaberta é a mesma, com o mesmo cliente; não pedir de novo o que ele já mandou, não perguntar o que ele já respondeu, não tratá-lo como cliente novo |
+
+- **Vale para tudo o que lê a conversa**: o "Sugerir resposta", o "Pedir uma
+  mudança", o Quazar à noite e o de dia (todos passam por `lerParaOCopiloto`).
+- **As páginas desempatam pelo `id`** (as mensagens da mesma hora, como o
+  álbum de fotos): sem isso, uma página repetiria uma e pularia outra. E a
+  mesma mensagem não entra duas vezes.
+- **As marcas não dizem o número do protocolo**: ele é só da equipe. O
+  primeiro atendimento não ganha linha de abertura (é o começo da conversa). A
+  reabertura diz quem reabriu: o cliente, a equipe com o Reabrir, ou a equipe
+  voltando a escrever.
+- **Os atendimentos são lidos como quem pediu** (a regra de acesso de
+  `zorvin_atendimentos`). Sem a tabela (o 028), calado; com a leitura
+  falhando, uma linha no log. Nos dois casos, a resposta sai sem as marcas: elas
+  ajudam, e não seguram a resposta.
+- **O custo**: a conversa vai no pedido, fora do cache. A conversa mediana
+  (2,7 mil caracteres) não muda nada; a maior (21 mil) custa no Sonnet uns
+  US$ 0,02 por resposta.
+- **Nenhum SQL.**
+
+**O que não muda, e é decisão:** o Quazar de dia continua respondendo só a
+conversa em "Novos" (decidido em 19/11). A conversa finalizada e reaberta pelo
+cliente vai para "Em Atendimento", e ali o ensaio de dia não escreve. À noite,
+ele responde a reaberta como sempre, agora lendo a conversa toda.
+
+**A bancada aprendeu a ordenar por várias colunas** (`order=criado_em.desc,id.desc`):
+lida como uma só, "desc,id" não era "desc", e a ordem saía ao contrário.
+
+Prova: seção 124 (a sugestão e o "Pedir uma mudança" numa conversa de 150,
+finalizada e reaberta; a de 1.200, em três páginas; a de 120 mil caracteres,
+cortada pelo começo; sem a tabela dos atendimentos e com a leitura falhando; a
+noite e o dia), e a conferência das "quarenta mais novas" da seção 62,
+INVERTIDA.
+
 ### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
 
 Pedido do Rodrigo: *"Com o Quazar, quero a possibilidade dele ler as conversas
