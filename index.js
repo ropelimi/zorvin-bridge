@@ -9217,8 +9217,10 @@ async function alcancaConversa(req, coluna, valor) {
  *  arquivo, e o áudio do WhatsApp vem como `ogg` (opus). */
 function extensaoDoAudio(mime) {
   const m = String(mime || '').toLowerCase();
-  if (m.includes('ogg') || m.includes('opus')) return 'ogg';
+  // O WEBM VEM ANTES DO OPUS: o navegador grava "audio/webm;codecs=opus", e
+  // esse arquivo com o nome .ogg seria lido no formato errado (24/11).
   if (m.includes('webm')) return 'webm';
+  if (m.includes('ogg') || m.includes('opus')) return 'ogg';
   if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
   if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'm4a';
   if (m.includes('wav')) return 'wav';
@@ -9274,6 +9276,30 @@ async function pedirComPrazo(url, opcoes, ms, ler) {
   }
 }
 
+/** O PEDIDO AO GROQ, uma escrita só: o áudio das conversas (o clique e a
+ *  rodada) e o pedido falado ao Quazar (24/11) passam por aqui. Devolve a
+ *  resposta crua (`r`) e o corpo em JSON, ou nulo. `dica` vai como o `prompt`
+ *  do Whisper: palavras que ele deve esperar ouvir (o nome do Quazar, que ele
+ *  escreveria "Cuasar"). */
+async function pedirAoGroq(bytes, mime, dica) {
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: mime }), `audio.${extensaoDoAudio(mime)}`);
+  form.append('model', GROQ_MODELO);
+  // A LÍNGUA VAI DITA: sem ela o Whisper adivinha pelos primeiros segundos, e
+  // um "alô" curto vira espanhol ou galego. O escritório atende em português.
+  form.append('language', 'pt');
+  form.append('response_format', 'json');
+  form.append('temperature', '0');
+  if (dica) form.append('prompt', dica);
+  return pedirComPrazo(`${GROQ_URL}/audio/transcriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: form,
+  }, 90000, async (resposta) => {
+    try { return await resposta.json(); } catch (_) { return null; } // resposta sem JSON: fica nulo
+  });
+}
+
 /** O ÁUDIO MANDADO AO GROQ. Devolve a resposta da rota (`status` e `corpo`) e
  *  o `desfecho`, que é o que a rodada automática lê:
  *    texto     transcreveu
@@ -9311,21 +9337,7 @@ async function transcreverNoGroq(msg) {
     return { status: 502, desfecho: 'tentar', corpo: { ok: false, erro: 'O arquivo do áudio veio vazio.' } };
   }
   const mime = msg.midia_mime || arquivo.tipo || 'audio/ogg';
-  const form = new FormData();
-  form.append('file', new Blob([arquivo.bytes], { type: mime }), `audio.${extensaoDoAudio(mime)}`);
-  form.append('model', GROQ_MODELO);
-  // A LÍNGUA VAI DITA: sem ela o Whisper adivinha pelos primeiros segundos, e
-  // um "alô" curto vira espanhol ou galego. O escritório atende em português.
-  form.append('language', 'pt');
-  form.append('response_format', 'json');
-  form.append('temperature', '0');
-  const { r, corpo } = await pedirComPrazo(`${GROQ_URL}/audio/transcriptions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-    body: form,
-  }, 90000, async (resposta) => {
-    try { return await resposta.json(); } catch (_) { return null; } // resposta sem JSON: fica nulo
-  });
+  const { r, corpo } = await pedirAoGroq(arquivo.bytes, mime);
   if (!r.ok) {
     console.error(`transcrição: o Groq respondeu ${r.status}`, JSON.stringify(corpo || {}).slice(0, 300));
     return { status: 502, ...comoOGroqRecusou(r), corpo: { ok: false, erro: explicarFalhaDoGroq(r.status, corpo) } };
@@ -10782,6 +10794,14 @@ app.options('/copiloto/*', (req, res) => { liberarCors(res); res.sendStatus(204)
 // ASSUNTO DO FINALIZAR", mais abaixo). Sem a chave, o painel lê "esta ponte não
 // sugere" (a régua da ponte de antes de 01/11), e a janela do Finalizar abre
 // sem pedir à IA — inclusive no painel publicado antes da remoção.
+/** A VOZ ESTÁ PRONTA? Lida da memória, sem esperar: a pergunta ao banco vai
+ *  por fora quando a lembrança passou de 5 minutos. */
+function vozPronta() {
+  if (!vozLigada()) return false;
+  if (!vozDoQuazar.lida || Date.now() - vozDoQuazar.lidaEm >= 5 * 60 * 1000) lerVozDoQuazar().catch(() => {});
+  return vozDoQuazar.lida ? Boolean(vozDoQuazar.linha) : null;
+}
+
 app.get('/copiloto/estado', (req, res) => {
   liberarCors(res);
   res.json({ ok: true, ligado: Boolean(process.env.ANTHROPIC_API_KEY), modelo: COPILOTO_MODELO,
@@ -10806,7 +10826,17 @@ app.get('/copiloto/estado', (req, res) => {
              noite: !QUAZAR_NOITE_DESLIGADO,
              // A PESQUISA NA INTERNET DO "SUGERIR RESPOSTA" (19/11): falso com
              // COPILOTO_PESQUISA=desligada.
-             pesquisa: !COPILOTO_PESQUISA_DESLIGADA });
+             pesquisa: !COPILOTO_PESQUISA_DESLIGADA,
+             // O PEDIDO FALADO (24/11): `ouvir` diz que ESTA ponte transcreve o
+             // pedido gravado (e tem a chave do Groq). A ponte de antes não
+             // manda a chave, e o painel não oferece o microfone.
+             ouvir: Boolean(process.env.GROQ_API_KEY),
+             // A VOZ DO QUAZAR (24/11): `voz` diz que ESTA ponte fala (e tem a
+             // chave da ElevenLabs); `voz_pronta`, se há voz escolhida — nulo
+             // quando ainda não se sabe. O painel mostra o "Ouvir" com a voz
+             // pronta ou na dúvida, e a falta da voz é dita no clique.
+             voz: vozLigada(),
+             voz_pronta: vozPronta() });
 });
 
 app.post('/copiloto/sugerir', async (req, res) => {
@@ -10884,6 +10914,371 @@ app.post('/copiloto/ajustar', async (req, res) => {
     return res.status(502).json({ ok: false, erro: motivo });
   }
 });
+
+// ============================================================
+//  O PEDIDO FALADO AO QUAZAR (24/11)
+//
+//  Pedido do Rodrigo: "quero que seja possível pedir a mudança também enviando
+//  um áudio e não só digitando." O painel grava no navegador e manda o áudio
+//  aqui; a ponte o transcreve no Groq (a mesma chave e o mesmo modelo dos
+//  áudios das conversas) e devolve o texto. QUEM PEDE A MUDANÇA É O PAINEL,
+//  com o texto, pela rota de sempre (`/copiloto/ajustar`): o pedido falado e o
+//  escrito são o mesmo pedido, com o mesmo teto, e a lição que ele ensinar é
+//  guardada igual.
+//
+//  NADA É GUARDADO AQUI: nem o áudio, nem o texto. O texto volta para o campo
+//  do pedido, à vista de quem falou, e só então vai ao Quazar.
+//
+//  A DICA DO WHISPER (o `prompt`) diz o que ele deve esperar ouvir: sem ela,
+//  "Quazar" sai "Cuasar". E, como ele às vezes devolve a própria dica (ou a
+//  frase pronta das legendas) quando o áudio é só silêncio, essas duas voltam
+//  como "não ouvi nenhuma fala".
+// ============================================================
+const OUVIR_TETO_BYTES = 5 * 1024 * 1024; // um minuto de opus tem uns 500 KB
+const OUVIR_TETO_TEXTO = 2000;
+const OUVIR_DICA = `Pedido ao ${NOME_DO_ASSISTENTE}, o assistente do Zorvin, para mudar a mensagem que vai ao cliente.`;
+
+/** O que o Whisper devolve quando não houve fala: a própria dica, ou a frase
+ *  pronta das legendas que ele "ouve" em silêncio e barulho. */
+function naoHouveFala(texto) {
+  const so = (t) => semAcentoMinusculo(t).replace(/[^a-z0-9]+/g, ' ').trim();
+  const t = so(texto);
+  if (!t) return true;
+  if (/^legendas? (pela|por) comunidade amara org$/.test(t)) return true;
+  return so(OUVIR_DICA).includes(t);
+}
+
+app.post('/copiloto/ouvir', async (req, res) => {
+  liberarCors(res);
+  try {
+    const usuario = await exigirLogin(req, res);
+    if (!usuario) return;
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ ok: false, erro:
+        'O pedido por áudio ainda não está ligado: falta a variável GROQ_API_KEY na Render (serviço da ponte). Escreva o pedido.' });
+    }
+    const base64 = String((req.body && req.body.audio) || '');
+    const mime = String((req.body && req.body.mime) || 'audio/webm').slice(0, 80);
+    if (!base64) return res.status(400).json({ ok: false, erro: 'Grave o pedido antes de mandar.' });
+    if (!/^audio\//i.test(mime)) return res.status(400).json({ ok: false, erro: 'Isto não é um áudio.' });
+    // O TAMANHO É CONFERIDO ANTES DE DECODIFICAR: o texto em base64 tem 4/3
+    // dos bytes, e não precisa virar arquivo para ouvir "longo demais".
+    if (base64.length > Math.ceil((OUVIR_TETO_BYTES * 4) / 3) + 4) {
+      return res.status(413).json({ ok: false, erro: 'O áudio ficou longo demais: grave um pedido mais curto, ou escreva.' });
+    }
+    const bytes = Buffer.from(base64, 'base64');
+    if (!bytes.length) return res.status(400).json({ ok: false, erro: 'O áudio veio vazio. Grave de novo.' });
+    const { r, corpo } = await pedirAoGroq(bytes, mime, OUVIR_DICA);
+    if (!r.ok) {
+      console.error(`copiloto: o Groq respondeu ${r.status} ao pedido falado`);
+      return res.status(502).json({ ok: false, erro: explicarFalhaDoGroq(r.status, corpo) });
+    }
+    const texto = String((corpo && corpo.text) || '').replace(/\s+/g, ' ').trim().slice(0, OUVIR_TETO_TEXTO);
+    if (naoHouveFala(texto)) {
+      return res.status(422).json({ ok: false, erro:
+        'Não ouvi nenhuma fala no áudio. Grave de novo, mais perto do microfone, ou escreva o pedido.' });
+    }
+    // SÓ NÚMEROS NO LOG: o que foi dito é de quem falou.
+    console.log(`copiloto: pedido falado ouvido (${bytes.length} bytes, ${texto.length} caracteres)`);
+    return res.json({ ok: true, texto });
+  } catch (e) {
+    const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
+      ? 'O Groq demorou demais para responder. Tente de novo, ou escreva o pedido.'
+      : `Não consegui ouvir o pedido: ${String((e && e.message) || e).slice(0, 160)}`;
+    console.error('copiloto: pedido falado:', (e && e.message) || e);
+    return res.status(502).json({ ok: false, erro: motivo });
+  }
+});
+
+// ============================================================
+//  A VOZ DO QUAZAR (24/11)
+//
+//  Pedido do Rodrigo: "no ícone de pergaminho onde temos o resumo da conversa,
+//  quero também a possibilidade de darmos voz ao Quazar! Uma opção dele ler o
+//  resumo para o usuário. Crie uma voz única, que seja marcante, difícil de não
+//  reconhecer, de forma natural com o jeito do nosso pato Quazar." O serviço é
+//  a ElevenLabs, escolhido por ele.
+//
+//  A VOZ É DESENHADA, E NÃO ESCOLHIDA NUMA LISTA. A ElevenLabs cria uma voz
+//  nova a partir de uma descrição (`/v1/text-to-voice/design`), e devolve três
+//  opções. QUEM ESCOLHE É QUEM OUVE: a lição dos sons de aviso (quem não ouve o
+//  som não o fabrica). Quem administra ouve as três no Zorvin (Departamentos e
+//  acessos → Quazar → A voz do Quazar) e escolhe uma; a ponte a guarda na
+//  conta da ElevenLabs (`/v1/text-to-voice`) e o id dela no banco (script 062).
+//
+//  A CHAVE MORA SÓ AQUI (`ELEVENLABS_API_KEY`, na Render). Sem ela, a tela diz
+//  qual variável falta, e o botão de ouvir o resumo não aparece.
+//
+//  O QUE VAI À ELEVENLABS: a descrição e a amostra (escritas aqui), e o resumo
+//  que a pessoa pediu para ouvir. O resumo passa pela limpeza dos dados
+//  pessoais antes (CPF, CNPJ, processo, e-mail e telefone viram "dado na
+//  tela"): falado, um CPF não ajuda ninguém, e ele continua escrito no quadro.
+//  O áudio não é guardado no banco: fica na memória da ponte por um tempo,
+//  para o mesmo resumo ouvido de novo não custar outra vez.
+// ============================================================
+const ELEVENLABS_URL = (process.env.ELEVENLABS_API_URL || 'https://api.elevenlabs.io').replace(/\/+$/, '');
+// O MODELO QUE FALA e O QUE DESENHA. Trocáveis pela Render, sem publicar: a
+// ElevenLabs lança modelos novos, e a voz desenhada num serve no outro.
+const QUAZAR_VOZ_MODELO = process.env.QUAZAR_VOZ_MODELO || 'eleven_multilingual_v2';
+const QUAZAR_VOZ_DESENHO = process.env.QUAZAR_VOZ_DESENHO || 'eleven_multilingual_ttv_v2';
+const QUAZAR_VOZ_NOME = NOME_DO_ASSISTENTE;
+// A DESCRIÇÃO VAI EM INGLÊS, que é a língua em que a ElevenLabs desenha
+// melhor; o sotaque é pedido nela. Quem administra pode mudá-la na tela antes
+// de gerar as opções (de 20 a 1000 caracteres, o que a ElevenLabs aceita).
+const QUAZAR_VOZ_DESCRICAO = 'Quazar, the mascot and virtual assistant of the support team of a Brazilian law office: '
+  + 'a street-smart, charismatic duck in dark sunglasses. Native Brazilian Portuguese speaker. Adult male voice, around '
+  + '30 to 35 years old, medium-high pitch with a slightly nasal, bright and buzzy timbre that playfully hints at a duck, '
+  + 'but never cartoon quacking: every word stays perfectly clear and natural. Confident, warm and charming, with a sly '
+  + 'smile in the voice and a relaxed, easygoing swagger, like a cool friend who always has the answer. Lively, bouncy '
+  + 'rhythm with crisp diction and natural pauses; upbeat but never shouting, never childish, never robotic. Close-mic '
+  + 'studio recording, clean, no background noise or music.';
+// A AMOSTRA que as três opções falam (de 100 a 1000 caracteres): em
+// português, e com o jeito do Quazar, para a escolha ser pelo que ele vai ler.
+const QUAZAR_VOZ_AMOSTRA = 'Fala, equipe! Aqui é o Quazar, o assistente do Zorvin. Eu leio a conversa inteirinha e te '
+  + 'conto, rapidinho, o que o cliente quer, o que já foi combinado e o que ainda falta. Pode deixar comigo: sem '
+  + 'enrolação e sem perder nenhum detalhe!';
+const VOZ_TETO_TEXTO = 2500;
+const VOZ_GUARDADAS_MAX = 30;
+let vozDoQuazar = { lida: false, linha: null, semTabela: false, lidaEm: 0 };
+const falasGuardadas = new Map(); // a mesma fala ouvida de novo não vai à ElevenLabs
+const falasEmVoo = new Map();     // dois cliques juntos são uma ida
+
+const vozLigada = () => Boolean(process.env.ELEVENLABS_API_KEY);
+
+/** A VOZ ESCOLHIDA, lida do banco e lembrada por 5 minutos. A falha da
+ *  leitura não apaga o que já se sabia: devolve o de antes, com `falhou`. */
+async function lerVozDoQuazar({ forcar = false } = {}) {
+  if (!forcar && vozDoQuazar.lida && Date.now() - vozDoQuazar.lidaEm < 5 * 60 * 1000) return vozDoQuazar;
+  const { data, error } = await supabase.from('zorvin_quazar_voz').select('*').eq('id', true).maybeSingle();
+  if (error && semATabela(error)) {
+    vozDoQuazar = { lida: true, linha: null, semTabela: true, lidaEm: Date.now() };
+    return vozDoQuazar;
+  }
+  if (error) {
+    console.error('voz: não consegui ler a voz escolhida', error.message);
+    return { ...vozDoQuazar, falhou: error };
+  }
+  vozDoQuazar = { lida: true, linha: data || null, semTabela: false, lidaEm: Date.now() };
+  return vozDoQuazar;
+}
+
+/** Um pedido à ElevenLabs, com prazo até o fim do corpo. Com `audio`, a
+ *  resposta boa é o arquivo; qualquer outra é lida como JSON (o erro dela). */
+function pedirAElevenLabs(caminho, corpo, { audio = false, ms = 60000 } = {}) {
+  return pedirComPrazo(`${ELEVENLABS_URL}${caminho}`, {
+    method: 'POST',
+    headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json',
+               Accept: audio ? 'audio/mpeg' : 'application/json' },
+    body: JSON.stringify(corpo),
+  }, ms, async (r) => {
+    if (r.ok && audio) return Buffer.from(await r.arrayBuffer());
+    try { return await r.json(); } catch (_) { return null; } // sem JSON: fica nulo
+  });
+}
+
+/** A frase de cada recusa da ElevenLabs — dita para quem está na tela, com o
+ *  que fazer. O erro dela vem em `detail` (um objeto com `status` e
+ *  `message`, ou a lista da validação). */
+function explicarFalhaDaElevenLabs(status, corpo) {
+  const d = corpo && corpo.detail;
+  const motivo = String((d && !Array.isArray(d) && typeof d === 'object' && d.status) || '').toLowerCase();
+  const detalhe = String((d && !Array.isArray(d) && typeof d === 'object' && d.message)
+    || (Array.isArray(d) && d[0] && d[0].msg) || (typeof d === 'string' ? d : '')).slice(0, 160);
+  if (status === 402 || /quota|credit|payment|limit_reached/.test(motivo)) {
+    return 'Os créditos da ElevenLabs acabaram, ou o plano dela não permite isto. Confira o plano na conta da ElevenLabs.';
+  }
+  if (status === 401) return 'A ElevenLabs recusou a chave. Confira a variável ELEVENLABS_API_KEY na Render (serviço da ponte).';
+  if (status === 403) return `A conta da ElevenLabs não permite isto (código 403)${detalhe ? `: ${detalhe}` : '.'} Confira o plano ou as permissões da chave.`;
+  if (status === 404 && /voice/.test(motivo)) {
+    return `A voz escolhida não existe mais na conta da ElevenLabs. Quem administra escolhe de novo na aba ${NOME_DO_ASSISTENTE}.`;
+  }
+  if (status === 429) return 'A ElevenLabs está recebendo pedidos demais agora (429). Tente de novo em um minuto.';
+  return `A ElevenLabs não atendeu (código ${status})${detalhe ? `: ${detalhe}` : '.'}`;
+}
+
+/** SÓ QUEM ADMINISTRA (e está ativa) mexe na voz. `null` quando pode. */
+async function soQuemAdministraAVoz(usuario) {
+  const { data: eu, error } = await supabase.from('usuarios').select('admin, ativo, nome').eq('id', usuario.id).maybeSingle();
+  if (error) {
+    return { status: 502, corpo: { ok: false, erro: `Não consegui conferir quem está pedindo (código ${error.code || '?'}).` } };
+  }
+  if (!eu || !eu.admin || eu.ativo === false) {
+    return { status: 403, corpo: { ok: false, erro: `Só quem administra escolhe a voz do ${NOME_DO_ASSISTENTE}.` } };
+  }
+  usuario.nomeNoZorvin = eu.nome || null;
+  return null;
+}
+
+const FALTA_O_062 = 'Falta a atualização 062 do banco: ela entra sozinha quando a ponte é publicada. Confira em '
+  + 'Departamentos e acessos → Atualizações do banco.';
+const SEM_A_CHAVE_DA_VOZ = `A voz do ${NOME_DO_ASSISTENTE} ainda não está ligada: falta a variável ELEVENLABS_API_KEY `
+  + 'na Render (serviço da ponte).';
+
+/** O TEXTO QUE VAI SER FALADO: sem os dados pessoais (falados, não ajudam e
+ *  vão a mais um serviço), e com o teto. */
+function textoParaFalar(texto) {
+  return semDadosPessoais(String(texto || '')).replace(/\[dado removido\]/g, 'dado na tela')
+    .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function rotaDaVoz(handler) {
+  return async (req, res) => {
+    liberarCors(res);
+    try {
+      const usuario = await exigirLogin(req, res);
+      if (!usuario) return;
+      const r = await handler(req, usuario);
+      if (r.audio) {
+        res.set('Content-Type', 'audio/mpeg');
+        res.set('Cache-Control', 'no-store');
+        return res.status(200).send(r.audio);
+      }
+      return res.status(r.status).json(r.corpo);
+    } catch (e) {
+      const motivo = (e && e.name === 'AbortError') || /aborted/i.test(String(e && e.message))
+        ? 'A ElevenLabs demorou demais para responder. Tente de novo.'
+        : `A voz do ${NOME_DO_ASSISTENTE} não funcionou agora: ${String((e && e.message) || e).slice(0, 160)}`;
+      console.error('voz:', (e && e.message) || e);
+      return res.status(502).json({ ok: false, erro: motivo });
+    }
+  };
+}
+
+/** O QUE A TELA DE QUEM ADMINISTRA PRECISA: se está ligada, a escolhida (sem
+ *  o id), a descrição e a amostra que vão à ElevenLabs. */
+app.get('/copiloto/voz', rotaDaVoz(async (req, usuario) => {
+  const recusa = await soQuemAdministraAVoz(usuario);
+  if (recusa) return recusa;
+  const v = await lerVozDoQuazar({ forcar: true });
+  if (v.falhou) return { status: 502, corpo: { ok: false, erro: `Não consegui ler a voz escolhida (código ${v.falhou.code || '?'}).` } };
+  let escolhida = null;
+  if (v.linha) {
+    let quem = null;
+    if (v.linha.escolhida_por) {
+      const { data: pessoa } = await supabase.from('usuarios').select('nome').eq('id', v.linha.escolhida_por).maybeSingle();
+      quem = (pessoa && pessoa.nome) || null;
+    }
+    escolhida = { nome: v.linha.nome, descricao: v.linha.descricao || '', escolhida_em: v.linha.escolhida_em, escolhida_por: quem };
+  }
+  return { status: 200, corpo: { ok: true, ligada: vozLigada(), sem_tabela: Boolean(v.semTabela), escolhida,
+    modelo: QUAZAR_VOZ_MODELO, descricao_padrao: QUAZAR_VOZ_DESCRICAO, amostra: QUAZAR_VOZ_AMOSTRA } };
+}));
+
+/** TRÊS OPÇÕES DE VOZ, desenhadas pela descrição. Nada é guardado ainda:
+ *  as opções vivem na ElevenLabs até uma ser escolhida. */
+app.post('/copiloto/voz/opcoes', rotaDaVoz(async (req, usuario) => {
+  const recusa = await soQuemAdministraAVoz(usuario);
+  if (recusa) return recusa;
+  if (!vozLigada()) return { status: 503, corpo: { ok: false, erro: SEM_A_CHAVE_DA_VOZ } };
+  const descricao = String((req.body && req.body.descricao) || QUAZAR_VOZ_DESCRICAO).replace(/\s+/g, ' ').trim();
+  if (descricao.length < 20 || descricao.length > 1000) {
+    return { status: 400, corpo: { ok: false, erro: 'A descrição da voz tem de ter de 20 a 1000 caracteres.' } };
+  }
+  const comecou = Date.now();
+  const { r, corpo } = await pedirAElevenLabs('/v1/text-to-voice/design?output_format=mp3_44100_128',
+    { voice_description: descricao, model_id: QUAZAR_VOZ_DESENHO, text: QUAZAR_VOZ_AMOSTRA }, { ms: 120000 });
+  if (!r.ok) {
+    console.error(`voz: a ElevenLabs respondeu ${r.status} ao desenhar`, JSON.stringify(corpo || {}).slice(0, 300));
+    return { status: 502, corpo: { ok: false, erro: explicarFalhaDaElevenLabs(r.status, corpo) } };
+  }
+  const opcoes = ((corpo && corpo.previews) || [])
+    .filter((o) => o && /^[A-Za-z0-9_-]{1,100}$/.test(String(o.generated_voice_id || '')) && o.audio_base_64)
+    .slice(0, 3)
+    .map((o) => ({ id: o.generated_voice_id, audio: o.audio_base_64, tipo: o.media_type || 'audio/mpeg',
+                   segundos: Number(o.duration_secs) || null }));
+  if (!opcoes.length) {
+    return { status: 502, corpo: { ok: false, erro: 'A ElevenLabs não devolveu nenhuma opção. Tente de novo, ou mude a descrição.' } };
+  }
+  console.log(`voz: ${opcoes.length} opções desenhadas (${Date.now() - comecou} ms)`);
+  return { status: 200, corpo: { ok: true, opcoes, descricao, texto: QUAZAR_VOZ_AMOSTRA } };
+}));
+
+/** A ESCOLHIDA vira uma voz da conta da ElevenLabs, e o id dela vai ao banco.
+ *  A tabela é conferida ANTES: sem ela, a voz ficaria criada lá e perdida
+ *  aqui. Escolher de novo cria outra voz na conta, e a de antes fica lá. */
+app.post('/copiloto/voz/escolher', rotaDaVoz(async (req, usuario) => {
+  const recusa = await soQuemAdministraAVoz(usuario);
+  if (recusa) return recusa;
+  if (!vozLigada()) return { status: 503, corpo: { ok: false, erro: SEM_A_CHAVE_DA_VOZ } };
+  const id = String((req.body && req.body.id) || '').trim();
+  const descricao = String((req.body && req.body.descricao) || QUAZAR_VOZ_DESCRICAO).replace(/\s+/g, ' ').trim().slice(0, 1000);
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return { status: 400, corpo: { ok: false, erro: 'Escolha uma das opções.' } };
+  const v = await lerVozDoQuazar({ forcar: true });
+  if (v.semTabela) return { status: 409, corpo: { ok: false, erro: FALTA_O_062 } };
+  if (v.falhou) return { status: 502, corpo: { ok: false, erro: `Não consegui ler a voz de agora (código ${v.falhou.code || '?'}).` } };
+  const quando = new Date();
+  const dia = quando.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const { r, corpo } = await pedirAElevenLabs('/v1/text-to-voice',
+    { voice_name: `${QUAZAR_VOZ_NOME} (Zorvin) ${dia}`, voice_description: descricao, generated_voice_id: id });
+  const vozId = String((corpo && corpo.voice_id) || '');
+  if (!r.ok || !/^[A-Za-z0-9_-]{1,100}$/.test(vozId)) {
+    console.error(`voz: a ElevenLabs respondeu ${r.status} ao guardar a voz`, JSON.stringify(corpo || {}).slice(0, 300));
+    return { status: 502, corpo: { ok: false, erro: r.ok ? 'A ElevenLabs não devolveu a voz criada. Tente de novo.'
+      : explicarFalhaDaElevenLabs(r.status, corpo) } };
+  }
+  const linha = { id: true, voz_id: vozId, nome: QUAZAR_VOZ_NOME, descricao, escolhida_em: quando.toISOString(), escolhida_por: usuario.id };
+  const { error } = await supabase.from('zorvin_quazar_voz').upsert(linha, { onConflict: 'id' });
+  if (error) {
+    console.error('voz: não consegui guardar a voz escolhida', error.message);
+    return { status: 502, corpo: { ok: false, erro: `A voz foi criada na ElevenLabs, mas não consegui guardá-la no Zorvin (código ${error.code || '?'}). Escolha de novo.` } };
+  }
+  vozDoQuazar = { lida: true, linha, semTabela: false, lidaEm: Date.now() };
+  falasGuardadas.clear();
+  console.log('voz: a voz do Quazar foi escolhida');
+  return { status: 200, corpo: { ok: true, escolhida: { nome: linha.nome, descricao, escolhida_em: linha.escolhida_em,
+    escolhida_por: usuario.nomeNoZorvin || null } } };
+}));
+
+/** O QUAZAR LÊ UM TEXTO (o resumo da conversa). Qualquer pessoa entrada pede;
+ *  a fala volta em mp3. O mesmo texto ouvido de novo sai da memória. */
+app.post('/copiloto/voz/falar', rotaDaVoz(async (req) => {
+  if (!vozLigada()) return { status: 503, corpo: { ok: false, erro: SEM_A_CHAVE_DA_VOZ } };
+  const bruto = String((req.body && req.body.texto) || '');
+  if (bruto.length > VOZ_TETO_TEXTO) {
+    return { status: 400, corpo: { ok: false, erro: `O texto passa de ${VOZ_TETO_TEXTO} caracteres.` } };
+  }
+  const texto = textoParaFalar(bruto);
+  if (!texto) return { status: 400, corpo: { ok: false, erro: 'Não há o que ler.' } };
+  const v = await lerVozDoQuazar();
+  if (v.semTabela) return { status: 409, corpo: { ok: false, erro: FALTA_O_062 } };
+  if (v.falhou && !v.linha) {
+    return { status: 502, corpo: { ok: false, erro: `Não consegui ler qual é a voz do ${NOME_DO_ASSISTENTE} (código ${v.falhou.code || '?'}).` } };
+  }
+  if (!v.linha) {
+    return { status: 409, corpo: { ok: false, erro: `O ${NOME_DO_ASSISTENTE} ainda não tem voz: quem administra escolhe em `
+      + `Departamentos e acessos → ${NOME_DO_ASSISTENTE} → A voz do ${NOME_DO_ASSISTENTE}.` } };
+  }
+  const vozId = v.linha.voz_id;
+  const chave = crypto.createHash('sha256').update(`${vozId}\u0000${QUAZAR_VOZ_MODELO}\u0000${texto}`).digest('hex');
+  const guardada = falasGuardadas.get(chave);
+  if (guardada) return { audio: guardada };
+  let promessa = falasEmVoo.get(chave);
+  if (!promessa) {
+    promessa = (async () => {
+      const comecou = Date.now();
+      const { r, corpo } = await pedirAElevenLabs(`/v1/text-to-speech/${encodeURIComponent(vozId)}?output_format=mp3_44100_128`,
+        { text: texto, model_id: QUAZAR_VOZ_MODELO }, { audio: true, ms: 90000 });
+      if (!r.ok) {
+        console.error(`voz: a ElevenLabs respondeu ${r.status} ao falar`, JSON.stringify(corpo || {}).slice(0, 300));
+        return { status: 502, corpo: { ok: false, erro: explicarFalhaDaElevenLabs(r.status, corpo) } };
+      }
+      if (!Buffer.isBuffer(corpo) || !corpo.length) {
+        return { status: 502, corpo: { ok: false, erro: 'A ElevenLabs devolveu um áudio vazio. Tente de novo.' } };
+      }
+      falasGuardadas.set(chave, corpo);
+      while (falasGuardadas.size > VOZ_GUARDADAS_MAX) falasGuardadas.delete(falasGuardadas.keys().next().value);
+      // SÓ NÚMEROS NO LOG: o resumo é da conversa de um cliente.
+      console.log(`voz: o Quazar leu ${texto.length} caracteres (${Math.round(corpo.length / 1024)} KB, ${Date.now() - comecou} ms)`);
+      return { audio: corpo };
+    })().finally(() => falasEmVoo.delete(chave));
+    falasEmVoo.set(chave, promessa);
+  }
+  return promessa;
+}));
+
+// A VOZ ESCOLHIDA É LIDA AO SUBIR, só com a chave: é a resposta de
+// `/copiloto/estado` (`voz_pronta`) sem uma ida ao banco a cada pergunta.
+if (vozLigada()) setTimeout(() => { lerVozDoQuazar().catch(() => {}); }, 3000);
 
 // ============================================================
 //  O COPILOTO APRENDE COM AS CONVERSAS (05/11)

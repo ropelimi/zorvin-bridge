@@ -25685,5 +25685,432 @@ console.log("\n125. O Quazar abre as fotos e os PDFs que o cliente manda");
   }
 }
 
+// ============================================================
+// 126. O PEDIDO FALADO AO QUAZAR (24/11)
+//
+// "Quero que seja possível pedir a mudança também enviando um áudio e não só
+// digitando." O painel grava o pedido e manda a `/copiloto/ouvir`; a ponte o
+// transcreve no Groq e devolve o texto, que o painel põe no campo e manda pela
+// rota de sempre. Confere:
+//    - sem a chave do Groq, recusa e diz a variável; o estado diz `ouvir`;
+//    - sem login, recusa; o áudio vazio, o que não é áudio e o longo demais
+//      são recusados antes de ir ao Groq;
+//    - o pedido ao Groq: a chave, a língua, o modelo, a extensão pelo tipo e a
+//      dica com o nome do Quazar;
+//    - o texto volta sem espaços sobrando; nada é gravado no banco; o log não
+//      leva o que foi dito;
+//    - o silêncio (a dica devolvida, a frase das legendas) vira "não ouvi";
+//    - a recusa do Groq diz o que fazer.
+// ============================================================
+console.log("\n126. O pedido falado ao Quazar");
+{
+  const cena = { status: 200, texto: "  Tira a parte do prazo e diz que   a gente liga amanhã.  " };
+  async function subirGroqDoPedido() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = Buffer.alloc(0);
+      for await (const p of req) corpo = Buffer.concat([corpo, p]);
+      pedidos.push({ caminho: req.url, autorizacao: req.headers.authorization, corpo: corpo.toString("latin1") });
+      res.writeHead(cena.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(cena.status === 200 ? { text: cena.texto } : { error: { message: "nope" } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AUDIO = Buffer.concat([Buffer.from("\x1aE\xdf\xa3", "latin1"), crypto.randomBytes(2000)]);
+  const ouvir = (t, corpo, jwt = "jwt-bom") => fetch(`http://127.0.0.1:${t.porta}/copiloto/ouvir`, {
+    method: "POST",
+    headers: { ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}), "Content-Type": "application/json" },
+    body: JSON.stringify(corpo),
+  }).then(async (r) => ({ status: r.status, corpo: await r.json().catch(() => ({})) }));
+  const estado = (t) => fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`).then((r) => r.json()).catch(() => ({}));
+  const doPedido = { audio: AUDIO.toString("base64"), mime: "audio/webm;codecs=opus" };
+
+  // ---- 126a. sem a chave do Groq ----
+  {
+    const groq = await subirGroqDoPedido();
+    const t = await subirTudo({ GROQ_API_KEY: "", GROQ_API_URL: `${groq.url}/openai/v1` });
+    const e = await estado(t);
+    ok("126a sem a chave do Groq, o estado diz que esta ponte não ouve (ouvir: false)", e.ok === true && e.ouvir === false, JSON.stringify(e.ouvir));
+    const r = await ouvir(t, doPedido);
+    ok("e a rota recusa, dizendo a variável e que dá para escrever", r.status === 503 && /GROQ_API_KEY/.test(r.corpo.erro || "") && /Escreva o pedido/.test(r.corpo.erro || ""),
+       JSON.stringify(r));
+    ok("sem ir ao Groq", groq.pedidos.length === 0);
+    await t.parar(); await groq.parar();
+  }
+
+  // ---- 126b. o caminho inteiro ----
+  {
+    cena.status = 200; cena.texto = "  Tira a parte do prazo e diz que   a gente liga amanhã.  ";
+    const groq = await subirGroqDoPedido();
+    const t = await subirTudo({ GROQ_API_KEY: "gsk-de-mentira", GROQ_API_URL: `${groq.url}/openai/v1` });
+    const e = await estado(t);
+    ok("126b com a chave, o estado diz ouvir: true", e.ouvir === true, JSON.stringify(e.ouvir));
+    const semLogin = await ouvir(t, doPedido, null);
+    ok("sem login, recusa", semLogin.status === 401, JSON.stringify(semLogin));
+    // A FILA DE ENVIO GRAVA SOZINHA de 3 em 3 segundos (os presos): fica de fora.
+    const gravacoes = () => t.sb.chamadas.filter((c) => c.metodo !== "GET" && !/fila_envio/.test(c.caminho));
+    const gravadosAntes = gravacoes().length;
+    const r = await ouvir(t, doPedido);
+    ok("devolve o texto, sem os espaços sobrando", r.status === 200 && r.corpo.ok === true && r.corpo.texto === "Tira a parte do prazo e diz que a gente liga amanhã.",
+       JSON.stringify(r));
+    const p = groq.pedidos[0] || {};
+    ok("a chave do Groq foi no cabeçalho, pela rota de transcrição", p.autorizacao === "Bearer gsk-de-mentira"
+       && /\/openai\/v1\/audio\/transcriptions$/.test(p.caminho || ""), `${p.autorizacao} ${p.caminho}`);
+    ok("com a língua (pt) e o modelo", /name="language"\r\n\r\npt\r\n/.test(p.corpo || "") && /name="model"\r\n\r\nwhisper-large-v3-turbo\r\n/.test(p.corpo || ""));
+    ok("o arquivo vai como .webm, pelo tipo do navegador", /filename="audio\.webm"/.test(p.corpo || ""));
+    ok("os bytes do áudio vão inteiros", (p.corpo || "").includes(AUDIO.toString("latin1")));
+    ok("com a dica: um pedido ao Quazar", /name="prompt"\r\n\r\nPedido ao Quazar, o assistente do Zorvin, para mudar a mensagem que vai ao cliente\.\r\n/.test(p.corpo || ""));
+    ok("nada foi gravado no banco", gravacoes().length === gravadosAntes,
+       gravacoes().slice(gravadosAntes).map((c) => `${c.metodo} ${c.caminho}`).join(", "));
+    const log = t.registro.join("");
+    ok("o log diz quantos bytes e caracteres, e não o que foi dito", /pedido falado ouvido \(\d+ bytes, \d+ caracteres\)/.test(log) && !/liga amanhã/.test(log),
+       log.split("\n").filter((l) => /pedido falado/.test(l)).join(" | "));
+
+    // ---- 126c. o que não vai ao Groq ----
+    const antes = groq.pedidos.length;
+    const vazio = await ouvir(t, { audio: "", mime: "audio/webm" });
+    ok("126c sem áudio: recusa", vazio.status === 400 && /Grave o pedido/.test(vazio.corpo.erro || ""), JSON.stringify(vazio));
+    const naoAudio = await ouvir(t, { audio: AUDIO.toString("base64"), mime: "image/png" });
+    ok("o que não é áudio: recusa", naoAudio.status === 400 && /não é um áudio/.test(naoAudio.corpo.erro || ""), JSON.stringify(naoAudio));
+    const longo = await ouvir(t, { audio: Buffer.alloc(5 * 1024 * 1024 + 4096, 7).toString("base64"), mime: "audio/webm" });
+    ok("o longo demais (mais de 5 MB): recusa sem decodificar, e manda encurtar ou escrever", longo.status === 413 && /mais curto, ou escreva/.test(longo.corpo.erro || ""),
+       JSON.stringify(longo));
+    ok("nenhum dos três foi ao Groq", groq.pedidos.length === antes, `foram ${groq.pedidos.length - antes}`);
+
+    // ---- 126d. o silêncio ----
+    cena.texto = "Pedido ao Quazar, o assistente do Zorvin.";
+    const eco = await ouvir(t, doPedido);
+    ok("126d a dica devolvida (o silêncio): 'não ouvi nenhuma fala'", eco.status === 422 && /Não ouvi nenhuma fala/.test(eco.corpo.erro || ""), JSON.stringify(eco));
+    cena.texto = "Legendas pela comunidade Amara.org";
+    const amara = await ouvir(t, doPedido);
+    ok("a frase das legendas também", amara.status === 422, JSON.stringify(amara));
+    cena.texto = "   ";
+    const branco = await ouvir(t, doPedido);
+    ok("o texto em branco também", branco.status === 422, JSON.stringify(branco));
+    cena.texto = "Pedido curto: fala do Quazar não.";
+    const fala = await ouvir(t, doPedido);
+    ok("e um pedido de verdade que cita o Quazar passa", fala.status === 200 && fala.corpo.texto === "Pedido curto: fala do Quazar não.", JSON.stringify(fala));
+
+    // ---- 126e. a recusa do Groq ----
+    cena.status = 429;
+    const limite = await ouvir(t, doPedido);
+    ok("126e o limite do Groq: a frase dele", limite.status === 502 && /limite de uso do Groq/.test(limite.corpo.erro || ""), JSON.stringify(limite));
+    cena.status = 401;
+    const chave = await ouvir(t, doPedido);
+    ok("a chave recusada: manda conferir GROQ_API_KEY", chave.status === 502 && /GROQ_API_KEY/.test(chave.corpo.erro || ""), JSON.stringify(chave));
+    cena.status = 200;
+    await t.parar(); await groq.parar();
+  }
+}
+
+// ============================================================
+// 127. A VOZ DO QUAZAR (24/11)
+//
+// "Uma opção dele ler o resumo para o usuário. Crie uma voz única, que seja
+// marcante." A voz é desenhada na ElevenLabs: quem administra gera três
+// opções, ouve e escolhe; a ponte guarda a escolhida e lê o resumo com ela.
+// Confere, com uma ElevenLabs de mentira:
+//    - sem a chave, o estado diz voz: false e as rotas dizem a variável;
+//    - só quem administra vê, gera e escolhe; qualquer pessoa entrada ouve;
+//    - gerar: a descrição e a amostra em português vão à ElevenLabs, com a
+//      chave no cabeçalho; voltam as três opções;
+//    - escolher: cria a voz na conta, guarda o id no banco, e o estado passa a
+//      dizer voz_pronta; sem a tabela (o 062), recusa ANTES de criar a voz;
+//    - falar: sem voz escolhida, diz quem escolhe; com voz, devolve o mp3; os
+//      dados pessoais saem do texto; o mesmo texto não vai duas vezes; dois
+//      cliques juntos são uma ida; o log não leva o texto;
+//    - cada recusa da ElevenLabs diz o que fazer.
+// ============================================================
+console.log("\n127. A voz do Quazar");
+{
+  const cena = { status: 200, previews: 3, detalhe: null, demora: 0 };
+  const MP3 = Buffer.concat([Buffer.from("ID3", "latin1"), crypto.randomBytes(3000)]);
+  async function subirElevenLabs() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push({ caminho: req.url, chave: req.headers["xi-api-key"], corpo: json });
+      if (cena.demora) await espera(cena.demora);
+      if (cena.status !== 200) {
+        res.writeHead(cena.status, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ detail: cena.detalhe || { status: "erro", message: "nope" } }));
+      }
+      if (req.url.startsWith("/v1/text-to-voice/design")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ text: json && json.text, previews: Array.from({ length: cena.previews }, (_, i) => ({
+          generated_voice_id: `gerada-${i + 1}`, audio_base_64: Buffer.from(`amostra-${i + 1}`).toString("base64"),
+          media_type: "audio/mpeg", duration_secs: 9.5 + i, language: "pt" })) }));
+      }
+      if (req.url === "/v1/text-to-voice") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ voice_id: `voz-de-${json && json.generated_voice_id}`, name: json && json.voice_name }));
+      }
+      if (req.url.startsWith("/v1/text-to-speech/")) {
+        res.writeHead(200, { "Content-Type": "audio/mpeg" });
+        return res.end(MP3);
+      }
+      res.writeHead(404); res.end();
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const chamar = (t, metodo, caminho, corpo, jwt = "jwt-bom") => fetch(`http://127.0.0.1:${t.porta}${caminho}`, {
+    method: metodo,
+    headers: { ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}), "Content-Type": "application/json" },
+    ...(corpo ? { body: JSON.stringify(corpo) } : {}),
+  }).then(async (r) => {
+    const tipo = r.headers.get("content-type") || "";
+    if (/audio/.test(tipo)) return { status: r.status, tipo, audio: Buffer.from(await r.arrayBuffer()) };
+    return { status: r.status, tipo, corpo: await r.json().catch(() => ({})) };
+  });
+  const estado = (t) => fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`).then((r) => r.json()).catch(() => ({}));
+  const comChave = (el, extra = {}) => ({ ELEVENLABS_API_KEY: "xi-de-mentira", ELEVENLABS_API_URL: el.url, ...extra });
+  const ADMIN = [{ id: "u1", nome: "Rodrigo", admin: true, ativo: true }];
+  const ATENDE = [{ id: "u1", nome: "Jenifer", admin: false, ativo: true }];
+  const RESUMO = "Quazar aqui. Resumo da conversa com Andreia. O que o cliente quer: saber do acordo. CPF 123.456.789-09, "
+    + "telefone (71) 99999-0000. Já foi combinado: mandar o comprovante.";
+
+  // ---- 127a. sem a chave ----
+  {
+    const el = await subirElevenLabs();
+    const t = await subirTudo({ ELEVENLABS_API_URL: el.url }, { tabelas: { usuarios: ADMIN, zorvin_quazar_voz: [] } });
+    const e = await estado(t);
+    ok("127a sem a chave, o estado diz voz: false e voz_pronta: false", e.voz === false && e.voz_pronta === false, JSON.stringify([e.voz, e.voz_pronta]));
+    const g = await chamar(t, "POST", "/copiloto/voz/opcoes", {});
+    ok("gerar diz a variável que falta", g.status === 503 && /ELEVENLABS_API_KEY/.test(g.corpo.erro || ""), JSON.stringify(g));
+    const f = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "oi" });
+    ok("falar também", f.status === 503 && /ELEVENLABS_API_KEY/.test(f.corpo.erro || ""), JSON.stringify(f));
+    const v = await chamar(t, "GET", "/copiloto/voz");
+    ok("a tela de quem administra diz ligada: false, com a descrição e a amostra", v.status === 200 && v.corpo.ligada === false
+       && /Brazilian Portuguese/.test(v.corpo.descricao_padrao || "") && /Aqui é o Quazar/.test(v.corpo.amostra || ""), JSON.stringify(v.corpo).slice(0, 200));
+    ok("sem ir à ElevenLabs", el.pedidos.length === 0);
+    await t.parar(); await el.parar();
+  }
+
+  // ---- 127b. quem atende não gera nem escolhe, e ouve ----
+  {
+    const el = await subirElevenLabs();
+    const t = await subirTudo(comChave(el), { tabelas: { usuarios: ATENDE, zorvin_quazar_voz: [] } });
+    const v = await chamar(t, "GET", "/copiloto/voz");
+    ok("127b quem atende não vê a tela da voz", v.status === 403 && /Só quem administra/.test(v.corpo.erro || ""), JSON.stringify(v));
+    const g = await chamar(t, "POST", "/copiloto/voz/opcoes", {});
+    ok("nem gera", g.status === 403, JSON.stringify(g));
+    const esc = await chamar(t, "POST", "/copiloto/voz/escolher", { id: "gerada-1" });
+    ok("nem escolhe", esc.status === 403, JSON.stringify(esc));
+    const f = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Oi" });
+    ok("ouve, e sem voz escolhida a frase diz quem escolhe e onde", f.status === 409
+       && /ainda não tem voz/.test(f.corpo.erro || "") && /Departamentos e acessos → Quazar → A voz do Quazar/.test(f.corpo.erro || ""), JSON.stringify(f));
+    const semLogin = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Oi" }, null);
+    ok("sem login, recusa", semLogin.status === 401, JSON.stringify(semLogin));
+    ok("nada foi à ElevenLabs", el.pedidos.length === 0, `foram ${el.pedidos.length}`);
+    await t.parar(); await el.parar();
+  }
+
+  // ---- 127c. o caminho inteiro ----
+  {
+    cena.status = 200; cena.previews = 3;
+    const el = await subirElevenLabs();
+    const t = await subirTudo(comChave(el), { tabelas: { usuarios: ADMIN, zorvin_quazar_voz: [] } });
+    await espera(3500); // a leitura da voz ao subir
+    const e0 = await estado(t);
+    ok("127c com a chave e sem voz escolhida: voz: true, voz_pronta: false", e0.voz === true && e0.voz_pronta === false, JSON.stringify([e0.voz, e0.voz_pronta]));
+    const curta = await chamar(t, "POST", "/copiloto/voz/opcoes", { descricao: "pato" });
+    ok("a descrição curta demais é recusada antes de ir à ElevenLabs", curta.status === 400 && el.pedidos.length === 0, JSON.stringify(curta));
+    const g = await chamar(t, "POST", "/copiloto/voz/opcoes", {});
+    ok("gerar devolve as três opções, com o áudio de cada uma", g.status === 200 && g.corpo.opcoes?.length === 3
+       && g.corpo.opcoes.every((o) => o.id && o.audio && o.tipo === "audio/mpeg") && g.corpo.opcoes.length === 3, JSON.stringify(g.corpo).slice(0, 200));
+    const p = el.pedidos[0] || {};
+    ok("pelo desenho de voz, com a chave no cabeçalho", /^\/v1\/text-to-voice\/design\?output_format=mp3_44100_128$/.test(p.caminho || "") && p.chave === "xi-de-mentira",
+       `${p.caminho} ${p.chave}`);
+    ok("com a descrição padrão (em inglês, com o sotaque) e a amostra em português", /Native Brazilian Portuguese speaker/.test(p.corpo?.voice_description || "")
+       && /^Fala, equipe! Aqui é o Quazar/.test(p.corpo?.text || "") && (p.corpo?.text || "").length >= 100, JSON.stringify(p.corpo).slice(0, 200));
+    ok("com o modelo de desenho", p.corpo?.model_id === "eleven_multilingual_ttv_v2", String(p.corpo?.model_id));
+    const outra = await chamar(t, "POST", "/copiloto/voz/opcoes", { descricao: "A deep, calm Brazilian narrator voice, warm and slow." });
+    ok("a descrição escrita na tela é a que vai", (el.pedidos[1]?.corpo?.voice_description || "") === "A deep, calm Brazilian narrator voice, warm and slow."
+       && outra.status === 200);
+
+    const ruim = await chamar(t, "POST", "/copiloto/voz/escolher", { id: "../../x" });
+    ok("escolher um id estranho é recusado", ruim.status === 400, JSON.stringify(ruim));
+    const esc = await chamar(t, "POST", "/copiloto/voz/escolher", { id: "gerada-2", descricao: "A deep, calm Brazilian narrator voice, warm and slow." });
+    ok("escolher devolve quem escolheu", esc.status === 200 && esc.corpo.escolhida?.nome === "Quazar" && esc.corpo.escolhida?.escolhida_por === "Rodrigo",
+       JSON.stringify(esc));
+    const cria = el.pedidos.find((x) => x.caminho === "/v1/text-to-voice") || {};
+    ok("a voz é criada na conta, com o nome do Quazar e a descrição", cria.corpo?.generated_voice_id === "gerada-2"
+       && /^Quazar \(Zorvin\) /.test(cria.corpo?.voice_name || "") && /narrator/.test(cria.corpo?.voice_description || ""), JSON.stringify(cria.corpo));
+    const linha = (t.sb.dados.zorvin_quazar_voz || [])[0] || {};
+    ok("e o id dela vai ao banco, com quem escolheu", linha.id === true && linha.voz_id === "voz-de-gerada-2" && linha.escolhida_por === "u1",
+       JSON.stringify(linha));
+    const e1 = await estado(t);
+    ok("o estado passa a dizer voz_pronta: true", e1.voz_pronta === true, JSON.stringify(e1.voz_pronta));
+    const v = await chamar(t, "GET", "/copiloto/voz");
+    ok("a tela de quem administra mostra a escolhida, sem o id", v.corpo.escolhida?.nome === "Quazar" && v.corpo.escolhida?.escolhida_por === "Rodrigo"
+       && !JSON.stringify(v.corpo).includes("voz-de-gerada-2"), JSON.stringify(v.corpo.escolhida));
+
+    const antes = el.pedidos.length;
+    const f = await chamar(t, "POST", "/copiloto/voz/falar", { texto: RESUMO });
+    ok("falar devolve o mp3", f.status === 200 && /audio\/mpeg/.test(f.tipo) && f.audio && f.audio.equals(MP3), `${f.status} ${f.tipo}`);
+    const fala = el.pedidos[antes] || {};
+    ok("pela voz escolhida, com o modelo que fala", fala.caminho === "/v1/text-to-speech/voz-de-gerada-2?output_format=mp3_44100_128"
+       && fala.corpo?.model_id === "eleven_multilingual_v2", `${fala.caminho} ${fala.corpo?.model_id}`);
+    ok("o CPF e o telefone saem do texto (viram 'dado na tela')", /CPF dado na tela/.test(fala.corpo?.text || "")
+       && !/123\.456/.test(fala.corpo?.text || "") && !/99999-0000/.test(fala.corpo?.text || ""), fala.corpo?.text);
+    const de2 = await chamar(t, "POST", "/copiloto/voz/falar", { texto: RESUMO });
+    ok("o mesmo texto de novo sai da memória, sem ir à ElevenLabs", de2.status === 200 && de2.audio?.equals(MP3) && el.pedidos.length === antes + 1,
+       `foram ${el.pedidos.length - antes}`);
+    cena.demora = 400;
+    const [a, b] = await Promise.all([chamar(t, "POST", "/copiloto/voz/falar", { texto: "Outro resumo." }), chamar(t, "POST", "/copiloto/voz/falar", { texto: "Outro resumo." })]);
+    cena.demora = 0;
+    ok("dois cliques juntos são uma ida só", a.status === 200 && b.status === 200 && el.pedidos.length === antes + 2, `foram ${el.pedidos.length - antes}`);
+    const longo = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "a".repeat(2501) });
+    ok("o texto acima de 2500 caracteres é recusado", longo.status === 400, JSON.stringify(longo));
+    const log = t.registro.join("");
+    ok("o log diz quantos caracteres, e não o que foi lido", /o Quazar leu \d+ caracteres/.test(log) && !/Andreia/.test(log) && !/comprovante/.test(log),
+       log.split("\n").filter((l) => /voz:/.test(l)).join(" | "));
+
+    // ---- 127d. cada recusa diz o que fazer ----
+    cena.status = 401; cena.detalhe = { status: "invalid_api_key", message: "bad" };
+    const r401 = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Recusa um." });
+    ok("127d a chave recusada: confira ELEVENLABS_API_KEY", r401.status === 502 && /ELEVENLABS_API_KEY/.test(r401.corpo.erro || ""), JSON.stringify(r401));
+    cena.status = 401; cena.detalhe = { status: "quota_exceeded", message: "This request exceeds your quota" };
+    const quota = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Recusa dois." });
+    ok("os créditos que acabaram: confira o plano", /créditos da ElevenLabs acabaram/.test(quota.corpo.erro || ""), JSON.stringify(quota));
+    cena.status = 404; cena.detalhe = { status: "voice_not_found", message: "voice not found" };
+    const sumiu = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Recusa três." });
+    ok("a voz que sumiu da conta: quem administra escolhe de novo", /não existe mais na conta/.test(sumiu.corpo.erro || ""), JSON.stringify(sumiu));
+    cena.status = 429; cena.detalhe = null;
+    const muitos = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Recusa quatro." });
+    ok("o limite: tente em um minuto", /pedidos demais agora \(429\)/.test(muitos.corpo.erro || ""), JSON.stringify(muitos));
+    cena.status = 200; cena.previews = 0;
+    const nenhuma = await chamar(t, "POST", "/copiloto/voz/opcoes", {});
+    ok("o desenho sem nenhuma opção diz para tentar de novo", nenhuma.status === 502 && /nenhuma opção/.test(nenhuma.corpo.erro || ""), JSON.stringify(nenhuma));
+    cena.previews = 3;
+    await t.parar(); await el.parar();
+  }
+
+  // ---- 127e. sem o 062: recusa antes de criar a voz ----
+  {
+    const el = await subirElevenLabs();
+    const t = await subirTudo(comChave(el), { tabelas: { usuarios: ADMIN }, semTabelas: ["zorvin_quazar_voz"] });
+    const esc = await chamar(t, "POST", "/copiloto/voz/escolher", { id: "gerada-1" });
+    ok("127e sem a tabela, escolher diz que falta o 062", esc.status === 409 && /062/.test(esc.corpo.erro || ""), JSON.stringify(esc));
+    ok("e a voz não foi criada na conta", !el.pedidos.some((x) => x.caminho === "/v1/text-to-voice"), el.pedidos.map((x) => x.caminho).join(","));
+    const f = await chamar(t, "POST", "/copiloto/voz/falar", { texto: "Oi" });
+    ok("falar também diz que falta o 062", f.status === 409 && /062/.test(f.corpo.erro || ""), JSON.stringify(f));
+    await t.parar(); await el.parar();
+  }
+}
+
+// ============================================================
+//  128. A VOZ DO QUAZAR (062), num Postgres de verdade
+//
+//  A seção guarda:
+//    - num banco limpo, nada;
+//    - a tabela de uma linha só, que só a ponte alcança (a herança da
+//      Supabase é tirada de quem entrou e de quem não entrou);
+//    - as regras: uma linha só, o id e o nome obrigatórios, a descrição com
+//      teto;
+//    - rodar de novo não perde a voz escolhida, e a conferência a diz;
+//    - e a conferência acusa a tabela aberta para quem entrou.
+// ============================================================
+{
+  console.log("\n128. A voz do Quazar (062), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 062 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const S062 = fs.readFileSync(new URL("../sql/automaticos/062-a-voz-do-quazar.sql", import.meta.url), "utf8");
+    const ESQUEMA = `
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false,
+  ativo boolean not null default true);
+create table conversas (id uuid primary key default gen_random_uuid());
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const pode = async (c, papel, priv) => (await c.query("select has_table_privilege($1, 'public.zorvin_quazar_voz', $2) p", [papel, priv])).rows[0].p;
+    const U = "00000000-0000-0000-0000-0000000000a1";
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 128a. num banco limpo, nada ----
+      {
+        const limpo = await bancoNovo();
+        const r = await guardado(() => aplicar(limpo, S062));
+        ok("128a num banco limpo, o 062 não faz nada e diz isso", /nada a fazer/.test(String(item(r, /sem as tabelas/))), JSON.stringify(r));
+        ok("e não cria a tabela", (await limpo.query("select to_regclass('public.zorvin_quazar_voz') t")).rows[0].t === null);
+      }
+
+      // ---- 128b. a instalação ----
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(`insert into usuarios (id, nome, admin) values ('${U}', 'Quem administra', true)`);
+      const r = await guardado(() => aplicar(c, S062));
+      ok("128b a instalação passa, sem nada pintado de defeito", Array.isArray(r) && !defeito(r), JSON.stringify(r));
+      ok("a conferência diz que ainda não há voz, e onde se escolhe", /nenhuma ainda.*aba Quazar/.test(String(item(r, /voz escolhida/))), JSON.stringify(r));
+      ok("quem entrou não lê nem grava a tabela", !(await pode(c, "authenticated", "select")) && !(await pode(c, "authenticated", "insert"))
+         && !(await pode(c, "authenticated", "update")) && !(await pode(c, "authenticated", "delete")));
+      ok("quem não entrou também não", !(await pode(c, "anon", "select")) && !(await pode(c, "anon", "insert")));
+      ok("a ponte alcança", (await pode(c, "service_role", "select")) && (await pode(c, "service_role", "insert")));
+      ok("com a regra de acesso ligada", (await c.query("select relrowsecurity r from pg_class where relname = 'zorvin_quazar_voz'")).rows[0].r === true);
+
+      // ---- 128c. as regras ----
+      await c.query(`insert into zorvin_quazar_voz (voz_id, nome, descricao, escolhida_por) values ('voz-1', 'Quazar', 'A voice', '${U}')`);
+      const segunda = await guardado(() => c.query("insert into zorvin_quazar_voz (id, voz_id, nome) values (false, 'voz-2', 'Outro')"));
+      ok("128c uma linha só: a segunda é recusada", Boolean(segunda.codigo), JSON.stringify(segunda));
+      const semId = await guardado(() => c.query("update zorvin_quazar_voz set voz_id = ''"));
+      ok("o id vazio é recusado", semId.codigo === "23514", JSON.stringify(semId));
+      const longa = await guardado(() => c.query(`update zorvin_quazar_voz set descricao = repeat('x', 1001)`));
+      ok("a descrição acima de 1000 caracteres é recusada", longa.codigo === "23514", JSON.stringify(longa));
+      const quando = (await c.query("select escolhida_em from zorvin_quazar_voz")).rows[0].escolhida_em;
+      ok("a hora da escolha nasce sozinha", quando instanceof Date);
+
+      // ---- 128d. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S062));
+      ok("128d rodar de novo não acusa nada, e diz a voz escolhida", Array.isArray(de2) && !defeito(de2)
+         && /^Quazar \(desde /.test(String(item(de2, /voz escolhida/))), JSON.stringify(de2));
+      ok("e não perde a linha", (await c.query("select voz_id from zorvin_quazar_voz")).rows[0]?.voz_id === "voz-1");
+
+      // ---- 128e. a conferência acusa a tabela aberta ----
+      await c.query("grant select on zorvin_quazar_voz to authenticated");
+      const aberta = await guardado(() => c.query(S062.replace(/if v_auth then execute 'revoke all on public\.zorvin_quazar_voz from authenticated'; end if;/, "")));
+      const linhas = Array.isArray(aberta) ? aberta[aberta.length - 1].rows : (aberta && aberta.rows) || aberta;
+      ok("128e com a tabela aberta para quem entrou, a conferência diz NÃO", /^NÃO — quem entrou alcança/.test(String(item(linhas, /quem entrou não alcança/))),
+         JSON.stringify(linhas));
+      await c.query("revoke all on zorvin_quazar_voz from authenticated");
+    } catch (e) {
+      ok("a seção 128 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const nome of bancos) await raiz.query(`drop database if exists ${nome} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
