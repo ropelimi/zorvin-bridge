@@ -24370,6 +24370,45 @@ console.log("\n118. O Quazar à noite, valendo — a ponte manda");
     await t4.parar();
   }
 
+  // ---- 118f. duas fotos no mesmo segundo (24/11) ----
+  // O álbum chega com a mesma hora nas duas fotos. O banco escolhe a última
+  // pela hora e, no empate, pelo id maior (o 059); a ponte tem de escolher a
+  // mesma. Com a ordem só pela hora, ela escolhia a outra, dizia "o cliente
+  // escreveu de novo", e a IA era chamada a cada volta, sem nada sair.
+  {
+    const claude = await subirClaude();
+    const mesma = haMin(3);
+    const fotos = [
+      { id: "m5a", conversa_id: "c1", origem: "contato", tipo: "imagem", texto: "", criado_em: mesma },
+      { id: "m5b", conversa_id: "c1", origem: "contato", tipo: "imagem", texto: "", criado_em: mesma },
+    ];
+    const item = { ...ITEM, cliente_ate: mesma, cliente_ate_id: "m5b" };
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [...tabelas().mensagens, ...fotos] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes(item) } });
+    await esperaAte(() => (t.sb.dados.fila_envio || []).some((f) => f.pelo_quazar), 9000);
+    await espera(1200);
+    ok("118f com duas fotos no mesmo segundo, a ponte escolhe a mesma última mensagem do banco, e a resposta sai",
+       (t.sb.dados.fila_envio || []).filter((f) => f.pelo_quazar).length === 1 && !/o cliente escreveu de novo/.test(t.registro.join("")),
+       t.registro.join("").slice(-400));
+    ok("e a IA é chamada uma vez só", claude.pedidos.length === 1, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 118g. a ponte e o banco discordam: a IA não é chamada a cada volta ----
+  {
+    const claude = await subirClaude();
+    const nova = { id: "m4", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "e o acordo?", criado_em: haMin(0.5) };
+    // O banco devolve sempre a mesma mensagem (m3), e a ponte vê outra (m4):
+    // qualquer desacordo entre os dois, e não só o do álbum.
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [...tabelas().mensagens, nova] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    await espera(3000);
+    ok("118g com a ponte e o banco discordando, a IA é chamada uma vez, e a conversa espera antes da próxima",
+       claude.pedidos.length === 1 && !(t.sb.dados.fila_envio || []).length, `${claude.pedidos.length} pedidos em 3 s (a volta é de 0,4 s)`);
+    await t.parar(); await claude.parar();
+  }
+
   // ---- 118e. a espera padrão de 1 minuto ----
   {
     const claude = await subirClaude();
