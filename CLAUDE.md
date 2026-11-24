@@ -98,6 +98,13 @@ Variáveis de ambiente (no Render):
   clique, sem mexer no código. **Opcional: sem ela, os áudios são
   transcritos sozinhos.** `TRANSCRICAO_INTERVALO_MS` e
   `TRANSCRICAO_PRIMEIRA_MS` (os dois com padrão de 20 s) são para a bancada.
+- `ELEVENLABS_API_KEY` — a chave da ElevenLabs, para a voz do Quazar (ele lê o
+  resumo da conversa em voz alta). **Opcional: sem ela, o botão de ouvir o
+  resumo não aparece**, e a tela de escolher a voz diz qual variável falta.
+  `ELEVENLABS_API_URL` (a bancada aponta para uma ElevenLabs de mentira),
+  `QUAZAR_VOZ_MODELO` (padrão `eleven_multilingual_v2`, o que fala) e
+  `QUAZAR_VOZ_DESENHO` (padrão `eleven_multilingual_ttv_v2`, o que desenha a voz)
+  são opcionais. Ver "A voz do Quazar (script 062, 24/11)".
 - `FUNIL_IA` — `desligada` faz a IA não mover o funil, mesmo nos funis com a
   chave ligada. **Opcional: sem ela, a IA move os funis em que quem
   administra ligou a chave** (e só com `ANTHROPIC_API_KEY`).
@@ -4072,6 +4079,134 @@ Prova: seção 125 (a conta chamada "Boleto" e a foto abertas, com o vídeo, o
 fora e o porquê; a Anthropic que recusa; o aviso automático e o Quazar que não
 contam; o tipo pelos bytes; o dia, que abre e diz no registro; a sugestão, que
 não abre).
+
+### Pedir a mudança ao Quazar falando (24/11)
+
+Pedido do Rodrigo: *"No "Sugerir resposta" quando vou pedir uma mudança ao
+Quazar, quero que seja possível pedir a mudança também enviando um áudio e não
+só digitando."*
+
+`POST /copiloto/ouvir` (`{ audio, mime }`, com login): o painel grava o pedido,
+manda em base64, e a ponte devolve `{ ok, texto }`, o que foi dito. **Quem
+pede a mudança continua sendo o `/copiloto/ajustar`**, com o texto: a fala é
+só outro jeito de escrever o pedido, e a lição, o "Aprendi" e o Desfazer são os
+de sempre.
+
+- **Pelo Groq, a mesma chave da transcrição** (`GROQ_API_KEY`), pela mesma
+  ida (`pedirAoGroq`, que `transcreverNoGroq` também usa), em português e com
+  uma **dica** (`prompt` do Whisper: "Pedido ao Quazar, o assistente do
+  Zorvin, para mudar a mensagem que vai ao cliente."), que ajuda a acertar o
+  nome dele;
+- **nada é gravado**: nem o áudio, nem o texto. O pedido falado é como o
+  digitado, que também não vai ao banco (só a lição, se houver);
+- **o que não é fala é dito** (422, *"Não ouvi nenhuma fala no áudio…"*): o
+  texto vazio, a frase das legendas que o Whisper inventa no silêncio
+  ("Amara.org") e a própria dica devolvida;
+- **teto de 5 MB, conferido no tamanho do base64, antes de decodificar**
+  (413): um pedido falado de um minuto tem uns 500 KB;
+- **só áudio** (o tipo começa com `audio/`), e o vazio pede para gravar antes;
+- **sem a chave do Groq**, 503 com a variável que falta: o campo de escrever
+  continua;
+- **só números no log**: quantos bytes e quantos caracteres;
+- **`/copiloto/estado` diz `ouvir`** (a chave existe). A ponte de antes não
+  diz, e o painel não oferece o microfone.
+
+**E o nome do áudio gravado no Chrome ia errado ao Groq.** `extensaoDoAudio`
+olhava `opus` antes de `webm`, e o `audio/webm;codecs=opus` (o que o Chrome
+grava) ia com o nome `.ogg`. **Não deu defeito**: medido em 24/11, os 96 áudios
+webm dos últimos 30 dias estão transcritos (o Groq reconhece pelo conteúdo).
+Hoje o `webm` vem antes, e o nome diz o que o arquivo é.
+
+Prova: seção 126, 23 conferências, com um Groq de mentira que guarda cada
+pedido.
+
+### A voz do Quazar (script 062, 24/11)
+
+Pedido do Rodrigo: *"no ícone de pergaminho onde temos o resumo da conversa,
+quero também a possibilidade de darmos voz ao Quazar! Uma opção dele ler o
+resumo para o usuário. Crie uma voz única, que seja marcante, difícil de não
+reconhecer, de forma natural com o jeito do nosso pato Quazar."* O serviço é a
+**ElevenLabs**, escolhido por ele.
+
+**A voz é DESENHADA, e não escolhida numa lista.** A ElevenLabs cria uma voz
+nova a partir de uma descrição (`/v1/text-to-voice/design`) e devolve três
+opções, cada uma falando a mesma amostra. **Quem escolhe é quem ouve**, a régua
+dos sons de aviso (*quem não ouve o som não o fabrica*): quem administra ouve as
+três no Zorvin e escolhe uma; a ponte a guarda na biblioteca da conta
+(`/v1/text-to-voice`) e o id dela no banco.
+
+| rota | quem | o quê |
+|---|---|---|
+| `GET /copiloto/voz` | quem administra | se está ligada, a voz escolhida (nome, descrição, quando e quem), o modelo, a descrição de partida e a amostra. **Nunca o id da voz** |
+| `POST /copiloto/voz/opcoes` | quem administra | a descrição (de 20 a 1000 caracteres, o que a ElevenLabs aceita) → até três `{ id, audio, tipo, segundos }` |
+| `POST /copiloto/voz/escolher` | quem administra | o `id` de uma das opções → cria a voz ("Quazar (Zorvin) dd/mm hh:mm") e grava |
+| `POST /copiloto/voz/falar` | quem entrou | o texto (até 2500) → o mp3 |
+
+- **A descrição vai em inglês**, que é a língua em que a ElevenLabs desenha
+  melhor, pedindo português do Brasil: um pato malandro de óculos escuros,
+  adulto, voz um pouco nasalada e brilhante que lembra um pato **sem
+  grasnar**, confiante, simpático, com um sorriso na voz, sem gritar e sem ser
+  infantil. **Quem administra muda a descrição na tela antes de gerar**, e é
+  ela que vai para a ElevenLabs. **A amostra é em português**, com o jeito dele
+  ("Fala, equipe! Aqui é o Quazar…"): a escolha é pelo que ele vai ler;
+- **cada "Escolher esta" cria uma voz na biblioteca da ElevenLabs**: a conta
+  tem um limite de vozes, e as velhas se apagam por lá;
+- **o banco guarda só uma** (`zorvin_quazar_voz`, uma linha, `check (id)`): o
+  id, o nome, a descrição, quando e quem escolheu. **Só a ponte alcança**: RLS
+  ligada, sem política, e tirada a herança de quem entrou e de quem não entrou.
+  A tela pergunta à ponte. Escolher confere a tabela **antes** de criar a voz:
+  sem o 062, uma voz criada sem ter onde ser guardada seria crédito gasto à toa
+  (409 com o script que falta);
+- **a voz escolhida fica na memória da ponte por 5 minutos**, e a leitura que
+  falha não apaga o que já se sabia;
+- **falar passa o texto pela limpeza dos dados pessoais** (`semDadosPessoais`):
+  CPF, CNPJ, processo, e-mail e telefone viram "dado na tela". Falado, um CPF
+  não ajuda ninguém, e ele continua escrito no quadro;
+- **o áudio não vai ao banco**: fica na memória da ponte (até 30 falas, pela
+  impressão digital da voz, do modelo e do texto), para o mesmo resumo ouvido
+  de novo não custar outra vez; e dois cliques juntos são uma ida
+  (`falasEmVoo`);
+- **sem a voz escolhida, falar é 409** e diz onde escolher: Departamentos e
+  acessos → Quazar → A voz do Quazar;
+- **cada recusa da ElevenLabs vira uma frase** (`explicarFalhaDaElevenLabs`):
+  os créditos ou a cota que acabaram, a chave recusada (com a variável), a voz
+  que sumiu da biblioteca, o limite de uso, e o resto com o código;
+- **`/copiloto/estado` diz `voz` (a chave existe) e `voz_pronta`** (há voz
+  escolhida; `null` enquanto não leu). O painel mostra o "Ouvir" só com as
+  duas;
+- **só números no log**: quantos caracteres, quantos KB e quantos
+  milissegundos. Nada do que foi lido.
+
+**O que vai à ElevenLabs, e foi dito ao Rodrigo:** a descrição, a amostra e o
+resumo que a pessoa pediu para ouvir, sem os dados pessoais. **A ElevenLabs não
+foi chamada daqui**: o pedido e as respostas seguem a documentação dela, e a
+prova usa uma ElevenLabs de mentira. Um erro de verdade aparece na tela, com a
+frase.
+
+**O custo** depende do plano da conta (a ElevenLabs cobra por caractere lido).
+Um resumo lido tem, numa estimativa, de 500 a 1.500 caracteres.
+
+Provas: seção 127 (as rotas, 39 conferências, com uma ElevenLabs de mentira) e
+seção 128 (o 062 num Postgres de verdade, com a herança da Supabase, 15).
+
+**As duas rotas desta entrega: 36 sabotagens e 36 pegas**, rodadas em cópias e
+lidas uma a uma (e a cópia de controle passou inteira):
+
+- **o pedido falado:** sem a dica; o `webm` depois do `opus`; a dica devolvida
+  e a frase das legendas passando como fala; sem o teto; o que não é áudio
+  aceito; o estado dizendo `ouvir` sempre; o log com o que foi dito; sem juntar
+  os espaços; a recusa do Groq com frase genérica; gravando o pedido no banco;
+- **a voz:** a tela sem a guarda de quem administra, e sem olhar o `admin`;
+  falar sem tirar os dados pessoais, sem a memória e sem juntar os cliques;
+  escolher sem conferir a tabela antes, sem guardar, aceitando um id estranho
+  e sem a descrição da tela; o estado sem saber se a voz está pronta; a tela
+  devolvendo o id da voz; gerar ignorando a descrição da tela, e sem o mínimo
+  de 20; os créditos ditos como chave; a voz que sumiu dita como erro
+  qualquer; o log com o que o Quazar leu; falar sem o teto do texto, e sem a
+  voz escolhida calado;
+- **o 062:** sem tirar de quem entrou, e de quem não entrou; sem a regra de
+  acesso; sem a linha só; sem a guarda do banco limpo; sem o teto da
+  descrição; a conferência dizendo sim sempre.
 
 ### O Quazar de dia no SAC, em ensaio (script 061, 19/11)
 
