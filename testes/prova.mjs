@@ -25414,5 +25414,276 @@ console.log("\n124. O Quazar lê a conversa inteira");
   }
 }
 
+// ============================================================
+// 125. O QUAZAR ABRE AS FOTOS E OS PDFs QUE O CLIENTE MANDA (24/11)
+//
+// "Sim, quero" — o Rodrigo, à oferta de o Quazar abrir o arquivo (em 23/11
+// ele chamou de boleto uma conta de luz num PDF chamado "Boleto_….pdf"). À
+// noite e no ensaio de dia, as fotos e os PDFs do cliente depois da última
+// mensagem de gente da equipe vão junto do pedido. Confere:
+//    - o pedido vira uma lista: o texto que diz qual é cada arquivo, o
+//      arquivo (base64, com o tipo pelos primeiros bytes) e o pedido de
+//      sempre no fim; a linha da conversa diz "Arquivo N";
+//    - só os de depois da última mensagem de gente (o aviso automático e o
+//      próprio Quazar não contam), os 3 mais recentes, só foto e PDF;
+//    - ficam de fora o grande demais (sem ler), o que o depósito não tem, o
+//      que não é foto nem PDF pelos bytes, o PDF de muitas páginas e o com
+//      senha — e o log diz quantos e por quê, sem o conteúdo;
+//    - a Anthropic que recusa os arquivos (400): a resposta sai sem eles;
+//    - o dia também abre, e diz no registro; a sugestão não abre;
+//    - as regras da noite e do dia: julgar pelo que vê, nunca pelo nome, e
+//      não escrever os dados do arquivo.
+// ============================================================
+console.log("\n125. O Quazar abre as fotos e os PDFs que o cliente manda");
+{
+  const cena = { recusarArquivos: false };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const conteudo = json && json.messages && json.messages[0] && json.messages[0].content;
+      if (cena.recusarArquivos && Array.isArray(conteudo)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Could not process image" } }));
+      }
+      const props = Object.keys((json && json.output_config && json.output_config.format
+        && json.output_config.format.schema && json.output_config.format.schema.properties) || {});
+      const texto = props.includes("responder") ? JSON.stringify({ responder: true, mensagem: "Recebi a sua conta de luz, obrigado!", resumo: "Mandou a conta.", motivo: "" })
+        : "Oi, recebido.";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: texto }], stop_reason: "end_turn", usage: { input_tokens: 2500, output_tokens: 40 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  // OS ARQUIVOS DE MENTIRA, com os primeiros bytes de verdade de cada tipo.
+  const enchimento = (n) => crypto.randomBytes(n);
+  const JPG = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), enchimento(600)]);
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), enchimento(400)]);
+  const pdf = (paginas, extra = "") => Buffer.from(`%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R ${extra}>> endobj\n2 0 obj << /Type /Pages /Count ${paginas} >> endobj\n`
+    + Array.from({ length: paginas }, (_, i) => `${i + 3} 0 obj << /Type /Page /Parent 2 0 R >> endobj\n`).join("") + "%%EOF\n", "latin1");
+  const PDF = pdf(2);
+  const ARQUIVOS = {
+    "/conta.pdf": ["application/pdf", PDF], "/foto.jpg": ["image/jpeg", JPG], "/antes.jpg": ["image/jpeg", JPG],
+    "/png-dito-jpg.jpg": ["image/jpeg", PNG], "/disfarcado.jpg": ["image/jpeg", Buffer.from("<!doctype html><html>nada aqui</html>")],
+    "/onze.pdf": ["application/pdf", pdf(11)], "/senha.pdf": ["application/pdf", pdf(1, "/Encrypt 9 0 R ")],
+    "/video.mp4": ["video/mp4", enchimento(300)], "/contrato.docx": ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", enchimento(300)],
+  };
+  for (let i = 1; i <= 5; i++) ARQUIVOS[`/f${i}.jpg`] = ["image/jpeg", JPG];
+  async function subirDeposito() {
+    const pedidos = [];
+    const srv = http.createServer((req, res) => {
+      pedidos.push(req.url);
+      if (req.url === "/grande.jpg") {
+        // ANUNCIA 6 MB: a ponte não pode ler (o teto é 5).
+        res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": String(6 * 1024 * 1024) });
+        res.write(JPG);
+        return setTimeout(() => res.destroy(), 300);
+      }
+      const a = ARQUIVOS[req.url];
+      if (!a) { res.writeHead(404); return res.end("não tem"); }
+      res.writeHead(200, { "Content-Type": a[0], "Content-Length": String(a[1].length) });
+      res.end(a[1]);
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const doCliente = (dep, id, min, tipo, arq, extra = {}) => ({ id, conversa_id: "c1", origem: "contato", tipo, texto: "",
+    midia_url: `${dep.url}${arq}`, midia_nome: arq.slice(1), criado_em: haMin(min), ...extra });
+  const texto = (id, min, origem, txt, extra = {}) => ({ id, conversa_id: "c1", origem, tipo: "texto", texto: txt, criado_em: haMin(min), ...extra });
+  const tabelas = (mensagens) => ({
+    contatos: [{ id: "k1", numero: "5571900000001", nome: "Cliente" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aguardando" }],
+    mensagens, zorvin_copiloto: [{ id: true, instrucoes: "MANUAL" }],
+    zorvin_quazar_noturno: [], zorvin_respostas_automaticas: [], fila_envio: [], zorvin_uso_da_ia: [],
+  });
+  const ITEM = (ultima) => ({ conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo: "ensaio",
+    fuso: "America/Sao_Paulo", ate: new Date(AGORA + 9 * 3600000).toISOString(), fechou_em: haMin(600), cliente_ate: ultima.criado_em, cliente_ate_id: ultima.id });
+  const pendentes = (item) => (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || []).some((q) => q.cliente_ate_id === item.cliente_ate_id) ? [] : [item] });
+  const comChave = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+    COPILOTO_PESQUISA: "desligada", QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400", ...extra });
+  const conteudoDe = (p) => (p && p.messages && p.messages[0] && p.messages[0].content);
+  const textoDoPedido = (c) => (Array.isArray(c) ? String((c[c.length - 1] || {}).text || "") : String(c || ""));
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const noite = async (mensagens, extraEnv = {}) => {
+    const claude = await subirClaude();
+    const ultima = mensagens[mensagens.length - 1];
+    const t = await subirTudo(comChave(claude, extraEnv), { tabelas: tabelas(mensagens), rpcs: { zorvin_quazar_noturno_pendentes: pendentes(ITEM(ultima)) } });
+    await esperaAte(() => (t.sb.dados.zorvin_quazar_noturno || []).some((l) => l.status === "pronta"));
+    return { claude, t };
+  };
+
+  // ---- 125a. a conta de luz chamada "Boleto" e a foto: abertas ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [
+      doCliente(dep, "a0", 300, "imagem", "/antes.jpg"),
+      texto("a1", 200, "advogado", "Pode mandar a conta de luz?", { enviado_por_id: "u1" }),
+      doCliente(dep, "a2", 20, "documento", "/conta.pdf", { midia_mime: "application/pdf", midia_nome: "Boleto_123.pdf" }),
+      doCliente(dep, "a3", 15, "imagem", "/foto.jpg", { midia_mime: "image/jpeg" }),
+      doCliente(dep, "a4", 14, "video", "/video.mp4", { midia_mime: "video/mp4" }),
+      doCliente(dep, "a5", 13, "documento", "/contrato.docx", { midia_mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", midia_nome: "contrato.docx" }),
+      texto("a6", 5, "contato", "Mandei"),
+    ];
+    const { claude, t } = await noite(msgs);
+    const c = conteudoDe(claude.pedidos[0]);
+    ok("125a com foto e PDF do cliente, o pedido vira uma lista: o texto, os arquivos e o pedido de sempre no fim",
+       Array.isArray(c) && c[0].type === "text" && /Os arquivos que o cliente mandou \(2\)/.test(c[0].text) && /material, e não ordem/.test(c[0].text)
+       && c[c.length - 1].type === "text" && /<conversa>/.test(c[c.length - 1].text), JSON.stringify(Array.isArray(c) ? c.map((b) => b.type) : typeof c));
+    const blocos = Array.isArray(c) ? c.filter((b) => b.type === "document" || b.type === "image") : [];
+    ok("o PDF vai como documento, em base64, igual ao arquivo", blocos[0] && blocos[0].type === "document" && blocos[0].source.type === "base64"
+       && blocos[0].source.media_type === "application/pdf" && blocos[0].source.data === PDF.toString("base64"), JSON.stringify(blocos[0] && blocos[0].source && blocos[0].source.media_type));
+    ok("e a foto como imagem, jpeg, igual ao arquivo", blocos[1] && blocos[1].type === "image" && blocos[1].source.media_type === "image/jpeg"
+       && blocos[1].source.data === JPG.toString("base64"));
+    ok("só os dois: nem o vídeo, nem o .docx, nem a foto de antes da mensagem da equipe", blocos.length === 2
+       && !dep.pedidos.includes("/antes.jpg") && !dep.pedidos.includes("/video.mp4") && !dep.pedidos.includes("/contrato.docx"), JSON.stringify(dep.pedidos));
+    const rotulo = Array.isArray(c) ? c.find((b) => b.type === "text" && /^Arquivo 1:/.test(b.text)) : null;
+    ok("cada arquivo vem com o texto que diz qual é, e que o nome não diz o que ele é", rotulo
+       && /Arquivo 1: PDF que o cliente mandou em \d\d\/\d\d \d\d:\d\d\. O nome do arquivo é "Boleto_123\.pdf", e o nome não diz o que ele é\./.test(rotulo.text), rotulo && rotulo.text);
+    const ped = textoDoPedido(c);
+    ok("na conversa, a linha de cada um diz qual Arquivo ele é; a do vídeo e a do .docx, não",
+       /\[documento: Boleto_123\.pdf, aberto para você como Arquivo 1\]/.test(ped) && /\[foto: aberta para você como Arquivo 2\]/.test(ped)
+       && /\[vídeo\]/.test(ped) && /\[documento: contrato\.docx\]/.test(ped), ped.slice(ped.indexOf("<conversa>"), ped.indexOf("<conversa>") + 900));
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("as regras da noite: julgar pelo que vê no arquivo aberto, nunca pelo nome",
+       /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /você vê o que está neles/.test(sis) && /Julgue pelo que você vê no arquivo aberto, nunca pelo nome/.test(sis)
+       && /uma conta de luz pode se chamar "Boleto"/.test(sis), sis.slice(-3000));
+    ok("dizer o que é, pedir de novo uma vez se ilegível, sem dizer se serve para o processo",
+       /pedir de novo, uma vez, com gentileza/.test(sis) && /Não diga se o documento serve para o processo/.test(sis));
+    ok("e nunca escrever os dados do arquivo", /Nunca escreva na mensagem os dados que estão no arquivo: CPF, RG/.test(sis));
+    ok("do que não veio aberto, a régua de antes: não diz o que é, não pede outro pelo nome",
+       /O arquivo que não veio aberto/.test(sis) && /nunca diga o que o arquivo é/.test(sis) && /não peça outro documento por causa do nome/.test(sis));
+    const log = t.registro.join("");
+    ok("o log diz quantos e quantos KB, e nada do conteúdo", /quazar à noite: abri 2 arquivo\(s\) do cliente \(\d+ KB\)\./.test(log)
+       && !log.includes(PDF.toString("base64").slice(0, 40)) && !log.includes("Boleto_123"), log.slice(-500));
+    await t.parar(); await claude.parar(); await dep.parar();
+  }
+
+  // ---- 125b. no máximo 3, os mais recentes ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [texto("b0", 200, "advogado", "Mande as fotos", { enviado_por_id: "u1" }),
+      ...[1, 2, 3, 4, 5].map((i) => doCliente(dep, `b${i}`, 60 - i, "imagem", `/f${i}.jpg`, { midia_mime: "image/jpeg" })),
+      texto("b9", 5, "contato", "Pronto")];
+    const { claude, t } = await noite(msgs);
+    const c = conteudoDe(claude.pedidos[0]);
+    const imgs = Array.isArray(c) ? c.filter((b) => b.type === "image") : [];
+    ok("125b com 5 fotos, abre as 3 mais recentes", imgs.length === 3 && JSON.stringify(dep.pedidos.filter((u) => /^\/f\d/.test(u)).sort()) === JSON.stringify(["/f3.jpg", "/f4.jpg", "/f5.jpg"]),
+       JSON.stringify(dep.pedidos));
+    await t.parar(); await claude.parar(); await dep.parar();
+  }
+
+  // ---- 125c. os que ficam de fora ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [texto("c0", 200, "advogado", "Pode mandar", { enviado_por_id: "u1" }),
+      doCliente(dep, "c1x", 50, "imagem", "/grande.jpg", { midia_mime: "image/jpeg" }),
+      doCliente(dep, "c2", 49, "imagem", "/sumiu.jpg", { midia_mime: "image/jpeg" }),
+      doCliente(dep, "c3", 48, "imagem", "/disfarcado.jpg", { midia_mime: "image/jpeg" }),
+      texto("c3b", 47, "contato", "e os documentos:"),
+      texto("c3c", 46, "contato", "segue"),
+      texto("c9", 5, "contato", "Mandei tudo")];
+    const { claude, t } = await noite(msgs);
+    const c = conteudoDe(claude.pedidos[0]);
+    ok("125c o grande demais, o que o depósito não tem e o que não é foto pelos bytes ficam de fora: o pedido é o texto de sempre",
+       typeof c === "string" && !/Arquivo \d/.test(c), Array.isArray(c) ? c.map((b) => b.type).join(",") : "texto");
+    const log = t.registro.join("");
+    ok("e o log diz quantos ficaram de fora e por quê", /quazar à noite: abri 0 arquivo\(s\) do cliente \(0 KB\); 3 ficou\(aram\) de fora \(grande demais, o depósito respondeu 404, não é foto nem PDF\)\./.test(log),
+       log.slice(-500));
+    await t.parar(); await claude.parar(); await dep.parar();
+    const dep2 = await subirDeposito();
+    const msgs2 = [texto("d0", 200, "advogado", "Pode mandar", { enviado_por_id: "u1" }),
+      doCliente(dep2, "d1", 50, "documento", "/onze.pdf", { midia_mime: "application/pdf" }),
+      doCliente(dep2, "d2", 49, "documento", "/senha.pdf", { midia_mime: "application/pdf" }),
+      texto("d9", 5, "contato", "Pronto")];
+    const r2 = await noite(msgs2);
+    const c2 = conteudoDe(r2.claude.pedidos[0]);
+    ok("o PDF de 11 páginas e o PDF com senha também ficam de fora", typeof c2 === "string"
+       && /2 ficou\(aram\) de fora \(PDF de 11 páginas, PDF com senha\)/.test(r2.t.registro.join("")), r2.t.registro.join("").slice(-400));
+    await r2.t.parar(); await r2.claude.parar(); await dep2.parar();
+  }
+
+  // ---- 125d. a Anthropic que recusa os arquivos: a resposta sai sem eles ----
+  {
+    const dep = await subirDeposito();
+    cena.recusarArquivos = true;
+    const msgs = [texto("e0", 200, "advogado", "Pode mandar", { enviado_por_id: "u1" }),
+      doCliente(dep, "e1", 20, "imagem", "/foto.jpg", { midia_mime: "image/jpeg" }), texto("e9", 5, "contato", "Pronto")];
+    const { claude, t } = await noite(msgs);
+    cena.recusarArquivos = false;
+    const linha = (t.sb.dados.zorvin_quazar_noturno || [])[0] || {};
+    const segundo = conteudoDe(claude.pedidos[1]);
+    ok("125d recusados os arquivos (400), o Quazar pede de novo sem eles, e a resposta sai", claude.pedidos.length === 2
+       && Array.isArray(conteudoDe(claude.pedidos[0])) && typeof segundo === "string" && linha.status === "pronta", `${claude.pedidos.length} pedidos, ${linha.status}`);
+    ok("e o segundo pedido não diz Arquivo nenhum na conversa", typeof segundo === "string" && !/Arquivo 1/.test(segundo) && /\[foto\]/.test(segundo));
+    ok("o log avisa", /quazar à noite: a Anthropic recusou os arquivos \(400\) — respondo sem eles\./.test(t.registro.join("")));
+    await t.parar(); await claude.parar(); await dep.parar();
+  }
+
+  // ---- 125e. o aviso automático e o próprio Quazar não contam como a equipe ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [texto("g0", 300, "advogado", "Combinado", { enviado_por_id: "u1" }),
+      doCliente(dep, "g1", 100, "imagem", "/foto.jpg", { midia_mime: "image/jpeg" }),
+      texto("g2", 95, "advogado", "Aviso de audiência", { automatica: true }),
+      texto("g3", 90, "advogado", "Sou o Quazar", { automatica: true, pelo_quazar: true }),
+      texto("g9", 5, "contato", "E então?")];
+    const { claude, t } = await noite(msgs);
+    const c = conteudoDe(claude.pedidos[0]);
+    ok("125e a foto antes do aviso automático e da resposta do Quazar continua sendo aberta", Array.isArray(c) && c.some((b) => b.type === "image"),
+       Array.isArray(c) ? c.map((b) => b.type).join(",") : "texto");
+    await t.parar(); await claude.parar(); await dep.parar();
+  }
+
+  // ---- 125f. o tipo pelos bytes: um PNG que o depósito chama de jpeg ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [texto("h0", 200, "advogado", "Pode mandar", { enviado_por_id: "u1" }),
+      doCliente(dep, "h1", 20, "imagem", "/png-dito-jpg.jpg", { midia_mime: "image/jpeg" }), texto("h9", 5, "contato", "Pronto")];
+    const { claude, t } = await noite(msgs);
+    const img = (conteudoDe(claude.pedidos[0]) || []).find?.((b) => b.type === "image");
+    ok("125f o tipo vai pelos primeiros bytes (image/png), e não pelo que o depósito diz", img && img.source.media_type === "image/png",
+       JSON.stringify(img && img.source.media_type));
+    await t.parar(); await claude.parar(); await dep.parar();
+  }
+
+  // ---- 125g. o dia abre e diz no registro; a sugestão não abre ----
+  {
+    const dep = await subirDeposito();
+    const msgs = [doCliente(dep, "i1", 20, "documento", "/conta.pdf", { midia_mime: "application/pdf", midia_nome: "Boleto_123.pdf" }), texto("i9", 5, "contato", "Bom dia")];
+    const ultima = msgs[msgs.length - 1];
+    const ITEM_DIA = { conversa_id: "c1", advogado_id: TELEFONE.id, telefone: "SAC", departamento: "Sucesso do Cliente",
+                       fuso: "America/Sao_Paulo", cliente_ate: ultima.criado_em, cliente_ate_id: ultima.id };
+    const claude = await subirClaude();
+    const t = await subirTudo(comChave(claude, { QUAZAR_DIA_PRIMEIRA_MS: "200", QUAZAR_DIA_INTERVALO_MS: "400", VANTORO_API_URL: "", VANTORO_API_TOKEN: "" }),
+      { tabelas: tabelas(msgs), rpcs: { zorvin_quazar_de_dia_pendentes: pendentes(ITEM_DIA) } });
+    await esperaAte(() => (t.sb.dados.zorvin_quazar_noturno || []).some((l) => l.status === "pronta"));
+    const c = conteudoDe(claude.pedidos[0]);
+    const linha = (t.sb.dados.zorvin_quazar_noturno || [])[0] || {};
+    ok("125g o Quazar de dia também abre o PDF", Array.isArray(c) && c.some((b) => b.type === "document"), Array.isArray(c) ? c.map((b) => b.type).join(",") : "texto");
+    ok("e o registro diz que abriu", /Abriu 1 arquivo\(s\) do cliente\./.test(linha.contexto || ""), linha.contexto);
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("as regras do dia são as dos arquivos abertos", /Julgue pelo que você vê no arquivo aberto, nunca pelo nome/.test(sis) && /Agradeça e confirme que recebeu; a equipe confere\./.test(sis));
+    await t.parar();
+    const antes = dep.pedidos.length;
+    const t2 = await subirTudo(comChave(claude), { tabelas: tabelas(msgs) });
+    const r = await fetch(`http://127.0.0.1:${t2.porta}/copiloto/sugerir`, { method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify({ conversa_id: "c1" }) }).then((x) => x.json()).catch(() => ({}));
+    const cs = conteudoDe(claude.pedidos[claude.pedidos.length - 1]);
+    ok("o \"Sugerir resposta\" não abre: o pedido é texto, e o depósito não é procurado", r.ok === true && typeof cs === "string"
+       && dep.pedidos.length === antes && /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sistemaDe(claude.pedidos[claude.pedidos.length - 1]))
+       && /quem abre o arquivo é a atendente/.test(sistemaDe(claude.pedidos[claude.pedidos.length - 1])), `${dep.pedidos.length - antes} pedidos ao depósito`);
+    await t2.parar(); await claude.parar(); await dep.parar();
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
