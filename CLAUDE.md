@@ -5129,6 +5129,74 @@ cópias de controle passaram inteiras):
   desligado que não desliga; sem a guarda do 069; o estado sempre dizendo
   `responde`; calado sem guardar o porquê; o log com o texto.
 
+### O telefone desconectado (script 070, 25/11)
+
+Na primeira hora do 069 (25/11, das 09h02 às 09h09 de Brasília), o Quazar
+escreveu para 43 clientes, e **20 respostas não saíram**. Os telefones
+**Comercial** e **Subsídio Emenda** estão desconectados do WhatsApp (*"WhatsApp
+disconnected: session is not reconnectable"*). Cada uma gastou uma ida à IA, e a
+conversa ficou `nao_saiu` para sempre ("uma resposta por espera"). Quando a linha
+voltasse, o cliente que esperava não receberia nada.
+
+**Medido em 25/11, só contando:** o Subsídio Emenda não recebe nem manda nada
+desde 19/11, às 16h39 de Brasília, e o Comercial desde 28/09. Pela mesma régua,
+o telefone da Dra. Jezieli Franco também está caído desde 24/11 (nada desde
+06/11), e o da Dra. Gleisyane Santana desde 06/11 (nada desde 18/09). **Ninguém
+tinha visto**: a faixa vermelha do 007 só acende por 30 minutos depois de um
+erro, e numa linha sem movimento não há erro.
+
+`sql/automaticos/070-o-quazar-nao-escreve-para-telefone-desconectado.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_linha_caida_desde(telefone)` | quando a linha caiu, ou nulo se ela está de pé: a régua do 007 (um erro de desconexão na fila, nos últimos 30 dias, sem sinal de vida depois: nada saiu por ela, nada chegou por ela), **sem a janela de 30 minutos** — o 007 é um aviso na tela; aqui é a decisão de gastar a IA |
+| `zorvin_quazar_responde_pendentes` | a do 069, sem a linha caída. **Uma hora depois do último erro, uma conversa dela volta como sonda**: se a linha voltou sem movimento nenhum, é assim que o Quazar descobre; se não voltou, a sonda falha e o relógio recomeça. No máximo uma ida à IA por hora, por linha caída, e nenhuma sonda enquanto outra resposta da linha está reservada ou na fila |
+| `zorvin_quazar_responde_confirmar` | a do 069, e: a resposta que falhou **porque a linha caiu devolve a vez** (as colunas `resposta*` voltam a nulo, e ela é tentada quando a linha voltar); a que falhou por outro motivo continua `nao_saiu`; a resposta que **saiu** tira da tela as bolhas vermelhas antigas **do próprio Quazar** naquela conversa (viram `descartada`, como o "Dispensar" do painel), para ninguém reenviar a mensagem velha. As da equipe ficam |
+| a instalação | devolve a vez das `nao_saiu` por linha caída (as 20 de 25/11), e só delas |
+
+- **A régua de "desconexão" é a do 007** (`desconect|disconnected|not connected|reconectar`,
+  no `erro_motivo` e no `erro_detalhe`), lidos por `to_jsonb`, como o `enviado_em`.
+- **A ponte só conta** (`linha_caida`, na resposta da confirmação) e diz no log
+  quantas não saíram porque o telefone está desconectado.
+- **A versão de referência** (regra 5) de `zorvin_quazar_responde_pendentes` e de
+  `zorvin_quazar_responde_confirmar` passa a ser a do 070.
+- **Reconectar continua sendo trabalho de uma pessoa** (ler o QR Code da Uazapi
+  no celular da linha), ou desativar a linha que não se usa mais.
+
+**Fica de fora, e é decisão:** o Quazar à noite (059) e a faxina não olham a
+linha caída. À noite a linha desconectada não recebe nada, então não há para
+quem responder; e a faxina só finaliza, sem mandar mensagem.
+
+Prova: seção 142, num Postgres de verdade, dentro da 138 (com a 140): o banco
+limpo e sem o 069; a linha caída, a que recebeu e a que mandou depois do erro, o
+erro de mais de 30 dias e o que não é desconexão; a instalação; a lista que pula
+a linha caída e a sonda (uma só, a mais antiga, e nenhuma com outra a caminho);
+a confirmação (devolve a vez, `nao_saiu` por outro motivo, a bolha antiga do
+Quazar descartada e a da equipe não); quem entrou; e a pasta na ordem. E a 141
+confere o log.
+
+**23 sabotagens e 23 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- **a lista:** sem pular a linha caída (a do 069); a sonda sem o limite de uma;
+  sem sonda (a linha caída fica fora para sempre); a sonda sem olhar a vez
+  reservada, e sem olhar a que está na fila; a janela de 1 hora com 3 horas;
+- **a linha caída:** o erro sem o teto de 30 dias; sem o sinal de vida da
+  mensagem que saiu, e da que chegou; qualquer erro contando como desconexão;
+- **a confirmação:** a de antes (a linha caída vira `nao_saiu`); devolver a vez
+  sem limpar o `respondida_em`; o erro por outro motivo também devolvendo a vez;
+  sem descartar a bolha antiga do Quazar; descartando também a da equipe;
+- **a instalação:** sem devolver as de hoje; devolvendo toda `nao_saiu`;
+- **o banco:** a função para quem entrou; para todos (sem tirar de `public`); sem
+  a guarda do 069; sem a guarda do banco limpo; a conferência dizendo nenhum
+  telefone;
+- **a ponte:** sem contar a linha caída no log (pega pela 141).
+
+**Uma vazou na primeira rodada, e a culpa era da cena:** a do teto de 30 dias. O
+cliente da linha do erro antigo tinha escrito depois do erro, e a mensagem dele
+já contava como sinal de vida. Hoje ele escreveu antes do erro, e a mesma
+sabotagem é pega por duas conferências.
+
 ### O gasto do Quazar (script 058, 08/11)
 
 Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de
