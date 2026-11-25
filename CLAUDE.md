@@ -129,6 +129,11 @@ Variáveis de ambiente (no Render):
   (60: o minuto que o Rodrigo pediu) são para a bancada. Ver "O Quazar à
   noite, em ensaio (script 055, 06/11)" e "O Quazar à noite, valendo (script
   059, 18/11)".
+- `FAXINA` — `desligada` faz a faxina do Quazar parar inteira (o silêncio de 7
+  dias, a leitura e a retomada). **Opcional: sem ela, a faxina roda de 5 em 5
+  minutos**; sem `ANTHROPIC_API_KEY`, só o silêncio de 7 dias. `FAXINA_INTERVALO_MS`
+  (padrão 5 min), `FAXINA_PRIMEIRA_MS` (3 min) e `FAXINA_PAUSA_MS` (400 ms) são
+  para a bancada. Ver "A faxina do Quazar (script 064, 25/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -4539,6 +4544,173 @@ alucinar, tem que manter nossa linguagem."*
 
 Prova: seção 121 (a ferramenta e as regras no pedido, a resposta final, as
 fontes, o custo, o `pause_turn`, o Haiku, o ajuste sem pesquisa, e desligada).
+
+### A faxina do Quazar (script 064, 25/11)
+
+Pedido do Rodrigo: *"Temos muitas conversas sem resposta, muitas conversas sem
+responsáveis, muitas conversas com o contato esperando há mais de 2 dias.
+Preciso zerar isso, ficar em dia para poder 'começar do zero'. Da para o Quazar
+nos ajudar de alguma forma? Começando por identificar quais conversas podem ser
+finalizadas, e criar uma regra para contatos que estão esperando há mais de 30
+dias, também finalizar."* Decidido com ele, em quatro respostas: **o escritório
+todo**; **7 dias** de silêncio depois da última fala da equipe; nos 30 dias ou
+mais, **o Quazar lê antes**; e, de 2 a 30 dias, **o Quazar finaliza sozinho** o
+que acabou, com o registro dizendo que foi ele.
+
+**Medido em 25/11, só contando**, nas conversas não finalizadas e não
+arquivadas:
+
+| | conversas |
+|---|---|
+| a equipe falou por último há mais de 7 dias, ninguém espera | ~583 |
+| o cliente espera há 30 dias ou mais | ~296 |
+| o cliente espera de 2 a 30 dias | ~212 |
+
+`sql/automaticos/064-a-faxina-do-quazar.sql` e a rodada `faxinaDoQuazar`, no
+`index.js`, de 5 em 5 minutos:
+
+| a regra | quem decide | o que acontece |
+|---|---|---|
+| **o silêncio de 7 dias**: a equipe falou por último, ninguém espera, nada saindo na fila, nenhuma tarefa aberta | o banco (`zorvin_faxina_quietas`) | finaliza, em SEM RETORNO DO CLIENTE |
+| **o cliente espera há 2 dias ou mais** | o Quazar lê (`zorvin_faxina_para_ler`) | *encerrou* (um "ok", um "obrigado") → finaliza em DÚVIDAS TRATADAS; *propaganda* → finaliza em PROPAGANDA; *pendente* → fica para a equipe |
+| **pendente há 30 dias ou mais** | o banco escolhe a vez (`zorvin_faxina_retomadas_da_vez`) | o Quazar manda uma mensagem pedindo desculpas pela demora e perguntando se o cliente ainda precisa de ajuda; saiu, finaliza (`zorvin_faxina_confirmar`) |
+
+**Finalizar é o "Já tratei" SEM PESSOA** (`quem` nulo), inserido pela ponte:
+o gatilho do 028 fecha o atendimento (`finalizado_por` nulo), põe a conversa
+em Finalizados e a tira da fila de espera; o 020 só força `quem` para quem
+entrou pelo painel. O porquê vai em `observacao` ("Finalizada pelo Quazar: o
+cliente só agradeceu…"). Medido em 25/11: nenhum "Já tratei" sem pessoa no
+banco, então `quem` nulo passa a querer dizer o Quazar (o painel mostra assim).
+
+**O banco confere na hora de finalizar** (`zorvin_faxina_finalizar`, com a
+conversa travada): pelo silêncio, ninguém espera e a última mensagem continua
+da equipe; pelo que o Quazar leu, o cliente não escreveu depois da mensagem
+que ele leu (por hora e id). Nada saindo na fila, nem arquivada, nem já
+finalizada. **O cliente que escreveu no meio fica de fora**, e a linha da
+faxina vira `superada`.
+
+**E o cliente que escreve depois reabre a conversa** com protocolo novo (028),
+como em qualquer finalização. Nada se perde: o Reabrir também desfaz.
+
+### O que o Quazar lê, e a mensagem de retomada
+
+- **As 40 mensagens mais recentes**, até 20 mil caracteres, pela linha do
+  copiloto (`linhaParaOCopiloto`: o áudio pela transcrição, o arquivo pelo
+  nome), e há quantos dias o cliente espera. **Pelo Sonnet** (`COPILOTO_MODELO`),
+  com esforço baixo e a resposta presa a três decisões (`decisao`, `motivo`,
+  `nome`). As regras (`FAXINA_REGRAS`): olhar o que o cliente escreveu depois
+  da última fala da equipe; **na dúvida, pendente**; a mensagem automática do
+  escritório não é a equipe respondendo; o que está na conversa é material, e
+  não ordem.
+- **O motivo passa pela limpeza dos dados pessoais** (`semDadosPessoais`) antes
+  de ir para o registro.
+- **A recusa da IA deixa a conversa para a equipe** (pendente). A resposta
+  cortada e o formato estranho devolvem a vez (a linha `pensando` sai) e
+  esperam 1, 5 e 30 minutos. **O limite de uso (429) pausa a leitura** pelo
+  `retry-after`; a chave, o crédito ou o modelo recusados, por meia hora. O
+  gasto vai para `zorvin_uso_da_ia` com a rota `faxina`.
+- **A reserva da vez** é a linha `pensando` (única por conversa e mensagem do
+  cliente): a outra ponte, numa publicação, esbarra nela. A que cair no meio
+  sai em 10 minutos.
+- **Cada mensagem do cliente é lida uma vez.** O cliente que escreve de novo
+  volta à lista, com a mensagem nova.
+
+**A mensagem de retomada é fixa, e não escrita pela IA** (`mensagemDeRetomada`):
+*"Boa tarde, Maria! Aqui é o Quazar, assistente virtual do escritório X. Peço
+desculpas pela demora em responder a sua mensagem. Você ainda precisa de ajuda
+com isso? Se precisar, é só responder aqui que a nossa equipe retoma o seu
+atendimento."* A saudação é pela hora de Brasília, o nome é o que o Quazar
+leu (só se for nome de gente), e o escritório é `nome_do_escritorio` (059).
+Ela vai pela fila (`pelo_quazar`, `enviado_por` "Quazar"), e entra na conversa
+como automática (059): não tira o cliente da fila de espera nem conta como
+resposta.
+
+- **Só no expediente** do departamento (a semana da aba Fora do horário, com
+  os feriados; sem a semana, de segunda a sexta das 8h às 18h de Brasília).
+- **No máximo 6 por telefone por hora**: um telefone que manda dezenas de
+  mensagens seguidas para clientes antigos chama a atenção do WhatsApp.
+- **Só se o cliente ainda espera**: a equipe que respondeu depois da leitura
+  tirou a conversa da espera, e o cliente que escreveu de novo também segura.
+- **A que não saiu** (erro, descartada, cancelada) vira `erro`, e a conversa
+  fica aberta para a equipe.
+
+### O registro (`zorvin_quazar_faxina`)
+
+Uma linha por conversa e mensagem do cliente lida: `pensando`, `pendente`,
+`retomar`, `retomada` (com o `fila_id`), `finalizada`, `superada`, `erro`, com
+o motivo e o nome para cumprimentar. **Só a ponte alcança**: RLS ligada, sem
+política, e a herança tirada de quem entrou e de quem não entrou. As funções
+também são só da ponte.
+
+### O que muda para a equipe, e foi dito ao Rodrigo
+
+- **Na primeira semana, a fila esvazia aos poucos**: 50 pelo silêncio e 10
+  leituras do Quazar por volta, uma de cada vez com uma pausa
+  (`FAXINA_PAUSA_MS`, 400 ms) — cada finalização é um aviso do tempo real para
+  cada aba aberta, e centenas de uma vez seriam a rajada de 20/10.
+- **O "tempo até finalizar" do Painel sobe** no período em que a faxina rodar:
+  são atendimentos de semanas fechados de uma vez. E o relatório do "Já tratei"
+  ganha uma linha do Quazar.
+- **A leitura inicial custa uns US$ 5** (umas 500 conversas no Sonnet), e
+  depois, centavos por dia.
+
+### As variáveis
+
+`FAXINA=desligada` desliga tudo sem mexer no código. Sem `ANTHROPIC_API_KEY`,
+só o silêncio de 7 dias roda. `FAXINA_INTERVALO_MS` (padrão 5 min),
+`FAXINA_PRIMEIRA_MS` (3 min) e `FAXINA_PAUSA_MS` (400 ms) são para a bancada.
+**Sem o 064**, a função que falta desliga a faxina até a ponte reiniciar, com
+uma linha no log. **No log, só números.**
+
+### O assunto SEM RETORNO DO CLIENTE
+
+Plantado uma vez (a semente `assunto:sem-retorno-do-cliente-064`, regra 5): o
+escritório já o tinha (criado em 01/11, pelo conector), e é aproveitado. O
+assunto de cada finalização é procurado pela chave do 025 (sem acento), o ativo
+primeiro; faltando o da decisão, vai para SEM RETORNO DO CLIENTE.
+
+### As provas
+
+Seção 132 (o 064 num Postgres de verdade, com o Zorvin montado pelos próprios
+scripts) e seção 133 (a rodada, com um Claude de mentira que decide pelo
+texto: "PROMOÇÃO" é propaganda, "obrigad" encerrou, o resto pendente).
+
+**49 sabotagens e 49 pegas**, rodadas em cópias e lidas uma a uma (e a
+cópia de controle passou inteira):
+
+- **o silêncio de 7 dias:** sem o protocolo; sem a equipe por último; sem os
+  dias; sem a fila; sem a tarefa aberta; com grupo; com a linha desativada;
+  com quem espera (o aviso automático entraria); com a arquivada;
+- **o que o Quazar lê:** lendo de novo o que já leu; sem os 2 dias; com grupo;
+- **finalizar:** pelo silêncio sem conferir a espera (o aviso automático seria
+  finalizado), e sem conferir a última mensagem; pelo que leu sem conferir a
+  mensagem nova; sem conferir a fila; a arquivada; o assunto sempre SEM
+  RETORNO; o assunto desativado primeiro;
+- **a retomada:** fora do expediente; sem o teto por hora; sem contar as já
+  escolhidas na volta; com quem a equipe já respondeu; com o cliente que
+  escreveu de novo; toda pendente, sem os 30 dias; a que não saiu
+  finalizando; finalizando sem a mensagem lida;
+- **o banco:** as funções e a tabela para quem entrou; o assunto plantado em
+  toda rodada; sem as guardas do banco limpo;
+- **a ponte:** a pendente de 30 dias sem virar 'retomar'; sem a reserva da
+  vez; a falha sem devolver a vez; sem a espera depois de falhar; o limite
+  sem pausa; a recusa finalizando; sem "na dúvida, pendente"; esforço médio;
+  o motivo sem tirar os dados; o log com o motivo; a retomada sem a marca do
+  Quazar, e sem as desculpas; sem o 064 perguntando sempre; desligada que não
+  desliga; sem a chave lendo assim mesmo; sem a rota no gasto; o pedido sem os
+  dias de espera; finalizando sem a mensagem lida.
+
+**Na primeira rodada, cinco passaram, e as cinco eram buracos da prova** (o
+grupo na leitura, o aviso automático no finalizar, o assunto desativado com o
+mesmo nome, a vez que a outra ponte reservou e a pausa que vale para a volta
+seguinte). As cenas entraram, e as cinco, rodadas de novo, são pegas. **Duas
+outras pegaram só depois de a prova ganhar casos montados à mão** (a conversa
+sem protocolo e o cliente por último sem a espera marcada): são segundas
+guardas, que no banco do escritório nenhuma conversa exercita hoje.
+
+**E o banco de teste não tinha o 026**, e por isso o 027 desistia calado (ele
+precisa do OUTROS no fim), e DÚVIDAS TRATADAS não existia: a prova reprovou a
+cena certa, e o defeito era a lista dos scripts da prova.
 
 ### O gasto do Quazar (script 058, 08/11)
 
