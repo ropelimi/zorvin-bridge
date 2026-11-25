@@ -7274,6 +7274,10 @@ async function subirNotas(clienteId, notas, { simular = false } = {}) {
     // JÁ SUBIU: pula. O Vantoro também deduplica pelo `id_externo`, então isto
     // é a segunda trava, não a única — mas evita a chamada, que é o que custa.
     if (n.vantoro_atividade_id) { jaEstavam += 1; continue; }
+    // A NOTA DO QUAZAR (068) NÃO SOBE: ela diz por que a faxina do Zorvin não
+    // finalizou a conversa, e não é do caso do cliente. Sem `autor_id`: quem
+    // a escreveu foi o banco, e não uma pessoa.
+    if (n.autor === NOME_DO_ASSISTENTE && !n.autor_id) continue;
     if (simular) { subiram += 1; continue; }
 
     try {
@@ -13624,6 +13628,81 @@ async function atualizarQuemPedeAtencao({ agora = new Date() } = {}) {
 
 setTimeout(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_PRIMEIRA_MS).unref();
 setInterval(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_INTERVALO_MS).unref();
+
+// ============================================================
+//  O QUAZAR AVISA A EQUIPE DE QUEM PEDE ATENÇÃO (script 068, 25/11)
+//
+//  Pedido do Rodrigo, em 25/11: quem não respondeu é finalizado como SEM
+//  RETORNO DO CLIENTE, e o "obrigado" e o "ok" também, mesmo com OS aberta ou
+//  blindagem por fazer. Só fica a conversa em que o cliente ESPERA RESPOSTA
+//  (o Quazar leu "pendente") — e, se ele tem OS aberta no Vantoro ou ação de
+//  2024 para trás sem a blindagem completa, o Quazar avisa a equipe, com uma
+//  nota interna na conversa e uma tarefa: a da OS para o responsável pela OS
+//  e os das pendências, a da blindagem para o responsável da conversa.
+//
+//  QUEM DECIDE É O BANCO (`zorvin_atencao_avisar`, script 068): quais
+//  conversas esperam, quem recebe, o expediente, o teto de 20 tarefas por
+//  pessoa por dia (5 por volta) e a tarefa que se fecha sozinha quando o
+//  motivo sai da lista. A ponte só chama de 10 em 10 minutos.
+//
+//  - SEM O 068, a função que falta desliga a rodada até a ponte reiniciar;
+//    um tropeço qualquer do banco NÃO desliga.
+//  - `ATENCAO_AVISOS=desligado` desliga sem mexer no código.
+//  - NO LOG, SÓ NÚMEROS, e só quando algo aconteceu.
+// ============================================================
+const ATENCAO_AVISOS_DESLIGADO = String(process.env.ATENCAO_AVISOS || '').trim().toLowerCase() === 'desligado';
+const ATENCAO_AVISOS_INTERVALO_MS = Number(process.env.ATENCAO_AVISOS_INTERVALO_MS) || 10 * 60 * 1000;
+// A PRIMEIRA VOLTA ESPERA TRÊS MINUTOS: numa publicação, a ponte velha ainda
+// termina o que começou, e a lista do Vantoro chega 20 segundos depois de subir.
+const ATENCAO_AVISOS_PRIMEIRA_MS = Number(process.env.ATENCAO_AVISOS_PRIMEIRA_MS) || 3 * 60 * 1000;
+const ATENCAO_AVISOS_POR_VOLTA = 20;
+const ATENCAO_AVISOS_POR_PESSOA = 20;
+const ATENCAO_AVISOS_POR_PESSOA_NA_VOLTA = 5;
+let atencaoAvisosSemOScript = false;
+let atencaoAvisosRodando = false;
+
+async function avisarQuemPedeAtencao() {
+  if (desligando || atencaoAvisosRodando || ATENCAO_AVISOS_DESLIGADO || atencaoAvisosSemOScript) return;
+  atencaoAvisosRodando = true;
+  const inicio = Date.now();
+  try {
+    const { data, error } = await supabase.rpc('zorvin_atencao_avisar', {
+      p_limite: ATENCAO_AVISOS_POR_VOLTA, p_por_pessoa: ATENCAO_AVISOS_POR_PESSOA,
+      p_por_volta: ATENCAO_AVISOS_POR_PESSOA_NA_VOLTA });
+    if (error) {
+      if (semAFuncao(error)) {
+        atencaoAvisosSemOScript = true;
+        console.warn('avisos de quem pede atenção: a função "zorvin_atencao_avisar" não existe — nenhuma nota nem '
+          + 'tarefa nasce até a ponte reiniciar. Rode sql/automaticos/068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql.');
+      } else {
+        console.error(`avisos de quem pede atenção: o banco recusou a rodada (${error.code || 'sem código'})`, error.message);
+      }
+      return;
+    }
+    const d = data || {};
+    const n = (x) => Math.max(0, Number(x) || 0);
+    const notas = n(d.notas), tarefas = n(d.tarefas), adiadas = n(d.adiadas), fechadas = n(d.fechadas);
+    if (notas || tarefas || fechadas) {
+      const partes = [];
+      if (notas) partes.push(`${notas} nota(s) interna(s)`);
+      if (tarefas) partes.push(`${tarefas} tarefa(s) criada(s)`);
+      if (fechadas) partes.push(`${fechadas} tarefa(s) fechada(s) porque o motivo saiu da lista do Vantoro`);
+      if (adiadas) partes.push(`${adiadas} para a próxima volta (o teto de ${ATENCAO_AVISOS_POR_PESSOA} por pessoa no dia, `
+        + `${ATENCAO_AVISOS_POR_PESSOA_NA_VOLTA} por volta)`);
+      console.log(`avisos de quem pede atenção: em ${Date.now() - inicio} ms — ${partes.join(', ')}.`);
+    }
+  } catch (e) {
+    console.error('avisos de quem pede atenção:', (e && e.message) || e);
+  } finally {
+    atencaoAvisosRodando = false;
+  }
+}
+
+if (ATENCAO_AVISOS_DESLIGADO) {
+  console.log('avisos de quem pede atenção: desligados (ATENCAO_AVISOS=desligado) — nenhuma nota nem tarefa nasce sozinha.');
+}
+setTimeout(() => { avisarQuemPedeAtencao().catch(() => {}); }, ATENCAO_AVISOS_PRIMEIRA_MS).unref();
+setInterval(() => { avisarQuemPedeAtencao().catch(() => {}); }, ATENCAO_AVISOS_INTERVALO_MS).unref();
 
 // ============================================================
 //  A FAXINA DO QUAZAR (script 064, 25/11)

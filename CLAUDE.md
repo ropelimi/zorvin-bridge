@@ -138,6 +138,11 @@ Variáveis de ambiente (no Render):
   traz do Vantoro a lista de quem pede atenção (padrão 15 min, na janela) e
   quando é a primeira (20 s depois de subir). **Opcionais**, para a bancada. Ver
   "Quem pede atenção não é finalizado (script 066, 25/11)".
+- `ATENCAO_AVISOS` — `desligado` faz o Quazar não avisar a equipe (nota e
+  tarefa) de quem pede atenção e espera resposta. **Opcional: sem ela, avisa.**
+  `ATENCAO_AVISOS_INTERVALO_MS` (padrão 10 min) e `ATENCAO_AVISOS_PRIMEIRA_MS`
+  (3 min) são para a bancada. Ver "Só quem espera resposta fica, e a equipe é
+  avisada (script 068, 25/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -4849,10 +4854,12 @@ conversa de quem pede atenção esperando resposta já tinha sido lida pelo
 Quazar, e a leitura a tirava por isso. Entrou o fixo de quem tem OS aberta,
 esperando e ainda não lido, e ela é pega.
 
-**Fica para a próxima entrega:** os avisos à equipe (a nota interna e as
+~~**Fica para a próxima entrega:** os avisos à equipe (a nota interna e as
 tarefas para o responsável da OS e das pendências; a blindagem para o
 responsável da conversa), o Quazar à noite lendo a OS e a blindagem, e reabrir
-as conversas que a faxina finalizou sem poder.
+as conversas que a faxina finalizou sem poder.~~ **A regra mudou no mesmo dia,
+e os avisos entraram** — ver "Só quem espera resposta fica, e a equipe é
+avisada (script 068, 25/11)", logo abaixo da do 067.
 
 ### A primeira lista foi recusada: DELETE sem WHERE (script 067, 25/11)
 
@@ -4886,6 +4893,101 @@ Prova: seção 135 (o 067 aplica e diz que a troca não tem DELETE sem WHERE;
 sem o 066 não faz nada; rodando a pasta de novo, a troca que fica é a do 067)
 e seção 137. **A sabotagem que tira o `where true` do 067 é pega por três
 conferências**, a da 137 entre elas.
+
+### Só quem espera resposta fica, e a equipe é avisada (script 068, 25/11)
+
+Pedido do Rodrigo, no mesmo dia do 066: *"Para as conversas em que o cliente
+não respondeu, pode finalizar como "SEM RETORNO DO CLIENTE", mesmo se precisar
+fazer a blindagem ou tiver OS aberta. [...] a regra de não finalizar deve ser
+para as conversas em que o contato está aguardando mensagem, que fez alguma
+pergunta, por exemplo, e aí o Quazar o responde e resolve, mas tem que
+sinalizar a equipe pois existe OS aberta e/ou precisa blindar. Agora, para as
+conversas em que o Quazar entender que já foi finalizada, onde o contato mandou
+um "obrigado" ou "ok" e etc, também pode finalizar."* E quem recebe: a OS, o
+responsável pela OS e os das pendências; a blindagem, *"responsável da
+conversa, mas a equipe toda deve ter acesso, poder saber com quem está"*.
+
+**O 066 segurava tudo de quem pede atenção**; o 068 segura só quem espera:
+
+| a conversa de quem tem OS aberta ou precisa blindar | antes (066) | agora (068) |
+|---|---|---|
+| a equipe falou por último há 7 dias, o cliente não respondeu | ficava aberta | **finaliza**, em SEM RETORNO DO CLIENTE |
+| o Quazar leu "encerrou" ("ok", "obrigado") ou propaganda | ficava aberta | **finaliza**, como a de qualquer cliente |
+| o Quazar leu "pendente": o cliente espera resposta | ficava aberta | **fica aberta, e a equipe é avisada** |
+| a retomada (o pendente de 30 dias) | não saía | continua não saindo para quem pede atenção |
+
+**O cliente que volta a escrever reabre a conversa** com protocolo novo (028), e
+quem pegar a tarefa da OS chama o cliente: é o que o Rodrigo descreveu.
+
+`sql/automaticos/068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql`:
+
+- **as funções da faxina** (`zorvin_faxina_quietas`, `zorvin_faxina_para_ler` e
+  `zorvin_faxina_finalizar`) perdem a guarda de quem pede atenção e da lista
+  fresca, menos na **confirmação da retomada** (`'sem-retorno'` com a mensagem
+  lida): ali o `finalizar` continua recusando quem pede atenção e sem a lista
+  fresca. `zorvin_faxina_para_ler` diz `retoma` falso para quem pede atenção.
+  **A versão de referência das três passa a ser a do 068** (regra 5);
+  `zorvin_faxina_retomadas_da_vez` continua a do 066;
+- **`zorvin_atencao_avisar(p_limite, p_por_pessoa, p_por_volta)`**, a rodada dos
+  avisos, só da ponte;
+- **dois registros** (`zorvin_atencao_avisos`, uma nota por conversa, cliente,
+  motivo e referência; `zorvin_atencao_tarefas`, uma tarefa por cliente,
+  motivo, referência e pessoa), só da ponte.
+
+**Quem recebe o aviso** (a rodada decide no banco):
+
+- **as conversas**: abertas, não arquivadas, sem grupo, de linha ativa, com o
+  cliente esperando (`esperando_desde`), a última mensagem dele lida pelo
+  Quazar como `pendente` ou `retomar` (ou a retomada que saiu e foi desfeita),
+  nada da equipe saindo na fila, e quem pede atenção;
+- **a OS** (referência = o número da OS): a tarefa vai para o responsável pela
+  OS e os das pendências, achados pelo **login do Vantoro** (o mesmo do Zorvin,
+  sem olhar maiúscula e espaço), ativos e vendo o telefone da conversa
+  (`zorvin_ve_o_telefone`, do 023, quando existe). Ninguém deles no Zorvin, vai
+  para o responsável da conversa, e a nota diz por quê; sem ele, **sem dono**
+  (aparece em "Da equipe", nas Tarefas);
+- **a blindagem**: a tarefa vai para o responsável da conversa (ativo e vendo
+  o telefone), ou fica sem dono;
+- **a nota** diz por que o Quazar não finalizou, o número da OS e quantas
+  pendências, o responsável pela OS e quem tem as pendências (pelo nome do
+  Vantoro), quantas ações estão blindadas, **com quem a conversa está** e
+  **com quem está a tarefa** — é assim que a equipe toda sabe com quem está.
+  Ela é do Quazar (`autor` 'Quazar', sem `autor_id`);
+- **a tarefa** nasce vencida agora, sem `criada_por` (foi o Zorvin), e toca o
+  aviso de tarefa no painel de quem recebe.
+
+**Uma vez só:** a nota uma vez por conversa e motivo; a tarefa uma vez por
+cliente, motivo, referência e pessoa — a outra conversa do mesmo cliente ganha
+a nota, e não outra tarefa. **A tarefa apagada não volta** (o registro fica).
+**A OS que muda** (outra no lugar) é um aviso novo.
+
+**A tarefa se fecha sozinha** quando o motivo sai da lista do Vantoro (a OS
+concluída, a blindagem completa): `feita_em` agora, sem `feita_por`.
+
+**O teto:** 20 tarefas por pessoa por dia, e 5 por pessoa em cada volta; o que
+passa espera a volta seguinte. **Só no expediente** do departamento (a semana
+da aba Fora do horário). **Sem a lista fresca, nada nasce e nada se fecha**
+(`sem_lista`); a faxina continua finalizando o silêncio e o encerrado.
+
+**A ponte** (`avisarQuemPedeAtencao`): de 10 em 10 minutos, a primeira 3
+minutos depois de subir. Sem o 068, uma linha no log e a rodada para até
+reiniciar; um tropeço do banco não para. `ATENCAO_AVISOS=desligado` desliga.
+No log, só números, e só quando algo aconteceu. `ATENCAO_AVISOS_INTERVALO_MS`
+e `ATENCAO_AVISOS_PRIMEIRA_MS` são para a bancada.
+
+**A nota do Quazar não sobe para a ficha do Vantoro** (`subirNotas` pula a
+nota com `autor` 'Quazar' e sem `autor_id`): ela diz por que a faxina não
+finalizou, e a ficha já tem a OS e a blindagem.
+
+**Fica para a próxima entrega, e é decisão:** o Quazar **responder** o cliente
+que espera (o "o Quazar o responde e resolve" do pedido). Hoje ele lê e avisa
+a equipe; responder sozinho é o Quazar de dia valendo, que é outra PR.
+
+Provas: seção 138 (o 068 num Postgres de verdade, com o Zorvin montado pelos
+próprios scripts do 004 ao 067, 46 conferências) e seção 139 (a rodada, 6). A
+cena 138d pegou a prova, e não o script: a tarefa da OS nova foi para a outra
+conversa do mesmo cliente, a que espera há mais tempo, e a prova a procurava
+na primeira.
 
 ### O gasto do Quazar (script 058, 08/11)
 
