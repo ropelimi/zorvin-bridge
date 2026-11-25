@@ -5104,8 +5104,11 @@ teto de 10 por telefone por hora.
 - **a segunda resposta na mesma espera**: o cliente que responde ao Quazar
   com outra pergunta fica para a equipe. Responder em conversa (como à noite)
   é outro pedido;
-- **os outros departamentos** (Acordos, Interno): a chave é por
-  departamento, e ainda não há tela; por enquanto, pelo conector do Supabase.
+- **o Acordos**: a chave é por departamento, e ainda não há tela; por
+  enquanto, pelo conector do Supabase. **O Interno foi ligado em 25/11, às 20h
+  (Brasília), a pedido do Rodrigo** ("Pode incluir o Quazar também para
+  responder o departamento Interno"), pelo conector: aqui, de dia (072) e à
+  noite. O Acordos continua de fora (o pedido dele de 25/11).
 
 Provas: seção 140 (o 069 num Postgres de verdade, dentro da 138, com o Zorvin
 montado pelos próprios scripts; a 138 e a 140 juntas, 88 conferências) e seção
@@ -5461,9 +5464,10 @@ prova, e é decisão: é uma palavra no pedido, e nenhuma conferência a lia.
 
 **O que fica de fora, e é decisão:**
 
-- **os outros departamentos** (Acordos, Interno): o Quazar não responde lá (o
-  pedido do Rodrigo de 25/11). A chave é por telefone, e ainda não há tela; por
-  enquanto, pelo conector do Supabase;
+- **o Acordos**: o Quazar não responde lá (o pedido do Rodrigo de 25/11). A
+  chave é por telefone, e ainda não há tela; por enquanto, pelo conector do
+  Supabase. **O Interno foi ligado em 25/11, às 20h (Brasília)**, a pedido
+  dele, nos dois telefones, junto com quem espera (069) e a noite;
 - **o Quazar de dia e o que responde quem espera (069) não se cruzam**: o de dia
   só olha as últimas 12 horas, e o 069 não responde quem já recebeu uma mensagem
   do Quazar depois da que leu.
