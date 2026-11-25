@@ -134,6 +134,10 @@ Variáveis de ambiente (no Render):
   minutos**; sem `ANTHROPIC_API_KEY`, só o silêncio de 7 dias. `FAXINA_INTERVALO_MS`
   (padrão 5 min), `FAXINA_PRIMEIRA_MS` (3 min) e `FAXINA_PAUSA_MS` (400 ms) são
   para a bancada. Ver "A faxina do Quazar (script 064, 25/11)".
+- `ATENCAO_INTERVALO_MS` e `ATENCAO_PRIMEIRA_MS` — de quanto em quanto a ponte
+  traz do Vantoro a lista de quem pede atenção (padrão 15 min, na janela) e
+  quando é a primeira (20 s depois de subir). **Opcionais**, para a bancada. Ver
+  "Quem pede atenção não é finalizado (script 066, 25/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -4762,6 +4766,93 @@ guardas, que no banco do escritório nenhuma conversa exercita hoje.
 **E o banco de teste não tinha o 026**, e por isso o 027 desistia calado (ele
 precisa do OUTROS no fim), e DÚVIDAS TRATADAS não existia: a prova reprovou a
 cena certa, e o defeito era a lista dos scripts da prova.
+
+### Quem pede atenção não é finalizado (script 066, 25/11)
+
+Pedido do Rodrigo, no mesmo dia em que a faxina entrou: a conversa de quem tem
+**OS aberta** no Vantoro não é finalizada pelo Quazar, e *"clientes antigos,
+que possuem processos de 2024 para trás, precisam ser obrigatoriamente
+blindados. Então são casos em que não devem ser finalizadas as conversas sem a
+blindagem ser feita."* **Medido em 25/11, só contando:** a faxina finalizou
+646 conversas em 24 horas, 304 só na última hora, sem saber nada disso.
+
+**Quem sabe as duas coisas é o Vantoro** (a OS e a blindagem moram lá). Ele
+manda a lista em `GET /api/v1/clientes/atencao` (só a ponte alcança; a PR
+#543 do Vantoro): cada cliente com OS que não está CONCLUÍDA, ou com uma ação
+distribuída de 2024 para trás sem a blindagem completa, com os telefones, a OS
+(o responsável e os responsáveis das pendências) e o resumo da blindagem.
+
+| peça | o quê |
+|---|---|
+| `zorvin_chave_do_telefone()` | o DDD e os 8 últimos dígitos: "5571988881111", "557188881111" e "(71) 98888-1111" dão a mesma chave. Menos de 10 dígitos, nenhuma |
+| `zorvin_atencao` e `zorvin_atencao_chaves` | a lista, como o Vantoro disse, e a chave de cada telefone |
+| `zorvin_atencao_marca` | quando a lista foi trocada pela última vez |
+| `zorvin_atencao_trocar(clientes, sem_vantoro)` | troca a lista inteira, de uma vez. **Recusa a que encolhe mais da metade de uma vez** (de 20 ou mais): isso é o Vantoro respondendo errado, e a de antes continua valendo |
+| `zorvin_atencao_fresca()` | a lista tem menos de 36 horas |
+| `zorvin_pede_atencao(contato)` | o contato está na lista, pela chave do telefone ou pelo cliente do Vantoro ligado a ele (`vantoro_cliente_id`) |
+| `zorvin_atencao_do_contato(contato)` | o que a lista diz dele (para os avisos, a próxima entrega) |
+
+**A faxina pergunta** (as quatro funções do 064 e do 065, mais duas linhas;
+**a versão de referência delas passa a ser a do 066**):
+
+- **sem a lista fresca, a faxina não finaliza NADA**: não saber quem pede
+  atenção é o caso em que finalizar é mais perigoso. Vale para o silêncio, a
+  leitura, a retomada e o `finalizar`;
+- **quem pede atenção fica de fora** do silêncio de 7 dias, da leitura do
+  Quazar e da retomada, e o `finalizar` recusa (a segunda guarda, com a
+  conversa travada).
+
+**A rodada da ponte** (`atualizarQuemPedeAtencao`):
+
+- **na janela em que o Vantoro fica acordado** (`dentroDoHorarioDeTrabalho`),
+  de 15 em 15 minutos; **fora dela, só com a lista de mais de 30 horas**, para
+  não acordar o Vantoro de madrugada (as horas da Render);
+- **a primeira, 20 segundos depois de subir**, mesmo fora da janela quando não
+  há lista: sem ela, a faxina fica parada;
+- **a idade é lida do banco**, e não da memória: outra ponte (a velha, numa
+  publicação) pode ter trazido a lista há pouco;
+- **a falha não apaga a lista** (ela vale até ficar velha), e é dita uma vez por
+  hora: o Vantoro sem a rota (404), a resposta sem a lista, a lista recusada
+  pelo banco. **Com o Vantoro em pausa (429), a rodada espera**;
+- **sem o 066**, uma linha no log, e a rodada para até a ponte reiniciar;
+- **sem Vantoro** (quem compra o Zorvin sem ele), a ponte guarda a lista vazia e
+  fresca (`sem_vantoro`), e a faxina segue como antes;
+- **no log, só números**: quantos clientes, com OS, para blindar, e quantos
+  telefones.
+
+**Aplicado à mão às 06h30 de 25/11** (Brasília), pelo conector do Supabase,
+antes da ponte nova: a faxina estava finalizando o que não podia, e o 066 sem
+a lista a para. O script fica na pasta e a ponte o roda de novo na subida
+(ele pode rodar duas vezes). A conferência daquela hora: a chave do telefone
+certa, 0 clientes na lista, "ainda não" fresca, e quem entrou sem alcançar
+nada.
+
+Variáveis **opcionais**, para a bancada: `ATENCAO_INTERVALO_MS` (padrão 15
+min) e `ATENCAO_PRIMEIRA_MS` (20 s). As outras seções da prova empurram a
+rodada para daqui a uma hora (em `subirTudo`).
+
+Provas: seção 135 (o 066 num Postgres de verdade, com o Zorvin montado pelos
+próprios scripts e o 064 e o 065 por baixo, 38 conferências) e seção 136 (a
+rodada, com um Vantoro de mentira, 16). **20 sabotagens e 20 pegas**, rodadas
+em cópias e lidas uma a uma (e a cópia de controle passou inteira):
+
+- **o 066:** o silêncio, a leitura, a retomada e o `finalizar`, cada um sem a
+  guarda; a lista fresca sempre, e por 72 horas; a chave sem tirar o 55, e com
+  9 dígitos; sem o cliente do Vantoro ligado ao contato; sem a guarda da lista
+  que encolhe; a lista e as funções abertas para quem entrou;
+- **a rodada:** sem a janela; sem olhar a idade na janela; sem a pausa do 429;
+  dizendo sempre "sem Vantoro"; sem o freio do log; sem parar quando falta o
+  066; sem Vantoro não guardando a lista vazia; sem o log dos números.
+
+**A da leitura vazou na primeira rodada, e a culpa era da cena**: a única
+conversa de quem pede atenção esperando resposta já tinha sido lida pelo
+Quazar, e a leitura a tirava por isso. Entrou o fixo de quem tem OS aberta,
+esperando e ainda não lido, e ela é pega.
+
+**Fica para a próxima entrega:** os avisos à equipe (a nota interna e as
+tarefas para o responsável da OS e das pendências; a blindagem para o
+responsável da conversa), o Quazar à noite lendo a OS e a blindagem, e reabrir
+as conversas que a faxina finalizou sem poder.
 
 ### O gasto do Quazar (script 058, 08/11)
 

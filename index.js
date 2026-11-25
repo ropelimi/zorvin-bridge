@@ -13509,6 +13509,123 @@ setTimeout(() => { acompanharOFunil().catch(() => {}); }, ACOMPANHAMENTO_PRIMEIR
 setInterval(() => { acompanharOFunil().catch(() => {}); }, ACOMPANHAMENTO_INTERVALO_MS).unref();
 
 // ============================================================
+//  QUEM PEDE ATENÇÃO: A LISTA DO VANTORO (script 066, 25/11)
+//
+//  Duas regras do Rodrigo: a faxina não finaliza a conversa de quem tem Ordem
+//  de Serviço aberta, nem a do cliente antigo (ação de 2024 para trás) sem a
+//  blindagem completa. Quem sabe as duas coisas é o Vantoro, e a lista vem
+//  dele (`GET /clientes/atencao`). A ponte a guarda no banco
+//  (`zorvin_atencao_trocar`), e a faxina pergunta a lista de lá.
+//
+//  QUANDO PERGUNTAR. O Vantoro dorme no plano gratuito da Render, e cada
+//  acordada sai das horas da franquia que ele divide com a ponte. Então:
+//    - dentro da janela em que a ponte já o mantém acordado
+//      (`dentroDoHorarioDeTrabalho`), de 15 em 15 minutos;
+//    - fora dela, só quando a lista tem mais de 30 horas (ou não existe): a
+//      faxina para de finalizar com a lista de 36 horas, e a lista de sábado
+//      às 20h dura até segunda de manhã.
+//
+//  A FALHA NÃO APAGA A LISTA: a de antes continua valendo até ficar velha. E
+//  a lista que encolhe pela metade de uma vez é recusada pelo banco (é o
+//  Vantoro respondendo errado). SEM A LISTA FRESCA, A FAXINA NÃO FINALIZA
+//  NADA: é o caso em que finalizar é mais perigoso.
+//
+//  SEM VANTORO (quem compra o Zorvin sem ele), a ponte marca a lista como
+//  vazia e fresca, e a faxina segue como antes.
+//
+//  NO LOG, SÓ NÚMEROS, e uma linha por hora no máximo para a mesma falha.
+// ============================================================
+const ATENCAO_INTERVALO_MS = Number(process.env.ATENCAO_INTERVALO_MS) || 15 * 60 * 1000;
+const ATENCAO_PRIMEIRA_MS = Number(process.env.ATENCAO_PRIMEIRA_MS) || 20 * 1000;
+const ATENCAO_VELHA_MS = Number(process.env.ATENCAO_VELHA_MS) || 30 * 60 * 60 * 1000;
+let atencaoRodando = false;
+let atencaoSemOScript = false;
+let atencaoUltimaFalha = { texto: '', em: 0 };
+let atencaoUltimaConta = '';
+
+function avisarFalhaDaAtencao(texto) {
+  const agora = Date.now();
+  if (texto === atencaoUltimaFalha.texto && agora - atencaoUltimaFalha.em < 60 * 60 * 1000) return;
+  atencaoUltimaFalha = { texto, em: agora };
+  console.warn(`quem pede atenção: ${texto}`);
+}
+
+async function atualizarQuemPedeAtencao({ agora = new Date() } = {}) {
+  if (desligando || atencaoRodando || atencaoSemOScript) return;
+  atencaoRodando = true;
+  try {
+    const trocar = async (clientes, semVantoro) => {
+      const { data, error } = await supabase.rpc('zorvin_atencao_trocar', { p_clientes: clientes, p_sem_vantoro: semVantoro });
+      if (error) {
+        if (semAFuncao(error)) {
+          atencaoSemOScript = true;
+          console.warn('quem pede atenção: a função "zorvin_atencao_trocar" não existe — rode '
+            + 'sql/automaticos/066-quem-pede-atencao-nao-e-finalizado.sql. Fica parado até a ponte reiniciar.');
+        } else {
+          avisarFalhaDaAtencao(`o banco recusou guardar a lista (${error.code || 'sem código'}): ${error.message}`);
+        }
+        return null;
+      }
+      return data;
+    };
+
+    if (!VANTORO_URL || !VANTORO_TOKEN) { await trocar([], true); return; }
+
+    // A IDADE DA LISTA, pelo banco: outra ponte (a velha, numa publicação)
+    // pode tê-la trazido há pouco.
+    const { data: marcas, error: erroMarca } = await supabase.from('zorvin_atencao_marca').select('trocada_em').limit(1);
+    if (erroMarca) {
+      if (semATabela(erroMarca)) {
+        atencaoSemOScript = true;
+        console.warn('quem pede atenção: a tabela "zorvin_atencao_marca" não existe — rode '
+          + 'sql/automaticos/066-quem-pede-atencao-nao-e-finalizado.sql. Fica parado até a ponte reiniciar.');
+      } else {
+        avisarFalhaDaAtencao(`não consegui ler a idade da lista (${erroMarca.code || 'sem código'}): ${erroMarca.message}`);
+      }
+      return;
+    }
+    const trocadaEm = (marcas || [])[0] ? Date.parse(marcas[0].trocada_em) : 0;
+    const idade = trocadaEm ? agora.getTime() - trocadaEm : Infinity;
+    const naJanela = dentroDoHorarioDeTrabalho(agora);
+    if (naJanela ? idade < ATENCAO_INTERVALO_MS - 60 * 1000 : idade < ATENCAO_VELHA_MS) return;
+    if (vantoroEmPausa()) return;
+
+    const { status, corpo } = await chamarVantoro('/clientes/atencao');
+    if (status === 404) {
+      avisarFalhaDaAtencao('o Vantoro ainda não tem a lista (/clientes/atencao respondeu 404). '
+        + 'Sem ela, a faxina não finaliza nada até a lista chegar.');
+      return;
+    }
+    if (status !== 200 || !corpo || corpo.ok !== true || !Array.isArray(corpo.clientes)) {
+      avisarFalhaDaAtencao(`o Vantoro não mandou a lista (${status}): ${(corpo && corpo.erro) || 'resposta sem a lista'}. `
+        + 'A de antes continua valendo até ficar velha.');
+      return;
+    }
+    const r = await trocar(corpo.clientes, false);
+    if (!r) return;
+    if (r.trocada === false) {
+      avisarFalhaDaAtencao(`a lista nova foi recusada: ${r.motivo} (antes ${r.antes}, agora ${r.novos}).`);
+      return;
+    }
+    const comOs = corpo.clientes.filter((c) => c && c.ordem_servico).length;
+    const blindar = corpo.clientes.filter((c) => c && c.blindagem && c.blindagem.precisa_blindar).length;
+    const conta = `${r.clientes} cliente(s): ${comOs} com OS aberta, ${blindar} para blindar; ${r.chaves} telefone(s)`;
+    if (conta !== atencaoUltimaConta) {
+      console.log(`quem pede atenção: a lista do Vantoro tem ${conta}.`);
+      atencaoUltimaConta = conta;
+    }
+    atencaoUltimaFalha = { texto: '', em: 0 };
+  } catch (e) {
+    avisarFalhaDaAtencao(`não consegui atualizar a lista: ${(e && e.name === 'AbortError') ? 'o Vantoro demorou demais' : ((e && e.message) || e)}`);
+  } finally {
+    atencaoRodando = false;
+  }
+}
+
+setTimeout(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_PRIMEIRA_MS).unref();
+setInterval(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_INTERVALO_MS).unref();
+
+// ============================================================
 //  A FAXINA DO QUAZAR (script 064, 25/11)
 //
 //  Pedido do Rodrigo: "Preciso zerar isso, ficar em dia para poder 'começar
