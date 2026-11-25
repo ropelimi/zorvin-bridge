@@ -28750,8 +28750,12 @@ create policy conversas_mexer on conversas for update to authenticated using (po
         await aplicar(q, S["070"]);
         const conf = await guardado(() => aplicar(q, S["071"]));
         ok("144b o 071 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
-        ok("a marca nasce falsa", (await q.query(`select column_default, is_nullable from information_schema.columns
-             where table_name = 'zorvin_quazar_faxina' and column_name = 'pediu_identificacao'`)).rows[0]?.column_default === "false");
+        const marca = (await q.query(`select column_default from information_schema.columns
+             where table_name = 'zorvin_quazar_faxina' and column_name = 'pediu_identificacao'`)).rows[0];
+        ok("a marca nasce falsa", marca?.column_default === "false", JSON.stringify(marca));
+        // SEM A MARCA, o resto da cena não tem o que medir: reprova pelo nome, em vez de estourar a seção.
+        if (!marca) ok("144c sem a marca, o resto da cena não roda", false);
+        else {
 
         const CPF = "Maria das Graças Souza, CPF 123.456.789-09";
         const escreve = async (conv, origem, quando, texto = "x", transcricao = null) => (await q.query(
@@ -28826,6 +28830,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
            && (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
                               ~ 'pediu_identificacao' and pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
                               ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f === true);
+        }
       }
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
