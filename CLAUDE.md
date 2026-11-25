@@ -143,6 +143,12 @@ Variáveis de ambiente (no Render):
   `ATENCAO_AVISOS_INTERVALO_MS` (padrão 10 min) e `ATENCAO_AVISOS_PRIMEIRA_MS`
   (3 min) são para a bancada. Ver "Só quem espera resposta fica, e a equipe é
   avisada (script 068, 25/11)".
+- `QUAZAR_RESPONDE` — `desligado` faz o Quazar não responder, de dia, o
+  cliente que espera há dias. **Opcional: sem ela, ele responde nos
+  departamentos ligados** (e só com `ANTHROPIC_API_KEY`).
+  `QUAZAR_RESPONDE_INTERVALO_MS` (padrão 30 s) e `QUAZAR_RESPONDE_PRIMEIRA_MS`
+  (2 min) são para a bancada. Ver "O Quazar responde quem espera (script 069,
+  25/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -4979,15 +4985,149 @@ e `ATENCAO_AVISOS_PRIMEIRA_MS` são para a bancada.
 nota com `autor` 'Quazar' e sem `autor_id`): ela diz por que a faxina não
 finalizou, e a ficha já tem a OS e a blindagem.
 
-**Fica para a próxima entrega, e é decisão:** o Quazar **responder** o cliente
+~~**Fica para a próxima entrega, e é decisão:** o Quazar **responder** o cliente
 que espera (o "o Quazar o responde e resolve" do pedido). Hoje ele lê e avisa
-a equipe; responder sozinho é o Quazar de dia valendo, que é outra PR.
+a equipe; responder sozinho é o Quazar de dia valendo, que é outra PR.~~
+**Feito no mesmo dia, no Sucesso do Cliente e no Comercial** — ver "O Quazar
+responde quem espera (script 069, 25/11)", logo abaixo.
 
 Provas: seção 138 (o 068 num Postgres de verdade, com o Zorvin montado pelos
 próprios scripts do 004 ao 067, 46 conferências) e seção 139 (a rodada, 6). A
 cena 138d pegou a prova, e não o script: a tarefa da OS nova foi para a outra
 conversa do mesmo cliente, a que espera há mais tempo, e a prova a procurava
 na primeira.
+
+### O Quazar responde quem espera (script 069, 25/11)
+
+Pedido do Rodrigo, depois do 068: *"Você mencionou: 'O Quazar ainda não
+responde o cliente que espera. Por enquanto ele lê a conversa e avisa a
+equipe. Responder sozinho vem na próxima entrega.' Quando ficará pronto?"*
+Decidido com ele: **no Sucesso do Cliente e no Comercial**, e **já valendo**
+(a mensagem vai ao cliente desde o primeiro dia, pedindo desculpas pela
+demora).
+
+**Medido em 25/11, às 08h14 (Brasília), só contando:** 111 conversas do
+Sucesso do Cliente e do Comercial que a faxina leu como pendentes, com o
+cliente ainda esperando.
+
+`sql/automaticos/069-o-quazar-responde-quem-espera.sql` e a rodada
+`quazarRespondeQuemEspera`, no `index.js`, de 30 em 30 segundos:
+
+| peça | o quê |
+|---|---|
+| `zorvin_quazar_responde` | por departamento: o Quazar responde ou não. **Sem linha, não responde** (o que fala com o cliente nasce desligado) |
+| a semente `quazar:responde-quem-espera-069` | liga, uma vez, o Sucesso do Cliente (slug `sdc`) e o Comercial (pelo nome). Desligado ou apagado depois, rodar a pasta de novo não religa (regra 5) |
+| as colunas `resposta*` em `zorvin_quazar_faxina` | o andamento: `pensando` (a ponte reservou a vez), `na_fila`, `calada`, `saiu`, `finalizou`, `nao_saiu`; quando entrou na fila (`respondida_em`), qual item da fila, se resolveu e o resumo |
+| `zorvin_quazar_responde_pendentes(limite, por_hora)` | quem ele pode responder agora — só a ponte chama |
+| `zorvin_quazar_responde_confirmar(limite)` | a resposta que SAIU — só a ponte chama |
+| `zorvin_faxina_retomadas_da_vez` | a do 066, sem os departamentos em que o Quazar responde: ali a resposta de verdade toma o lugar do "você ainda precisa de ajuda?". **A versão de referência passa a ser a do 069** |
+
+**Quem ele responde** (o banco diz):
+
+- a conversa que a faxina leu como `pendente` (ou `retomar`), e que ele ainda
+  não leu de novo (`resposta` nula);
+- num departamento ligado, **no expediente** dele (a semana da aba Fora do
+  horário, com os feriados; sem a semana, de segunda a sexta, das 8h às 18h
+  de Brasília);
+- aberta, não arquivada, sem grupo, de linha ativa, com o cliente esperando
+  (`esperando_desde`), a última mensagem dele ainda a que foi lida (a nova, a
+  faxina lê primeiro), e nada saindo na fila;
+- **uma resposta por espera**: o que o cliente escrever depois da resposta do
+  Quazar fica para a equipe (ou para a faxina, se for um "ok, obrigado");
+- **a noite já respondeu, fica para a equipe**: se o Quazar à noite (059)
+  mandou alguma coisa depois da mensagem lida, o de dia não responde de novo.
+  O banco não a oferece, e a ponte confere antes de pôr na fila (a última
+  mensagem é do Quazar → larga);
+- **no máximo 10 por telefone por hora**, e 3 por volta, as esperas mais
+  antigas primeiro. A vez reservada conta no teto;
+- **quem pede atenção (066) também é respondido**: ele responde, e a conversa
+  fica aberta com a nota e a tarefa do 068.
+
+**O que ele lê é o que o Quazar de dia lê**: a conversa inteira, o manual, as
+rápidas, as lições, as notas, os exemplos, o caso no Vantoro e as fotos e os
+PDFs do cliente. As regras são outras (`QUAZAR_RESPONDE_REGRAS`):
+
+- **a mensagem vai direto ao cliente**: ninguém da equipe lê antes;
+- apresenta-se pelo nome **só na primeira mensagem desta espera** (a noite
+  pode já ter respondido; aí não se apresenta de novo);
+- **pede desculpas pela demora, uma vez**, sem inventar motivo;
+- responde o que o manual, as lições, os exemplos e o caso respondem; o
+  andamento em linguagem simples; o que não consegue resolver, diz que a
+  equipe vai verificar e retornar, sem prazo;
+- **não promete prazo, data, valor nem resultado**, não pede senha nem código,
+  os assuntos que só a equipe responde (19/11), os arquivos abertos (24/11), a
+  conversa inteira e o tratamento (24/11);
+- **`resolveu`**: verdadeiro SÓ quando a mensagem responde por inteiro o que o
+  cliente pediu e não sobra nada para a equipe. Documento para conferir,
+  pedido que depende da equipe, assunto da equipe, processo sem o caso lido,
+  reclamação: falso. **Na dúvida, falso.**
+
+**A ponte**:
+
+- reserva a vez (`resposta = 'pensando'`, só onde está nula): a outra ponte,
+  numa publicação, não escreve para a mesma espera. A reserva presa (a ponte
+  caiu) sai em 10 minutos;
+- antes de pôr na fila, confere que a conversa continua como foi lida: o
+  cliente que escreveu de novo (refazer), a equipe que entrou, algo na fila,
+  ou a espera que acabou (largar) soltam a vez e **esperam 1, 5 e 30
+  minutos** antes de voltar (a lição de 24/11: a ponte e o banco que
+  discordam não viram uma chamada à IA a cada volta);
+- a resposta vai pela fila, `pelo_quazar` e `enviado_por` "Quazar" (059): na
+  conversa ela entra automática, e não tira o cliente da espera nem conta
+  como resposta da equipe;
+- **depois que sai**, `zorvin_quazar_responde_confirmar`: a resolvida, de
+  quem não pede atenção, é finalizada em **DÚVIDAS TRATADAS**, sem pessoa,
+  com "Respondida e finalizada pelo Quazar: …" e o resumo; o
+  `zorvin_faxina_finalizar` confere de novo que o cliente não escreveu depois
+  e que nada está saindo. O resto fica aberto (`saiu`). A que não saiu fica
+  `nao_saiu`, para a equipe. **Sem a lista de quem pede atenção fresca, a
+  resolvida espera**: não saber é o caso em que finalizar é mais perigoso;
+- **o cliente que escreve depois reabre a conversa** com protocolo novo (028),
+  como em qualquer finalização;
+- calado (propaganda, robô, um "ok"), guarda o porquê e não manda nada;
+- **só números no log**. `/copiloto/estado` diz `responde`;
+- **sem o 069**, a função que falta desliga a rodada até reiniciar, com uma
+  linha no log. `QUAZAR_RESPONDE=desligado` desliga sem mexer no código.
+  `QUAZAR_RESPONDE_INTERVALO_MS` e `QUAZAR_RESPONDE_PRIMEIRA_MS` são para a
+  bancada.
+
+**O custo**: o que o Quazar de dia custa, no Sonnet, uns US$ 0,02 a 0,06 por
+resposta (mais com fotos e PDFs). As ~111 de hoje, uns US$ 5, espalhadas pelo
+teto de 10 por telefone por hora.
+
+**Fica de fora, e é decisão:**
+
+- **a segunda resposta na mesma espera**: o cliente que responde ao Quazar
+  com outra pergunta fica para a equipe. Responder em conversa (como à noite)
+  é outro pedido;
+- **os outros departamentos** (Acordos, Interno): a chave é por
+  departamento, e ainda não há tela; por enquanto, pelo conector do Supabase.
+
+Provas: seção 140 (o 069 num Postgres de verdade, dentro da 138, com o Zorvin
+montado pelos próprios scripts; a 138 e a 140 juntas, 88 conferências) e seção
+141 (a rodada, 25), com um Claude de mentira.
+
+**44 sabotagens e 44 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- **quem ele responde:** sem a guarda do departamento ligado; sem o
+  `retomar`; sem olhar se já tem resposta; sem o cliente esperando; com
+  grupo; sem olhar a mensagem nova; sem olhar a fila; sem uma resposta por
+  espera; sem o expediente; sem o teto por hora; o teto sem a vez reservada,
+  e sem a própria volta; a espera mais nova primeiro; sem dizer quem pede
+  atenção; sem olhar a resposta da noite;
+- **confirmar:** sem olhar quem pede atenção; sem a lista fresca;
+  finalizando sem ter resolvido; a que não saiu como saiu; sem a mensagem
+  lida; sem esperar a fila;
+- **a retomada e o banco:** a retomada sem o filtro, e sem olhar se está
+  ligado; a semente sem o nome, e em toda rodada; a tabela e as funções para
+  quem entrou; sem a guarda do 064/066;
+- **a ponte:** a fila sem a marca do Quazar; sem a reserva; sem o refazer;
+  sem largar quando a equipe entra, e quando a noite já respondeu; o refazer
+  e o largar sem esperar; a IA que falha sem esperar; o pedido sem as
+  desculpas; sempre a primeira; o `resolveu` perdido; sem a confirmação;
+  desligado que não desliga; sem a guarda do 069; o estado sempre dizendo
+  `responde`; calado sem guardar o porquê; o log com o texto.
 
 ### O gasto do Quazar (script 058, 08/11)
 
