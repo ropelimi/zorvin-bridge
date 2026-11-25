@@ -27531,7 +27531,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       "026-o-outros-fica-no-fim.sql", "027-duvidas-tratadas.sql", "028-aguardando-em-aberto-e-finalizados.sql",
       "037-o-aviso-automatico-nao-e-atendimento.sql", "055-o-quazar-a-noite-em-ensaio.sql",
       "059-o-quazar-a-noite-valendo.sql", "064-a-faxina-do-quazar.sql", "065-a-retomada-so-onde-se-escolhe.sql",
-      "066-quem-pede-atencao-nao-e-finalizado.sql",
+      "066-quem-pede-atencao-nao-e-finalizado.sql", "067-a-lista-de-atencao-se-troca-com-where.sql",
     ].map((a) => [a.slice(0, 3), ler(a)]));
     const ESQUEMA = `
 do $$ begin
@@ -27649,6 +27649,8 @@ create policy conversas_mexer on conversas for update to authenticated using (po
         ok("135a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
         const sem = await zorvin();
         const r1 = await guardado(() => aplicar(sem, S["066"]));
+        const r67 = await guardado(() => aplicar(sem, S["067"]));
+        ok("e o 067 sem o 066 não faz nada, e diz", /nada a fazer/.test(String(item(r67, /sem a lista do 066/))), JSON.stringify(r67));
         ok("e sem o 064 e o 065, diz que falta e não cria a lista", /rode-os antes/.test(String(item(r1, /falta o 064/)))
            && (await sem.query("select to_regclass('public.zorvin_atencao') is null as n")).rows[0].n, JSON.stringify(r1));
       }
@@ -27677,6 +27679,11 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       ok("135b antes do 066, o silêncio pegaria as três (o defeito)", (await c.quietas()).length === 3, JSON.stringify(await c.quietas()));
       const conf = await guardado(() => aplicar(c, S["066"]));
       ok("o 066 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+      // O 067 refaz a troca da lista com `where true` nos dois DELETE: o
+      // pg_safeupdate da Supabase recusa o DELETE sem WHERE (06h49 de 25/11).
+      const conf67 = await guardado(() => aplicar(c, S["067"]));
+      ok("o 067 aplica, e diz que a troca não tem DELETE sem WHERE",
+         item(conf67, /DELETE sem WHERE/) === "true" && !defeito(conf67), JSON.stringify(conf67));
       ok("a conferência confere a chave do telefone", item(conf, /chave do telefone/) === "true", JSON.stringify(conf));
       ok("e diz que a lista ainda não chegou", /ainda não/.test(String(item(conf, /fresca/))), JSON.stringify(conf));
       ok("sem a lista fresca, o silêncio não pega nenhuma", (await c.quietas()).length === 0, JSON.stringify(await c.quietas()));
@@ -27757,7 +27764,10 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       await guardado(() => aplicar(c, S["064"]));
       await guardado(() => aplicar(c, S["065"]));
       await guardado(() => aplicar(c, S["066"]));
+      await guardado(() => aplicar(c, S["067"]));
       q = await c.quietas();
+      const corpo = (await c.query("select pg_get_functiondef('public.zorvin_atencao_trocar(jsonb, boolean)'::regprocedure) d")).rows[0].d;
+      ok("e a troca que fica é a do 067, sem DELETE sem WHERE", !/delete\s+from\s+[a-z_.]+\s*;/i.test(corpo));
       ok("a pasta inteira de novo, na ordem: a trava continua", q.includes(D.conv) && !q.includes(A.conv) && !q.includes(B.conv), JSON.stringify(q));
     } catch (e) {
       ok("a seção 135 rodou até o fim", false, e.stack || e.message);
@@ -27914,6 +27924,37 @@ create policy conversas_mexer on conversas for update to authenticated using (po
        pedidos(t).length === 2 && b.trocas.length === 0, `${pedidos(t).length} pedido(s)`);
     await t.parar();
   }
+}
+
+// ============================================================
+//  137. NENHUM SCRIPT COM DELETE OU UPDATE SEM WHERE (25/11)
+//
+//  A Supabase carrega o pg_safeupdate em todo pedido que vem pelo PostgREST,
+//  e ele recusa o DELETE e o UPDATE sem WHERE, também dentro de uma função.
+//  O Postgres das provas não o tem: foi assim que o 066 passou por todas as
+//  provas e a primeira lista do Vantoro foi recusada às 06h49 de 25/11. Esta
+//  seção lê a pasta e recusa o comando sem WHERE em qualquer script, menos no
+//  066, que é história (o 067 o refaz).
+// ============================================================
+{
+  console.log("\n137. Nenhum script com DELETE ou UPDATE sem WHERE");
+  const fs = await import("node:fs");
+  const pasta = new URL("../sql/automaticos/", import.meta.url);
+  const HISTORIA = new Set(["066-quem-pede-atencao-nao-e-finalizado.sql"]);
+  const achados = [];
+  for (const nome of fs.readdirSync(pasta).filter((n) => n.endsWith(".sql")).sort()) {
+    if (HISTORIA.has(nome)) continue;
+    const texto = fs.readFileSync(new URL(nome, pasta), "utf8")
+      .split("\n").map((l) => l.replace(/--.*$/, "")).join("\n");
+    // Um comando vai até o `;`. Sem WHERE entre o DELETE/UPDATE e o `;`, é recusado.
+    for (const m of texto.matchAll(/\b(delete\s+from|update)\s+(?:only\s+)?([a-z_][a-z0-9_.]*)\b([^;]*);/gi)) {
+      if (/\bset\b/i.test(m[1]) || (/^update$/i.test(m[1]) && !/\bset\b/i.test(m[3]))) continue; // não é um UPDATE de tabela (ex.: "on update cascade")
+      if (!/\bwhere\b/i.test(m[3])) achados.push(`${nome}: ${m[0].replace(/\s+/g, " ").slice(0, 80)}`);
+    }
+  }
+  ok("137 nenhum DELETE ou UPDATE sem WHERE na pasta (fora o 066, que o 067 refaz)", achados.length === 0, achados.join(" | "));
+  const so066 = fs.readFileSync(new URL("066-quem-pede-atencao-nao-e-finalizado.sql", pasta), "utf8");
+  ok("e a leitura acha o do 066 (a conferência não é cega)", /delete from public\.zorvin_atencao_chaves;/.test(so066));
 }
 
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);

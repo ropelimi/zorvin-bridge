@@ -4854,6 +4854,39 @@ tarefas para o responsável da OS e das pendências; a blindagem para o
 responsável da conversa), o Quazar à noite lendo a OS e a blindagem, e reabrir
 as conversas que a faxina finalizou sem poder.
 
+### A primeira lista foi recusada: DELETE sem WHERE (script 067, 25/11)
+
+O 066 subiu às 06h48 de 25/11, e a primeira lista do Vantoro chegou às 06h49
+(556 clientes com OS aberta, mais os antigos sem blindagem). **O banco a
+recusou**: o PostgREST respondeu 400 à `zorvin_atencao_trocar`, e o log do
+Postgres disse *"DELETE requires a WHERE clause"*. A faxina continuou parada
+(sem a lista fresca ela não finaliza nada), e foi isso que segurou o estrago.
+
+**A Supabase carrega o `pg_safeupdate` em todo pedido que passa pelo
+PostgREST**, e ele recusa o DELETE e o UPDATE sem WHERE, **também dentro de uma
+função `security definer`**. A função esvaziava a lista de antes com
+`delete from public.zorvin_atencao;`. O Postgres das provas não tem o
+`pg_safeupdate`, e por isso nenhuma prova viu.
+
+- **Corrigido à mão às 06h55 (Brasília)**, pelo conector, com `where true` nos
+  dois DELETE;
+- **`sql/automaticos/067-a-lista-de-atencao-se-troca-com-where.sql`** deixa a
+  correção escrita: o mesmo corpo do 066, com `where true`. **A versão de
+  referência de `zorvin_atencao_trocar` passa a ser a do 067** (regra 5). O 066
+  não foi editado (script aplicado não se edita);
+- **a conferência do 067 lê o corpo da função** e diz `false` se ainda houver
+  um DELETE sem WHERE.
+
+**A régua que fica: em script e em função, todo DELETE e todo UPDATE levam
+WHERE** (`where true` quando é para a tabela inteira). A **seção 137** da prova
+lê a pasta e recusa o comando sem WHERE em qualquer script, menos no 066, que
+é história.
+
+Prova: seção 135 (o 067 aplica e diz que a troca não tem DELETE sem WHERE;
+sem o 066 não faz nada; rodando a pasta de novo, a troca que fica é a do 067)
+e seção 137. **A sabotagem que tira o `where true` do 067 é pega por três
+conferências**, a da 137 entre elas.
+
 ### O gasto do Quazar (script 058, 08/11)
 
 Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de
