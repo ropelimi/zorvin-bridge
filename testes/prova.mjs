@@ -124,6 +124,11 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            // rodada chama uma função do banco. A seção 139 encurta.
            ATENCAO_AVISOS_PRIMEIRA_MS: "3600000",
            ATENCAO_AVISOS_INTERVALO_MS: "3600000",
+           // O QUAZAR QUE RESPONDE QUEM ESPERA (069), pelo mesmo motivo: a rodada
+           // chama duas funções do banco e põe mensagens na fila. A seção 141
+           // encurta.
+           QUAZAR_RESPONDE_PRIMEIRA_MS: "3600000",
+           QUAZAR_RESPONDE_INTERVALO_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -28006,7 +28011,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       "037-o-aviso-automatico-nao-e-atendimento.sql", "055-o-quazar-a-noite-em-ensaio.sql",
       "059-o-quazar-a-noite-valendo.sql", "064-a-faxina-do-quazar.sql", "065-a-retomada-so-onde-se-escolhe.sql",
       "066-quem-pede-atencao-nao-e-finalizado.sql", "067-a-lista-de-atencao-se-troca-com-where.sql",
-      "068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql",
+      "068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql", "069-o-quazar-responde-quem-espera.sql",
     ].map((a) => [a.slice(0, 3), ler(a)]));
     const ESQUEMA = `
 do $$ begin
@@ -28324,6 +28329,213 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       for (const k of ["064", "065", "066", "067", "068"]) await c.query(S[k]);
       ok("e a pasta na ordem mantém a regra nova (o silêncio pega quem pede atenção)",
          (await c.query(`select pg_get_functiondef('public.zorvin_faxina_quietas(integer, integer)'::regprocedure) !~ 'zorvin_pede_atencao' as ok`)).rows[0].ok);
+
+      // ============================================================
+      //  140. O QUAZAR RESPONDE QUEM ESPERA (069), no mesmo Postgres (25/11)
+      //
+      //    - num banco limpo e sem o 064/066, nada, e diz;
+      //    - a semente liga o Sucesso do Cliente (pelo slug) e o Comercial
+      //      (pelo nome), e não o Acordos; desligado ou apagado, não volta;
+      //    - quem ele responde: a lida como pendente ou retomar, no
+      //      departamento ligado e no expediente, com o cliente esperando, sem
+      //      mensagem nova, sem fila, sem grupo, não arquivada; uma resposta
+      //      por espera; o teto por telefone por hora; a ordem e o limite;
+      //    - a resposta que saiu: resolvida e de quem não pede atenção
+      //      finaliza em DÚVIDAS TRATADAS; o resto fica aberto; a que não saiu
+      //      fica 'nao_saiu'; sem a lista fresca, espera;
+      //    - a retomada fica de fora onde o Quazar responde;
+      //    - quem entrou e quem não entrou não alcançam;
+      //    - rodar de novo, e a pasta na ordem, mantém tudo.
+      // ============================================================
+      console.log("\n140. O Quazar responde quem espera (069), num Postgres de verdade");
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S["069"]));
+        ok("140a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
+        const sem = await zorvin(ANTES.filter((k) => !["064", "065", "066", "067"].includes(k)));
+        const r1 = await guardado(() => aplicar(sem, S["069"]));
+        ok("e sem o 064 e o 066, diz que falta e não cria nada", /rode-os antes/.test(String(item(r1, /falta o 021/)))
+           && (await sem.query("select to_regclass('public.zorvin_quazar_responde') is null as n")).rows[0].n, JSON.stringify(r1));
+      }
+      {
+        const q = await zorvin([...ANTES, "068"]);
+        // O COMERCIAL vem sem slug: a semente o acha pelo nome, sem acento e sem maiúscula.
+        const dCo = (await q.query("insert into departamentos (nome, ordem) values ('COMERCIAL', 3) returning id")).rows[0].id;
+        const tAc = (await q.query("insert into advogados (nome, numero, departamento_id) values ('Acordos 1', 'AC1', 2) returning id")).rows[0].id;
+        const tCo = (await q.query("insert into advogados (nome, numero, departamento_id) values ('Comercial', 'CO1', $1) returning id", [dCo])).rows[0].id;
+        const conversaEm = async (tel, numero) => {
+          const ct = (await q.query("insert into contatos (numero, nome) values ($1, 'Cliente') returning id", [numero])).rows[0].id;
+          const conv = (await q.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [tel, ct])).rows[0].id;
+          return { conv, ct };
+        };
+        const esperaEm = async (tel, numero, d, status = "pendente", nome = null) => {
+          const x = await conversaEm(tel, numero);
+          await q.msg(x.conv, "advogado", dias(d + 2)); x.m = await q.msg(x.conv, "contato", dias(d));
+          x.fx = (await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status, nome_para_saudar)
+                                 values ($1, $2, $3, $4, $5, $6) returning id`, [x.conv, tel, x.m, dias(d), status, nome])).rows[0].id;
+          return x;
+        };
+        const pendentes = async (limite = 50, porHora = 50) => lista((await q.query(
+          "select zorvin_quazar_responde_pendentes($1, $2) r", [limite, porHora])).rows[0].r);
+        const confirmar = async () => (await q.query("select zorvin_quazar_responde_confirmar(50) r")).rows[0].r;
+        const fila = async (conv, status) => (await q.query(
+          "insert into fila_envio (conversa_id, texto, status) values ($1, 'x', $2) returning id", [conv, status])).rows[0].id;
+        const naFila = async (x, status, resolveu, resumo = null) => {
+          const f = await fila(x.conv, status);
+          await q.query(`update zorvin_quazar_faxina set resposta = 'na_fila', resposta_em = now(), respondida_em = now(),
+                           resposta_fila_id = $2, resposta_resolveu = $3, resposta_resumo = $4 where id = $1`, [x.fx, f, resolveu, resumo]);
+          return f;
+        };
+        const faxina = async (x) => (await q.query("select status, resposta from zorvin_quazar_faxina where id = $1", [x.fx])).rows[0];
+
+        const P1 = await esperaEm(q.tel, "5571900000001", 6, "pendente", "Maria");
+        const P2 = await esperaEm(q.tel, "5571900000002", 40, "retomar");
+        const P3 = await esperaEm(tAc, "5571900000003", 5);                  // Acordos: o Quazar não responde
+        const P4 = await esperaEm(q.tel, "5571900000004", 5);                // o cliente escreveu de novo
+        await q.msg(P4.conv, "contato", dias(1));
+        const P5 = await esperaEm(q.tel, "5571900000005", 5); await fila(P5.conv, "pendente");   // algo saindo na fila
+        const P6 = await esperaEm(q.tel, "5571900000006", 5); await q.query("update conversas set arquivada = true where id = $1", [P6.conv]);
+        const P7 = await esperaEm(q.tel, "5571900000007", 5); await q.msg(P7.conv, "advogado", dias(1));   // a equipe respondeu
+        const P8 = await esperaEm(q.tel, "grupo:5571900000008", 5);          // grupo
+        const P9 = await esperaEm(q.tel, "5571900000009", 5, "superada");    // a faxina deu por superada
+        const P10 = await esperaEm(q.tel, "5571900000010", 7);               // ele já respondeu nesta espera
+        const P11 = await esperaEm(q.tel, "5571900000011", 4);               // pede atenção (OS aberta)
+        const P12 = await esperaEm(tCo, "5571900000012", 3);                 // Comercial, sem a semana escrita
+        await q.trocar([{ id: 911, telefones: ["71900000011"], ordem_servico: OS(81, "ana.silva") }]);
+
+        const conf = await guardado(() => aplicar(q, S["069"]));
+        ok("140b o 069 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+        ok("a semente liga o Sucesso do Cliente (pelo slug) e o Comercial (pelo nome), e não o Acordos",
+           item(conf, /departamentos em que/) === "COMERCIAL, Sucesso do Cliente", JSON.stringify(conf));
+        // ELE JÁ RESPONDEU NESTA ESPERA, e o cliente escreveu de novo: a faxina leu a nova como pendente.
+        await q.query("update zorvin_quazar_faxina set resposta = 'saiu', respondida_em = now() - interval '2 hours' where id = $1", [P10.fx]);
+        const novaDoP10 = await q.msg(P10.conv, "contato", dias(0.5));
+        await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status)
+                       select conversa_id, advogado_id, $2, esperando_desde, 'pendente' from zorvin_quazar_faxina where id = $1`, [P10.fx, novaDoP10]);
+
+        const comercialAberto = (await q.query(`select extract(isodow from now() at time zone 'America/Sao_Paulo') between 1 and 5
+            and (now() at time zone 'America/Sao_Paulo')::time >= '08:00' and (now() at time zone 'America/Sao_Paulo')::time < '18:00'
+            and not exists (select 1 from zorvin_feriados h where h.dia = (now() at time zone 'America/Sao_Paulo')::date) as a`)).rows[0].a;
+        // O QUAZAR RESPONDEU À NOITE depois da mensagem lida: de manhã não fala de novo.
+        const P14 = await esperaEm(q.tel, "5571900000014", 5);
+        await q.query(`insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em, automatica, pelo_quazar)
+                       values ($1, 'advogado', 'x', 'noite14', $2, true, true)`, [P14.conv, dias(4.5)]);
+        // ELE JÁ LEU DE NOVO E FICOU CALADO: não pergunta de novo.
+        const P13 = await esperaEm(q.tel, "5571900000013", 5);
+        await q.query("update zorvin_quazar_faxina set resposta = 'calada', resposta_em = now() where id = $1", [P13.fx]);
+        const lp = await pendentes();
+        const ids = lp.map((x) => x.conversa_id);
+        ok("140c responde quem a faxina leu como pendente, e como retomar", ids.includes(P1.conv) && ids.includes(P2.conv), JSON.stringify(ids));
+        const doP1 = lp.find((x) => x.conversa_id === P1.conv);
+        ok("com o nome, os dias de espera, o departamento e a mensagem lida",
+           doP1 && doP1.nome === "Maria" && doP1.dias === 6 && doP1.departamento === "Sucesso do Cliente"
+           && doP1.cliente_ate_id === P1.m && doP1.id === P1.fx && doP1.advogado_id === q.tel, JSON.stringify(doP1));
+        ok("não responde no Acordos (o departamento não está ligado)", !ids.includes(P3.conv));
+        ok("nem quem escreveu de novo (a faxina lê a mensagem nova primeiro)", !ids.includes(P4.conv));
+        ok("nem com algo saindo na fila", !ids.includes(P5.conv));
+        ok("nem a arquivada", !ids.includes(P6.conv));
+        ok("nem quem a equipe já respondeu", !ids.includes(P7.conv));
+        ok("nem o grupo", !ids.includes(P8.conv));
+        ok("nem a que a faxina deu por superada", !ids.includes(P9.conv));
+        ok("nem a que ele já leu e em que ficou calado", !ids.includes(P13.conv));
+        ok("nem a que ele já respondeu à noite, depois da mensagem lida", !ids.includes(P14.conv));
+        ok("uma resposta por espera: o que o cliente escreve depois da resposta fica para a equipe", !ids.includes(P10.conv));
+        const doP11 = lp.find((x) => x.conversa_id === P11.conv);
+        ok("quem pede atenção também é respondido, e vem marcado", doP11 && doP11.pede_atencao === true && doP1.pede_atencao === false,
+           JSON.stringify(doP11));
+        ok(`o departamento sem a semana escrita vale de segunda a sexta, das 8h às 18h (agora ${comercialAberto ? "aberto" : "fechado"})`,
+           ids.includes(P12.conv) === comercialAberto, JSON.stringify(ids));
+        ok("a espera mais antiga primeiro", ids[0] === P2.conv, JSON.stringify(ids));
+        // A CONFERÊNCIA CONTOU ANTES de o P10 ganhar a resposta: ali ele ainda era um a mais.
+        ok("e a conferência conta quantas ele pode responder agora", Number(item(conf, /pode responder agora/)) === lp.length + 1,
+           `${item(conf, /pode responder agora/)} contra ${lp.length} + 1`);
+        await q.query("update zorvin_fora_do_horario set semana = $1::jsonb where departamento_id = 1", [FECHADA]);
+        ok("fora do expediente do departamento, não responde ninguém dele",
+           !(await pendentes()).some((x) => x.advogado_id === q.tel));
+        await q.query("update zorvin_fora_do_horario set semana = $1::jsonb where departamento_id = 1", [ABERTA]);
+
+        // ---- 140d. o teto por telefone por hora, e o limite ----
+        ok("140d o limite da volta vale", (await pendentes(1)).length === 1);
+        ok("o teto por telefone por hora vale dentro da própria volta",
+           (await pendentes(50, 2)).filter((x) => x.advogado_id === q.tel).length === 2);
+        await q.query("update zorvin_quazar_faxina set resposta = 'pensando', resposta_em = now() where id = $1", [P2.fx]);
+        const comReserva = await pendentes(50, 2);
+        ok("a vez reservada conta no teto, e não volta na lista",
+           !comReserva.some((x) => x.conversa_id === P2.conv) && comReserva.filter((x) => x.advogado_id === q.tel).length === 1,
+           JSON.stringify(comReserva.map((x) => x.conversa_id)));
+        await q.query("update zorvin_quazar_faxina set resposta = null, resposta_em = null where id = $1", [P2.fx]);
+
+        // ---- 140e. a resposta que saiu ----
+        await naFila(P1, "enviada", true, "explicou como pedir a segunda via");
+        await naFila(P2, "enviada", false, "pediu o comprovante; a equipe confere");
+        await naFila(P11, "enviada", true);
+        const C1 = await esperaEm(q.tel, "5571900000021", 5); await naFila(C1, "erro", true);
+        const C2 = await esperaEm(q.tel, "5571900000022", 5); await naFila(C2, "pendente", true);
+        const C3 = await esperaEm(q.tel, "5571900000023", 5); await naFila(C3, "enviada", true);
+        await q.msg(C3.conv, "contato", new Date().toISOString());            // respondeu logo depois do Quazar
+        const r = await confirmar();
+        ok("140e a confirmação diz quantas finalizou, quantas ficaram abertas e quantas não saíram",
+           r && r.finalizadas === 1 && r.abertas === 3 && r.nao_saiu === 1, JSON.stringify(r));
+        ok("a resolvida, de quem não pede atenção, é finalizada", (await q.situacao(P1.conv)) === "finalizado"
+           && JSON.stringify(await faxina(P1)) === JSON.stringify({ status: "finalizada", resposta: "finalizou" }), JSON.stringify(await faxina(P1)));
+        const tr = (await q.query(`select a.nome, t.quem, t.observacao from zorvin_tratamentos t join zorvin_assuntos a on a.id = t.assunto_id
+                                   where t.conversa_id = $1`, [P1.conv])).rows[0] || {};
+        ok("em DÚVIDAS TRATADAS, sem pessoa, com o que o Quazar disse", /D[UÚ]VIDAS TRATADAS/i.test(String(tr.nome)) && tr.quem === null
+           && /^Respondida e finalizada pelo Quazar: explicou como pedir a segunda via/.test(String(tr.observacao)), JSON.stringify(tr));
+        ok("a não resolvida fica aberta, com a resposta 'saiu'", (await q.situacao(P2.conv)) !== "finalizado" && (await faxina(P2)).resposta === "saiu");
+        ok("a resolvida de quem tem OS aberta fica aberta (a equipe é avisada)", (await q.situacao(P11.conv)) !== "finalizado"
+           && (await faxina(P11)).resposta === "saiu");
+        ok("a que não saiu fica 'nao_saiu', e a conversa aberta", (await faxina(C1)).resposta === "nao_saiu" && (await q.situacao(C1.conv)) !== "finalizado");
+        ok("a que ainda está na fila espera", (await faxina(C2)).resposta === "na_fila");
+        ok("e o cliente que escreveu depois da resposta segura a finalização", (await q.situacao(C3.conv)) !== "finalizado"
+           && (await faxina(C3)).resposta === "saiu");
+        const C4 = await esperaEm(q.tel, "5571900000024", 5); await naFila(C4, "enviada", true);
+        await q.query("update zorvin_atencao_marca set trocada_em = now() - interval '37 hours' where true");
+        const r2 = await confirmar();
+        ok("sem a lista fresca, a resolvida espera (não sabe se pede atenção)", (await faxina(C4)).resposta === "na_fila"
+           && (await q.situacao(C4.conv)) !== "finalizado" && r2.finalizadas === 0, JSON.stringify(r2));
+        await q.trocar([{ id: 911, telefones: ["71900000011"], ordem_servico: OS(81, "ana.silva") }]);
+        ok("e com a lista de novo, finaliza", (await confirmar()).finalizadas === 1 && (await q.situacao(C4.conv)) === "finalizado");
+
+        // ---- 140f. a retomada fica de fora onde o Quazar responde ----
+        const R1 = await esperaEm(q.tel, "5571900000031", 35, "retomar");
+        const R2 = await esperaEm(tAc, "5571900000032", 35, "retomar");
+        await q.query(`insert into zorvin_faxina_retomada (departamento_id, ligada) values (1, true), (2, true)
+                       on conflict (departamento_id) do update set ligada = true`);
+        const retomadas = async () => lista((await q.query("select zorvin_faxina_retomadas_da_vez(50, 50, 30) r")).rows[0].r).map((x) => x.conversa_id);
+        const rt = await retomadas();
+        ok("140f a retomada não sai onde o Quazar responde, e sai onde ele não responde", !rt.includes(R1.conv) && rt.includes(R2.conv), JSON.stringify(rt));
+        await q.query("update zorvin_quazar_responde set ligado = false where departamento_id = 1");
+        ok("com o Quazar desligado no departamento, a retomada volta", (await retomadas()).includes(R1.conv));
+        ok("e ele não responde mais ali", !(await pendentes()).some((x) => x.advogado_id === q.tel));
+
+        // ---- 140g. quem entrou e quem não entrou ----
+        const ent = await comoPessoa(q, U.ana, async () => ({
+          tb: await guardado(() => q.query("select count(*) from zorvin_quazar_responde")),
+          pe: await guardado(() => q.query("select zorvin_quazar_responde_pendentes(1, 1)")),
+          co: await guardado(() => q.query("select zorvin_quazar_responde_confirmar(1)")),
+        }));
+        ok("140g quem entrou não lê onde o Quazar responde nem chama as funções",
+           ent.tb.codigo === "42501" && ent.pe.codigo === "42501" && ent.co.codigo === "42501", JSON.stringify(ent));
+        ok("quem não entrou também não", !(await q.query(
+          "select has_function_privilege('anon', 'public.zorvin_quazar_responde_pendentes(integer, integer)', 'execute') p")).rows[0].p
+          && !(await q.query("select has_table_privilege('anon', 'public.zorvin_quazar_responde', 'select') p")).rows[0].p);
+
+        // ---- 140h. rodar de novo, e a pasta na ordem ----
+        const de2 = await guardado(() => aplicar(q, S["069"]));
+        ok("140h rodar de novo não acusa defeito, e não religa o departamento desligado", lista(de2).length > 0 && !defeito(de2)
+           && (await q.query("select ligado from zorvin_quazar_responde where departamento_id = 1")).rows[0].ligado === false, JSON.stringify(de2));
+        await q.query("delete from zorvin_quazar_responde where departamento_id = 1");
+        await aplicar(q, S["069"]);
+        ok("nem traz de volta a linha apagada", !(await q.query("select 1 from zorvin_quazar_responde where departamento_id = 1")).rows.length);
+        await q.query(S["066"]);
+        const sem066 = (await q.query(`select pg_get_functiondef('public.zorvin_faxina_retomadas_da_vez(integer, integer, integer)'::regprocedure)
+                                       ~ 'zorvin_quazar_responde' as f`)).rows[0].f;
+        await q.query(S["069"]);
+        ok("e a pasta na ordem devolve a retomada sem os departamentos em que o Quazar responde", sem066 === false
+           && (await q.query(`select pg_get_functiondef('public.zorvin_faxina_retomadas_da_vez(integer, integer, integer)'::regprocedure)
+                              ~ 'zorvin_quazar_responde' as f`)).rows[0].f === true);
+      }
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
@@ -28400,6 +28612,210 @@ console.log("\n139. O Quazar avisa a equipe: a rodada da ponte");
     ok("139d ATENCAO_AVISOS=desligado não chama nada, e diz", b.chamadas.length === 0 && /ATENCAO_AVISOS=desligado/.test(registro(t)),
        `${b.chamadas.length} chamadas`);
     await t.parar();
+  }
+}
+
+// ============================================================
+//  141. O QUAZAR RESPONDE QUEM ESPERA — a rodada da ponte (25/11)
+//
+//    - a resposta vai pela fila, marcada `pelo_quazar`, e a linha da faxina
+//      guarda que entrou na fila, se resolveu e o resumo;
+//    - o pedido pede desculpas pela demora, diz os dias e o nome, e ele se
+//      apresenta só na primeira mensagem desta espera;
+//    - as regras: resolveu só quando não sobra nada; não pede senha; os
+//      assuntos da equipe;
+//    - a confirmação é chamada a cada volta, e o log diz os números;
+//    - calado, guarda o porquê e não manda nada;
+//    - o cliente que escreveu de novo e a equipe que entrou: nada sai, a vez
+//      é solta, e a mesma conversa espera antes de voltar;
+//    - a vez que outra ponte reservou não é escrita de novo;
+//    - sem o 069, chama uma vez, diz qual script falta e para;
+//    - `QUAZAR_RESPONDE=desligado` não chama nada, e o estado diz.
+// ============================================================
+console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
+{
+  async function subirClaude(resposta) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      const r = resposta(pedidos.length);
+      if (r.status) { res.writeHead(r.status, { "Content-Type": "application/json" }); res.end(JSON.stringify(r.corpo || {})); return; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: JSON.stringify(r) }], stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 60 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const RESOLVEU = { responder: true, resolveu: true,
+    mensagem: "Bom dia, Andreia! Sou o Quazar, assistente virtual do escritório. Peço desculpas pela demora. A segunda via sai pelo site do banco.",
+    resumo: "Explicou como tirar a segunda via.", motivo: "" };
+  const AGORA = Date.now();
+  const haDias = (d) => new Date(AGORA - d * 86400e3).toISOString();
+  const tabelas = (extra = {}) => ({
+    contatos: [{ id: "k1", numero: "5571900000001", nome: "Deus", vantoro_nome: "ANDREIA CRISTINA MARTINS" }],
+    conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aberto", esperando_desde: haDias(5) }],
+    mensagens: [
+      { id: "m1", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Vou verificar.", criado_em: haDias(7) },
+      { id: "m3", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Como tiro a segunda via?", criado_em: haDias(5) },
+      ...(extra.mensagens || [])],
+    zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+    zorvin_quazar_faxina: [{ id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate_id: "m3", esperando_desde: haDias(5),
+                             status: "pendente", resposta: extra.resposta || null, resposta_em: extra.resposta ? new Date().toISOString() : null }],
+    fila_envio: [],
+  });
+  const ITEM = { id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate_id: "m3", cliente_ate: haDias(5),
+                 esperando_desde: haDias(5), dias: 5, nome: "Andreia", departamento: "Sucesso do Cliente", pede_atencao: false };
+  const banco = () => {
+    const chamadas = { pendentes: [], confirmar: [] };
+    return { chamadas, rpcs: {
+      zorvin_quazar_responde_pendentes: (json, dados) => {
+        chamadas.pendentes.push(json);
+        return { corpo: (dados.zorvin_quazar_faxina || []).some((f) => f.id === "f1" && f.resposta == null) ? [ITEM] : [] };
+      },
+      zorvin_quazar_responde_confirmar: (json) => {
+        chamadas.confirmar.push(json);
+        return { corpo: chamadas.confirmar.length === 2 ? { finalizadas: 1, abertas: 2, nao_saiu: 1 } : { finalizadas: 0, abertas: 0, nao_saiu: 0 } };
+      },
+    } };
+  };
+  const rapido = (claude, extra = {}) => ({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+    QUAZAR_RESPONDE_PRIMEIRA_MS: "200", QUAZAR_RESPONDE_INTERVALO_MS: "400", ...extra });
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const linha = (t) => (t.sb.dados.zorvin_quazar_faxina || []).find((f) => f.id === "f1") || {};
+  const fila = (t) => t.sb.dados.fila_envio || [];
+  const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const registro = (t) => t.registro.join("");
+
+  // ---- 141a. a resposta vai pela fila ----
+  {
+    const claude = await subirClaude(() => RESOLVEU);
+    const b = banco();
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: b.rpcs });
+    await esperaAte(() => linha(t).resposta === "na_fila");
+    const f = fila(t)[0] || {};
+    ok("141a a resposta vai pela fila, marcada como do Quazar", fila(t).length === 1 && f.pelo_quazar === true && f.enviado_por === "Quazar"
+       && f.conversa_id === "c1" && f.status === "pendente" && /Peço desculpas pela demora/.test(f.texto || ""), JSON.stringify(fila(t)));
+    const l = linha(t);
+    ok("e a linha da faxina guarda a fila, que resolveu e o resumo", l.resposta === "na_fila" && l.resposta_fila_id === f.id
+       && l.resposta_resolveu === true && l.resposta_resumo === "Explicou como tirar a segunda via." && !!l.respondida_em, JSON.stringify(l));
+    const ped = pedidoDe(claude.pedidos[0]);
+    ok("o pedido diz há quantos dias ele espera, e manda pedir desculpas pela demora",
+       /sem resposta da equipe há 5 dias: peça desculpas pela demora/.test(ped), ped.slice(0, 700));
+    ok("e manda ele se apresentar, com o nome do escritório, e chama o cliente pelo nome",
+       ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")') && /Primeiro nome do cliente.*: Andreia\./.test(ped),
+       ped.slice(0, 700));
+    ok("a mensagem sem resposta vai na conversa", /Como tiro a segunda via\?/.test(ped));
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("as regras: vai direto ao cliente, desculpas uma vez, resolveu só sem sobrar nada para a equipe",
+       /vai direto ao cliente/.test(sis) && /Peça desculpas pela demora em responder, uma vez/.test(sis) && /resolveu: true SÓ quando/.test(sis)
+       && /Na dúvida, false/.test(sis), sis.slice(0, 400));
+    ok("e não pede senha, não promete prazo nem valor, e os assuntos da equipe", /Não pede senha nem código/.test(sis)
+       && /Não promete prazo, data, valor nem resultado/.test(sis) && /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis));
+    const props = Object.keys(((((claude.pedidos[0] || {}).output_config || {}).format || {}).schema || {}).properties || {});
+    ok("a resposta vem presa pelo formato, com o `resolveu`", ["responder", "mensagem", "resolveu", "resumo", "motivo"].every((k) => props.includes(k)),
+       JSON.stringify(props));
+    await esperaAte(() => b.chamadas.confirmar.length >= 2);
+    ok("141b a confirmação é chamada a cada volta, com 50", b.chamadas.confirmar.length >= 2
+       && b.chamadas.confirmar.every((a) => a.p_limite === 50), JSON.stringify(b.chamadas.confirmar));
+    ok("e pergunta quem espera com 3 por volta (vezes 4) e 10 por telefone por hora", b.chamadas.pendentes.length >= 1
+       && b.chamadas.pendentes[0].p_limite === 12 && b.chamadas.pendentes[0].p_por_hora === 10, JSON.stringify(b.chamadas.pendentes[0]));
+    await esperaAte(() => /finalizada\(s\) depois de a resposta sair/.test(registro(t)));
+    const log = registro(t);
+    ok("o log diz só números", /quazar responde quem espera: em \d+ ms — 1 resposta\(s\) na fila/.test(log)
+       && /1 finalizada\(s\) depois de a resposta sair; 2 aberta\(s\) para a equipe depois de a resposta sair; 1 resposta\(s\) que não saíram/.test(log)
+       && !/Andreia|segunda via/.test(log), log.slice(-500));
+    await espera(900);
+    ok("e não escreve duas vezes para a mesma espera", claude.pedidos.length === 1 && fila(t).length === 1, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 141c. calado ----
+  {
+    const claude = await subirClaude(() => ({ responder: false, resolveu: false, mensagem: "", resumo: "", motivo: "Era propaganda." }));
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: banco().rpcs });
+    await esperaAte(() => linha(t).resposta === "calada");
+    ok("141c calado, guarda o porquê e não manda nada", linha(t).resposta === "calada" && linha(t).resposta_resumo === "Era propaganda."
+       && !fila(t).length, JSON.stringify(linha(t)));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 141d. o cliente escreveu de novo; a equipe entrou ----
+  for (const [nome, extra] of [
+    ["o cliente que escreveu de novo enquanto ele pensava", { id: "m4", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "?", criado_em: haDias(0.01) }],
+    ["a equipe que entrou na conversa", { id: "m5", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Oi!", criado_em: haDias(0.01) }],
+    ["o Quazar que já respondeu à noite", { id: "m6", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Boa noite!", criado_em: haDias(0.01),
+                                             automatica: true, pelo_quazar: true }],
+  ]) {
+    const claude = await subirClaude(() => RESOLVEU);
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [extra] }), rpcs: banco().rpcs });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    await espera(1500);
+    ok(`141d ${nome}: nada sai, e a vez é solta`, !fila(t).length && linha(t).resposta == null, JSON.stringify(linha(t)));
+    ok("e a mesma conversa espera antes de voltar (sem chamar a IA a cada volta)", claude.pedidos.length === 1, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 141e. ele já falou nesta espera; a vez reservada por outra ponte; a IA que falha ----
+  {
+    const claude = await subirClaude(() => RESOLVEU);
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [
+      { id: "m2", conversa_id: "c1", origem: "advogado", tipo: "texto", texto: "Sou o Quazar...", criado_em: haDias(4.9), pelo_quazar: true, automatica: true },
+      { id: "m3b", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "E agora?", criado_em: haDias(4.8) }] }),
+      rpcs: { ...banco().rpcs, zorvin_quazar_responde_pendentes: (json, dados) => ({ corpo:
+        (dados.zorvin_quazar_faxina || []).some((f) => f.resposta == null) ? [{ ...ITEM, cliente_ate_id: "m3b" }] : [] }) } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    const ped = pedidoDe(claude.pedidos[0]);
+    ok("141e quem ele já respondeu nesta espera não ouve a apresentação de novo", /Você já falou com este cliente: não se apresente de novo/.test(ped)
+       && /Você \(assistente virtual\): Sou o Quazar/.test(ped), ped.slice(0, 900));
+    await t.parar(); await claude.parar();
+  }
+  {
+    const claude = await subirClaude(() => RESOLVEU);
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ resposta: "pensando" }),
+      rpcs: { ...banco().rpcs, zorvin_quazar_responde_pendentes: () => ({ corpo: [ITEM] }) } });
+    await espera(1500);
+    ok("a vez que outra ponte reservou não é escrita de novo", claude.pedidos.length === 0 && !fila(t).length, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+  {
+    const claude = await subirClaude(() => ({ status: 500, corpo: { type: "error", error: { type: "api_error", message: "x" } } }));
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: banco().rpcs });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    await espera(1500);
+    ok("a IA que falha solta a vez, e a conversa espera antes de tentar de novo", linha(t).resposta == null && !fila(t).length
+       && claude.pedidos.length <= 2, `${claude.pedidos.length} pedidos — ${JSON.stringify(linha(t))}`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 141f. sem o 069; desligado ----
+  {
+    const claude = await subirClaude(() => RESOLVEU);
+    let chamadas = 0;
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: { zorvin_quazar_responde_confirmar: () => {
+      chamadas += 1;
+      return { status: 404, corpo: { code: "PGRST202", message: "Could not find the function public.zorvin_quazar_responde_confirmar" } };
+    } } });
+    await esperaAte(() => chamadas >= 1);
+    await espera(1500);
+    ok("141f sem o 069, chama uma vez, diz qual script falta e para",
+       chamadas === 1 && /Rode sql\/automaticos\/069-o-quazar-responde-quem-espera\.sql/.test(registro(t)) && !claude.pedidos.length,
+       `${chamadas} chamadas — ${registro(t).slice(-300)}`);
+    const est = await (await fetch(`http://127.0.0.1:${t.porta}/copiloto/estado`)).json();
+    ok("e o estado diz que esta ponte responde quem espera", est.responde === true, JSON.stringify(est));
+    await t.parar();
+    const b = banco();
+    const t2 = await subirTudo(rapido(claude, { QUAZAR_RESPONDE: "desligado" }), { tabelas: tabelas(), rpcs: b.rpcs });
+    await espera(1500);
+    const est2 = await (await fetch(`http://127.0.0.1:${t2.porta}/copiloto/estado`)).json();
+    ok("QUAZAR_RESPONDE=desligado não chama nada, e diz", !b.chamadas.pendentes.length && !b.chamadas.confirmar.length
+       && /QUAZAR_RESPONDE=desligado/.test(registro(t2)) && est2.responde === false, JSON.stringify(est2));
+    await t2.parar(); await claude.parar();
   }
 }
 
