@@ -5034,6 +5034,10 @@ cliente ainda esperando.
   faxina lê primeiro), e nada saindo na fila;
 - **uma resposta por espera**: o que o cliente escrever depois da resposta do
   Quazar fica para a equipe (ou para a faxina, se for um "ok, obrigado");
+- **a noite já respondeu, fica para a equipe**: se o Quazar à noite (059)
+  mandou alguma coisa depois da mensagem lida, o de dia não responde de novo.
+  O banco não a oferece, e a ponte confere antes de pôr na fila (a última
+  mensagem é do Quazar → larga);
 - **no máximo 10 por telefone por hora**, e 3 por volta, as esperas mais
   antigas primeiro. A vez reservada conta no teto;
 - **quem pede atenção (066) também é respondido**: ele responde, e a conversa
@@ -5100,7 +5104,30 @@ teto de 10 por telefone por hora.
   departamento, e ainda não há tela; por enquanto, pelo conector do Supabase.
 
 Provas: seção 140 (o 069 num Postgres de verdade, dentro da 138, com o Zorvin
-montado pelos próprios scripts, ~45 conferências) e seção 141 (a rodada, 23).
+montado pelos próprios scripts; a 138 e a 140 juntas, 88 conferências) e seção
+141 (a rodada, 25), com um Claude de mentira.
+
+**44 sabotagens e 44 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- **quem ele responde:** sem a guarda do departamento ligado; sem o
+  `retomar`; sem olhar se já tem resposta; sem o cliente esperando; com
+  grupo; sem olhar a mensagem nova; sem olhar a fila; sem uma resposta por
+  espera; sem o expediente; sem o teto por hora; o teto sem a vez reservada,
+  e sem a própria volta; a espera mais nova primeiro; sem dizer quem pede
+  atenção; sem olhar a resposta da noite;
+- **confirmar:** sem olhar quem pede atenção; sem a lista fresca;
+  finalizando sem ter resolvido; a que não saiu como saiu; sem a mensagem
+  lida; sem esperar a fila;
+- **a retomada e o banco:** a retomada sem o filtro, e sem olhar se está
+  ligado; a semente sem o nome, e em toda rodada; a tabela e as funções para
+  quem entrou; sem a guarda do 064/066;
+- **a ponte:** a fila sem a marca do Quazar; sem a reserva; sem o refazer;
+  sem largar quando a equipe entra, e quando a noite já respondeu; o refazer
+  e o largar sem esperar; a IA que falha sem esperar; o pedido sem as
+  desculpas; sempre a primeira; o `resolveu` perdido; sem a confirmação;
+  desligado que não desliga; sem a guarda do 069; o estado sempre dizendo
+  `responde`; calado sem guardar o porquê; o log com o texto.
 
 ### O gasto do Quazar (script 058, 08/11)
 
