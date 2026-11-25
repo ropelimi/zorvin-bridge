@@ -12252,8 +12252,12 @@ async function nomeDoEscritorio() {
  *  Devolve 'enviada', 'refazer' (o cliente escreveu de novo) ou 'largar'. */
 async function mandarANoite(item, texto) {
   const [ultima, daEquipe] = await Promise.all([
+    // A MESMA ORDEM DO BANCO (`criado_em desc, id desc`, o 059). Duas fotos
+    // de um álbum chegam no mesmo segundo: ordenada só pela hora, a ponte
+    // escolhia uma e o banco a outra, e o Quazar refazia a resposta a cada
+    // volta (24/11: ~650 chamadas à IA para uma conversa só).
     supabase.from('mensagens').select('id, origem').eq('conversa_id', item.conversa_id)
-      .order('criado_em', { ascending: false }).limit(1),
+      .order('criado_em', { ascending: false }).order('id', { ascending: false }).limit(1),
     supabase.from('fila_envio').select('id').eq('conversa_id', item.conversa_id)
       .gte('criado_em', item.fechou_em || item.cliente_ate).is('agendada_para', null).eq('pelo_quazar', false).limit(1),
   ]);
@@ -12350,12 +12354,15 @@ async function quazarDaNoite() {
           // REFAZER: o cliente escreveu de novo, e a próxima volta responde
           // tudo. LARGAR: a equipe entrou na conversa. TENTAR: a fila recusou.
           await supabase.from('zorvin_quazar_noturno').delete().eq('id', linha.id).eq('status', 'pensando');
-          if (m.desfecho === 'tentar') {
-            const t = tentativasDaNoite.get(chave) || { vezes: 0, proxima: 0 };
-            t.vezes += 1;
-            t.proxima = t.vezes <= QUAZAR_NOITE_ESPERAS_MS.length ? Date.now() + QUAZAR_NOITE_ESPERAS_MS[t.vezes - 1] : 0;
-            tentativasDaNoite.set(chave, t);
-          }
+          // OS TRÊS ESPERAM, PELA MESMA CHAVE. No refazer e no largar de
+          // verdade a chave não volta (o banco devolve a mensagem nova, ou
+          // tira a conversa da lista). Se ela voltar, a ponte e o banco
+          // discordam sobre a conversa, e sem a espera a IA seria chamada a
+          // cada volta, sem nada sair: depois de 1, 5 e 30 minutos, ela para.
+          const t = tentativasDaNoite.get(chave) || { vezes: 0, proxima: 0 };
+          t.vezes += 1;
+          t.proxima = t.vezes <= QUAZAR_NOITE_ESPERAS_MS.length ? Date.now() + QUAZAR_NOITE_ESPERAS_MS[t.vezes - 1] : 0;
+          tentativasDaNoite.set(chave, t);
           console.log(`quazar à noite: resposta não enviada (${m.desfecho === 'refazer' ? 'o cliente escreveu de novo'
             : m.desfecho === 'largar' ? 'a equipe entrou na conversa' : 'a fila recusou; tento de novo'}).`);
           continue;

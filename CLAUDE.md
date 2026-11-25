@@ -3913,6 +3913,45 @@ cliente "de 1 minuto e meio" tinha justamente 90 segundos, e não separava 60
 de 90. Hoje ele escreveu há 75 segundos. O padrão do banco é a segunda guarda
 (a ponte sempre manda `p_quieto_s`), e fica conferido assim mesmo.
 
+### As duas fotos no mesmo segundo: o Quazar refazia a resposta sem parar (24/11)
+
+Achado ao ler, a pedido do Rodrigo, o relatório de custo da Anthropic de 01 a
+24/11: no dia 24 a rota `noite` fez **659 chamadas à IA** (num dia normal são
+de 10 a 30), e **cerca de 650 delas foram para uma conversa só**, entre 23h e
+2h18 e entre 7h e 8h57 de Brasília. Custaram **uns US$ 13,70**. Nada saiu
+duas vezes para o cliente: a resposta era jogada fora antes da fila.
+
+**A causa:** a cliente mandou duas fotos de um álbum, e as duas chegaram com
+a mesma hora (o mesmo segundo). O banco escolhe "a última mensagem" pela hora
+e, no empate, pelo id maior (`criado_em desc, id desc`, no 059). A ponte, ao
+conferir antes de mandar (`mandarANoite`), ordenava só pela hora e escolhia a
+outra foto. Ela concluía "o cliente escreveu de novo", jogava a resposta fora
+(`refazer`) e, na volta seguinte, 15 segundos depois, o banco devolvia a
+mesma conversa. Parou de madrugada porque a ponte dormiu, e de manhã porque a
+cliente escreveu de novo. E cada chamada custava mais que o normal: o Quazar
+abria as duas fotos (desde 24/11) a cada vez.
+
+**O conserto, em duas guardas:**
+
+- **a mesma ordem do banco**: a conferência ordena pela hora e pelo id;
+- **o refazer e o largar também esperam** (1, 5 e 30 minutos, pela mesma
+  chave, e depois param até a ponte reiniciar), como já esperava a fila que
+  recusa. No refazer e no largar de verdade a chave não volta: o banco devolve
+  a mensagem nova, ou tira a conversa da lista. Se ela voltar, a ponte e o
+  banco discordam sobre a conversa, e esta guarda impede que qualquer desacordo
+  futuro vire uma chamada à IA a cada 15 segundos.
+
+**Como medir de novo:** `zorvin_uso_da_ia` por hora e por rota; a rota `noite`
+acima de umas 30 chamadas por hora é sinal de laço. A conversa aparece nos
+registros do portão da API, no pedido de `fila_envio` com `pelo_quazar=eq.false`.
+
+Prova: seção 118, cenas 118f (as duas fotos no mesmo segundo: a resposta sai,
+e a IA é chamada uma vez) e 118g (a ponte e o banco discordando: uma chamada
+em 3 segundos, com a volta de 0,4 s). **3 sabotagens e 3 pegas**, rodadas em
+cópias (e a cópia de controle passou inteira): sem a ordem pelo id (118f);
+sem a espera do refazer (118g: 9 chamadas em 3 s); e a ponte de antes (3
+reprovações, com 26 chamadas na cena das fotos).
+
 ### O recesso: o Quazar diz que o escritório está em recesso (21/11)
 
 Pedido do Rodrigo: *"Quazar enviar mensagem automática durante o recesso
@@ -6278,6 +6317,18 @@ duas esperas aguardam a linha do registro. Cinco sabotagens e cinco pegas
 com a espera nova: quem sai fica, sem tirar as permissões, sem bloquear,
 quem volta não volta, volta sem desbloquear. É a régua de 26/10 outra vez:
 **espere a ÚLTIMA coisa que o código faz, e não a primeira.**
+
+**E duas cenas dos avisos tinham a mesma corrida (24/11).** Na PR #251, a
+83c reprovou uma conferência de 2.965 sem defeito nenhum: ela esperava o
+Vantoro de mentira receber a segunda confirmação e lia o log, e a ponte só
+escreve "confirmado no Vantoro" depois que a resposta volta. A 83a lia o
+histórico logo depois do "/enviado", e a ponte avisa o Vantoro ANTES de
+gravar a linha no histórico: aqui ela reprovou uma vez em quatro, sem atraso
+nenhum. Reproduzido com 300 ms de atraso antes do log: a prova de antes
+reprova as duas, e a de agora passa. As duas esperam a última coisa: a linha
+do log e a linha do histórico. Sabotadas (a linha sem a marca de automática,
+e a ponte sem dizer "confirmado"), as duas continuam pegas. A seção 113 tem o
+mesmo feitio e não precisou: ela já espera 600 ms depois.
 
 ## As senhas voltam ao histórico (script 039, 29/10)
 

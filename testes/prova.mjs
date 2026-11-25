@@ -14773,7 +14773,11 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
       quebrar: (metodo, tabela, busca) => (metodo === "GET" && tabela === "advogados"
         && /select=id%2Cnome%2Cnumero%2Cativo/.test(busca) && falhar-- > 0 ? "o banco tossiu" : null),
     });
-    await esperarAte(() => desfechos(t, "A-1", "enviado").length > 0, 10000);
+    // A PONTE AVISA O VANTORO ANTES DE GRAVAR O HISTÓRICO (o envio confirma e
+    // depois grava a linha): esperar só o "/enviado" lia o histórico antes da
+    // linha. Espera-se a última coisa que a ponte faz (24/11).
+    await esperarAte(() => desfechos(t, "A-1", "enviado").length > 0
+      && (t.sb.dados.mensagens || []).some((m) => m.texto === aviso("A-1").texto), 10000);
     ok("a leitura que falhou não disse '/erro' ao Vantoro — lá, erro é o fim", desfechos(t, "A-1", "erro").length === 0,
        JSON.stringify(t.van.recebidas.filter((r) => /avisos\//.test(r.caminho)).map((r) => r.caminho)));
     ok("o log diz que adiou, e por quê", /Aviso A-1: não consegui ler os telefones do Zorvin \(o banco tossiu\)\. Ele continua pendente no Vantoro/.test(log(t)),
@@ -14845,11 +14849,17 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
       vantoro: { avisos: [aviso("C-1")], pendentesAteODesfecho: true, desfechosQueFalham: 1 },
     });
-    await esperarAte(() => desfechos(t, "C-1", "enviado").length >= 2, 10000);
+    // ESPERA A LINHA DO LOG, E NÃO SÓ A CONFIRMAÇÃO CHEGAR AO VANTORO DE MENTIRA:
+    // a ponte escreve "confirmado" depois que a resposta volta, um instante
+    // depois de o Vantoro anotar o pedido. Esperando só a segunda, a conferência
+    // lia o log antes da linha (24/11, na PR #251: 1 de 2965, sem defeito).
+    await esperarAte(() => desfechos(t, "C-1", "enviado").length >= 2
+      && /Aviso C-1 confirmado no Vantoro/.test(log(t)), 10000);
     ok("a confirmação que o Vantoro recusou é dita no log como recusa, e não como confirmada",
        /Aviso C-1: o Vantoro respondeu 500 à confirmação/.test(log(t)), log(t).split("\n").filter((l) => /C-1/.test(l)).join(" | "));
     ok("e a rodada seguinte confirma de novo — e então diz confirmado",
-       desfechos(t, "C-1", "enviado").length === 2 && /Aviso C-1 confirmado no Vantoro/.test(log(t)));
+       desfechos(t, "C-1", "enviado").length === 2 && /Aviso C-1 confirmado no Vantoro/.test(log(t)),
+       `${desfechos(t, "C-1", "enviado").length} confirmações; ${log(t).split("\n").filter((l) => /C-1/.test(l)).join(" | ")}`);
     const envios = t.uaz.recebidas.filter((r) => /^\/send\//.test(r.caminho));
     ok("o cliente recebe o aviso UMA vez", envios.length === 1 && filaDe(t, "C-1").length === 1, JSON.stringify(envios.map((e) => e.caminho)));
     await t.parar();
@@ -24368,6 +24378,45 @@ console.log("\n118. O Quazar à noite, valendo — a ponte manda");
     await mandar(t4, doCliente("sem-1")); await espera(900);
     ok("e sem a chave da Anthropic, também", perguntas === 3, `${perguntas} perguntas`);
     await t4.parar();
+  }
+
+  // ---- 118f. duas fotos no mesmo segundo (24/11) ----
+  // O álbum chega com a mesma hora nas duas fotos. O banco escolhe a última
+  // pela hora e, no empate, pelo id maior (o 059); a ponte tem de escolher a
+  // mesma. Com a ordem só pela hora, ela escolhia a outra, dizia "o cliente
+  // escreveu de novo", e a IA era chamada a cada volta, sem nada sair.
+  {
+    const claude = await subirClaude();
+    const mesma = haMin(3);
+    const fotos = [
+      { id: "m5a", conversa_id: "c1", origem: "contato", tipo: "imagem", texto: "", criado_em: mesma },
+      { id: "m5b", conversa_id: "c1", origem: "contato", tipo: "imagem", texto: "", criado_em: mesma },
+    ];
+    const item = { ...ITEM, cliente_ate: mesma, cliente_ate_id: "m5b" };
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [...tabelas().mensagens, ...fotos] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes(item) } });
+    await esperaAte(() => (t.sb.dados.fila_envio || []).some((f) => f.pelo_quazar), 9000);
+    await espera(1200);
+    ok("118f com duas fotos no mesmo segundo, a ponte escolhe a mesma última mensagem do banco, e a resposta sai",
+       (t.sb.dados.fila_envio || []).filter((f) => f.pelo_quazar).length === 1 && !/o cliente escreveu de novo/.test(t.registro.join("")),
+       t.registro.join("").slice(-400));
+    ok("e a IA é chamada uma vez só", claude.pedidos.length === 1, `${claude.pedidos.length} pedidos`);
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 118g. a ponte e o banco discordam: a IA não é chamada a cada volta ----
+  {
+    const claude = await subirClaude();
+    const nova = { id: "m4", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "e o acordo?", criado_em: haMin(0.5) };
+    // O banco devolve sempre a mesma mensagem (m3), e a ponte vê outra (m4):
+    // qualquer desacordo entre os dois, e não só o do álbum.
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({ mensagens: [...tabelas().mensagens, nova] }),
+      rpcs: { zorvin_quazar_noturno_pendentes: pendentes() } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    await espera(3000);
+    ok("118g com a ponte e o banco discordando, a IA é chamada uma vez, e a conversa espera antes da próxima",
+       claude.pedidos.length === 1 && !(t.sb.dados.fila_envio || []).length, `${claude.pedidos.length} pedidos em 3 s (a volta é de 0,4 s)`);
+    await t.parar(); await claude.parar();
   }
 
   // ---- 118e. a espera padrão de 1 minuto ----
