@@ -5197,6 +5197,136 @@ cliente da linha do erro antigo tinha escrito depois do erro, e a mensagem dele
 já contava como sinal de vida. Hoje ele escreveu antes do erro, e a mesma
 sabotagem é pega por duas conferências.
 
+### O Quazar pede o nome e o CPF de quem não tem ficha (script 071, 25/11)
+
+Pedido do Rodrigo, com a foto de uma conversa do ensaio de dia em que o Quazar
+pedia só o nome: *"Nesse caso, o Quazar precisa pedir o nome completo e CPF da
+cliente, ele mesmo fazer a consulta da Ficha no Vantoro e salvar o novo número
+de contato acrescentando a ficha dela. Quando o contato não tiver ficha no
+Vantoro, precisa sempre pedir o nome completo e o CPF, fazer a consulta e ao
+buscar e verificar que tem a ficha, fazer as consultas necessárias e responder
+o contato."*
+
+**É o caminho da Ficha do Vantoro do painel, feito pelo Quazar**
+(`identificarPeloCpf`, no `index.js`): o cliente que voltou por um número novo
+(29/09, "achado pelo CPF") e a pesquisa da ficha sem cadastro (24/11). Vale nos
+três caminhos que escrevem para o cliente: o de quem espera (069), o ensaio de
+dia (061) e a noite (059). O "Sugerir resposta" não muda: lá quem responde é a
+atendente.
+
+| o que o Quazar sabe | o que ele faz |
+|---|---|
+| o telefone tem um cadastro (ligado, ou um só pela busca) | nada disso: lê o caso, como antes |
+| sem cadastro (nenhum, ou mais de um), e o cliente não mandou CPF | **pede o nome completo e o CPF**, numa frase só |
+| o CPF veio, e não forma CPF | pede para conferir |
+| o CPF não tem cadastro no Vantoro | agradece e diz que a equipe verifica |
+| o CPF tem cadastro, e o nome não veio inteiro | pede o nome completo, como está nos documentos |
+| depois de pedir o nome, ele não confere | não diz nada do cadastro: a equipe confere |
+| o CPF e o nome conferem | **lê a ficha inteira, acrescenta o número, liga a conversa e lê o caso** |
+
+- **O CPF é o último válido que o cliente mandou depois da última fala de gente
+  da equipe** (`mensagensDoClienteDepoisDaEquipe`, `cpfNasMensagens`), no texto
+  ou no áudio transcrito. O Quazar e o aviso automático não contam como a
+  equipe. O que veio antes da última fala da equipe a equipe já viu, e não
+  conta. **O telefone do próprio cliente escrito na mensagem não é lido como
+  CPF.** O CPF é conferido pelos dígitos verificadores (`cpfValido`);
+- **o nome confere** quando o primeiro nome do cadastro e mais um sobrenome (de
+  três letras ou mais) estão no que o cliente escreveu, sem olhar acento nem
+  maiúscula (`nomeConfere`). Só o primeiro nome não basta: o CPF pode ser da
+  mãe;
+- **a ordem é a do painel**: a ficha inteira primeiro (`GET /clientes/:id`;
+  sem ela, nada muda), o número depois (`POST /clientes/:id/telefones`, com
+  `{numero: "(71) 98888-1111"}`, como mais um telefone: o Vantoro faz o primeiro
+  virar o principal, e o WhatsApp principal não muda), o vínculo da conversa
+  por último (`contatos.vantoro_cliente_id` e `vantoro_nome`);
+- **o número que já está na ficha** (com ou sem o nono dígito, com ou sem o 55)
+  não é mandado de novo: a conversa é ligada, e a nota diz que ele já estava;
+- **uma nota interna do Quazar** diz o que ele fez ("O Quazar localizou, pelo
+  nome e pelo CPF que o cliente mandou, o cadastro de NOME no Vantoro e
+  acrescentou este número (…) ao cadastro, como mais um telefone."). Ela não
+  sobe para a ficha (a nota do Quazar não sobe, 25/11);
+- **o caso é lido pelo cadastro achado** (de dia e em quem espera), e a resposta
+  sai com ele;
+- **o CPF nunca vai para o log, para a nota nem para a mensagem**: as regras
+  (`regraDaIdentificacao`) mandam não escrever o CPF, não dizer de quem é um
+  CPF nem o que há num cadastro não confirmado, e não criar cadastro;
+- **o que a IA lê** vem num bloco `<identificacao>`, com a frase de cada caso
+  (`FRASES_DA_IDENTIFICACAO`);
+- **a resposta que deixou algo para a equipe não resolve**
+  (`IDENTIFICACAO_NAO_RESOLVE`), em quem espera: a segunda guarda, que não
+  depende de a IA obedecer. Ela não finaliza a conversa.
+
+**Onde grava, e onde só procura:**
+
+| caminho | grava (o número, o vínculo e a nota)? | chama o Vantoro? |
+|---|---|---|
+| quem espera (069, valendo) | sim | sim |
+| o ensaio de dia (061) | **não**: procura, lê o caso pelo cadastro achado, escreve como se tivesse acrescentado, e o registro diz "acrescentaria o número (no ensaio, nada foi gravado)" | sim |
+| a noite valendo (059) | sim | **só na janela em que o Vantoro fica acordado** (`dentroDoHorarioDeTrabalho`, 7h às 20h, as horas da franquia da Render); fora dela, o Quazar diz que a equipe confirma o cadastro, sem chamar nada |
+| a noite em ensaio | não | só na janela |
+
+**À noite o Quazar não lê o caso** (como sempre): com o cadastro localizado, ele
+diz que a equipe continua quando voltar. Sem o vínculo, ele procura antes pelo
+telefone (`/clientes/buscar`), porque o número pode ter cadastro sem estar
+ligado.
+
+**O Quazar fala de novo na mesma espera** (`sql/automaticos/071`). A regra do
+069 era uma resposta por espera; com ela, o cliente que manda o CPF depois do
+pedido ficaria sem resposta. O 071:
+
+- cria `zorvin_quazar_faxina.pediu_identificacao` (falsa por padrão), que a
+  ponte grava quando a resposta pediu o nome e o CPF (os casos de pedir, do nome
+  que falta e do CPF inválido: `PEDIU_IDENTIFICACAO`);
+- troca `zorvin_quazar_responde_pendentes` pela do 070 com a régua nova: o
+  Quazar fala de novo **quando todas as respostas desta espera pediram os dados e
+  o cliente mandou um CPF depois da última** (onze dígitos no texto ou na
+  transcrição), **até três respostas por espera**. A vez reservada noutra linha
+  da mesma conversa continua segurando, e a linha caída (070) continua de fora.
+  **É a versão de referência da função** (regra 5);
+- **num banco sem a coluna**, a ponte grava a resposta sem ela, uma linha no log
+  diz qual script falta, e o Quazar não fala de novo quando o CPF chega (fica
+  para a equipe);
+- **sem o 069 ou o 070**, não faz nada e diz qual falta.
+
+**O ensaio de dia e a noite não precisam disso**: lá cada mensagem do cliente já
+é uma vez nova.
+
+**Fica de fora, e é decisão:**
+
+- **o Quazar não cria cadastro**: sem cadastro pelo CPF, a equipe verifica;
+- **o CPF de antes da última fala da equipe não conta**: a equipe já viu aquela
+  mensagem, e não ligou a conversa (pode ser o CPF de outra pessoa);
+- **a nota do Quazar não diz o CPF**: quem precisar, lê a conversa.
+
+Provas: seção 144 (o 071 num Postgres de verdade, dentro da 138, com o Zorvin
+montado pelos próprios scripts) e seção 145 (a ponte, com um Claude e um Vantoro
+de mentira).
+
+**38 sabotagens e 38 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- **o 071:** sem a exceção (a regra do 070, uma resposta por espera); sem o
+  teto de três; o CPF de antes da resposta contando; sem o áudio transcrito;
+  qualquer mensagem do cliente valendo, sem o CPF; sem a vez reservada; sem a
+  coluna; a marca nascendo verdadeira; sem a guarda do 070; sem a linha caída
+  (a do 069 de volta);
+- **a ponte:** sem a identificação (36 reprovações); sem conferir o nome; o
+  nome só pelo primeiro nome; sem validar o CPF; o telefone do cliente lido
+  como CPF; sem a ficha inteira antes; o número que já estava mandado de novo;
+  o número recusado seguindo em frente; sem ligar a conversa; sem a nota; a
+  nota com o CPF; o log com o CPF; o nome que não confere sem olhar se já
+  pediu; com cadastro pelo telefone, ainda identificando; à noite, sem procurar
+  pelo telefone; o CPF de antes da equipe contando; o aviso automático
+  contando como a equipe; o ensaio de dia gravando; à noite, chamando o
+  Vantoro fora da janela, e gravando no ensaio; quem espera sem ler o caso pelo
+  cadastro achado; o `resolveu` sem a segunda guarda; sem gravar que pediu os
+  dados; sem a volta da coluna que falta; sem o bloco no pedido; sem a regra.
+
+**A sabotagem da coluna pegou estourando na primeira rodada**: sem a coluna, a
+cena seguinte tentava gravar nela, e a seção parou ali, sem dizer as
+conferências de depois. Hoje a cena confere a marca e, sem ela, reprova pelo
+nome e não segue.
+
 ### O gasto do Quazar (script 058, 08/11)
 
 Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de
