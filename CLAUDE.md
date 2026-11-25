@@ -5327,6 +5327,84 @@ cena seguinte tentava gravar nela, e a seção parou ali, sem dizer as
 conferências de depois. Hoje a cena confere a marca e, sem ela, reprova pelo
 nome e não segue.
 
+### O "Sugerir resposta": só a mensagem, e com o caso do cliente (25/11)
+
+Relato do Rodrigo, com a foto de uma conversa do SAC: o "Sugerir resposta" pôs
+na caixa da atendente quatro frases de raciocínio antes da mensagem ("…já mandou
+o nome completo e o CPF ontem, então não peço de novo. … Ela é uma mulher, então
+uso "a senhora" … Como já cumprimentei hoje, não repito a saudação.") e, no fim,
+disse que ia verificar os processos e retornar, mesmo com a cliente ligada à
+ficha do Vantoro. *"Ele tem que apenas responder a cliente, como estava
+funcionando antes, e nesse caso como ela já tem Ficha no Vantoro, ele deve
+responder sobre os processos dela."*
+
+**Medido em 25/11, só números** (`zorvin_uso_da_ia`): as sugestões do Sonnet 5.5
+daquela tarde saíram com 50 a 160 tokens de saída, em 1 a 2 segundos. O
+raciocínio veio no texto da resposta: a IA narrou as regras de 24/11 ("decida
+antes de escrever o tratamento", "não peça de novo o que ele já mandou").
+
+**1. Só a mensagem.**
+
+| onde | o quê |
+|---|---|
+| as regras (`COPILOTO_REGRAS`) | o que a IA levou em conta (o que o cliente já mandou, se é homem ou mulher, se já cumprimentou, o que o caso diz) não vai na resposta |
+| o tratamento (`regraDoTratamento`, nas três regras) | "Escolha … sem comentar a escolha na mensagem", e não mais "Decida antes de escrever" |
+| o pedido da sugestão e do "Melhorar o texto" | a mensagem vem entre `<mensagem>` e `</mensagem>`, e nada antes nem depois |
+| a volta (`soAMensagem`, em `textoDaSugestao`) | havendo as etiquetas, vale só o que está dentro da ÚLTIMA; só a de abrir, o que vem depois dela; sem nenhuma, o texto inteiro, como antes |
+
+- **A guarda vale para tudo que passa por `textoDaSugestao`**: a sugestão, o
+  "Melhorar o texto", o "Pedir uma mudança" e as respostas da noite e do dia.
+- **O cliente não escreve a etiqueta**: `mensagem` entrou em
+  `ETIQUETAS_DO_COPILOTO`, e sai do que ele e a equipe escreveram.
+- **Nenhuma instrução de "não pensar"**, de propósito: a documentação do Sonnet
+  5.5 diz que elas fazem o modelo escrever etiquetas internas no texto. A regra
+  fala do que vai na resposta.
+
+**2. O caso do cliente na sugestão.** A sugestão e o "Pedir uma mudança" leem o
+caso no Vantoro (`casoParaASugestao`, pelo mesmo `casoNoVantoro` do Quazar de
+dia: o cadastro ligado ao contato ou, sem ele, o único com aquele telefone), ao
+mesmo tempo que leem a conversa, e o pedido leva o bloco `<caso>`.
+
+- **As regras ganharam "O CASO DO CLIENTE NO ESCRITÓRIO"**: com o caso lido,
+  conta o último andamento em linguagem simples e pede a tarefa pendente que
+  depende do cliente; **quando o caso responde, não escreve que vai verificar e
+  retornar**; sem número de processo inteiro nem nome de juiz; sem prazo nem
+  data; resultado, valor e pagamento continuam com a equipe (19/11). "Use só o
+  que está nesta conversa e no manual" passou a dizer "no caso" também.
+- **Com prazo**: a atendente está esperando. Passando de
+  `COPILOTO_PRAZO_DO_CASO_MS` (8 s, opcional), a sugestão sai sem o caso, e o
+  pedido diz que ele não foi lido.
+- **Sem Vantoro, e no grupo, nenhum bloco**: o pedido não fala de caso.
+- **O "Melhorar o texto" não lê o caso**: ele não acrescenta nada ao texto dela.
+- **Não identifica pelo CPF** (071), e é decisão: na sugestão quem responde é a
+  atendente, e o caso sem cadastro diz que não foi lido.
+- **O log diz as contagens do caso** ("o caso lido (1 processo(s), …)"), nunca
+  o que está nele.
+
+Prova: seção 146, com um Claude e um Vantoro de mentira: o raciocínio antes da
+mensagem (o relato), duas mensagens, só a etiqueta de abrir, sem etiqueta, as
+aspas; a etiqueta no texto do cliente; as regras; o "Melhorar o texto"; a
+cliente com ficha (o caso no pedido, as regras, o log); o "Pedir uma mudança"
+com o caso; o "Melhorar o texto" sem o caso; e, sem o vínculo, um cadastro pelo
+telefone, nenhum, o Vantoro que demora e o grupo. A seção 131 confere a frase
+nova do tratamento, e a 62 e a 109, a linha nova do log.
+
+**18 sabotagens e 18 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- a ponte de antes inteira (21 reprovações — é o relato reproduzido);
+- **só a mensagem:** sem `soAMensagem` (10); a primeira etiqueta no lugar da
+  última; só a etiqueta de abrir não contando; o pedido da sugestão sem pedir
+  as etiquetas, e o do "Melhorar o texto"; `mensagem` fora das etiquetas que
+  saem do texto do cliente; a regra sem "o que você levou em conta"; o
+  tratamento de volta a "Decida antes";
+- **o caso:** a sugestão sem o caso (4); o "Pedir uma mudança" sem o caso; as
+  regras sem a seção do caso; sem o prazo (a sugestão espera os 3 s do Vantoro
+  lento); sem a guarda do grupo (o grupo procura cadastro pelo "telefone" dele);
+  sem o contato ligado (procura pelo telefone, e não acha) (5); o caso no
+  "Melhorar o texto"; o log com o que está no caso; o log sem dizer o caso
+  (pega pela 62).
+
 ### O gasto do Quazar (script 058, 08/11)
 
 Pedido do Rodrigo, depois de um e-mail da Anthropic sobre o cache (a página de
