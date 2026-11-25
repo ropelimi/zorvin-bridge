@@ -14272,7 +14272,7 @@ async function quazarRespondeQuemEspera() {
   if (!process.env.ANTHROPIC_API_KEY) return;
   quazarRespondeRodando = true;
   const inicio = Date.now();
-  const conta = { na_fila: 0, caladas: 0, finalizadas: 0, abertas: 0, nao_saiu: 0 };
+  const conta = { na_fila: 0, caladas: 0, finalizadas: 0, abertas: 0, nao_saiu: 0, linha_caida: 0 };
   const semOScript = (funcao) => {
     quazarRespondeSemOScript = true;
     console.warn(`quazar responde quem espera: a função "${funcao}" não existe — o Quazar não responde quem espera até a `
@@ -14289,6 +14289,8 @@ async function quazarRespondeQuemEspera() {
       conta.finalizadas = Number(confirmou.data.finalizadas) || 0;
       conta.abertas = Number(confirmou.data.abertas) || 0;
       conta.nao_saiu = Number(confirmou.data.nao_saiu) || 0;
+      // A LINHA CAIU (070): a resposta volta para a fila de tentativas, e sai quando a linha voltar.
+      conta.linha_caida = Number(confirmou.data.linha_caida) || 0;
     }
     if (Date.now() < quazarRespondePausadoAte) return;
 
@@ -14387,6 +14389,8 @@ async function quazarRespondeQuemEspera() {
     if (conta.finalizadas) partes.push(`${conta.finalizadas} finalizada(s) depois de a resposta sair`);
     if (conta.abertas) partes.push(`${conta.abertas} aberta(s) para a equipe depois de a resposta sair`);
     if (conta.nao_saiu) partes.push(`${conta.nao_saiu} resposta(s) que não saíram`);
+    if (conta.linha_caida) partes.push(`${conta.linha_caida} que não saíram porque o telefone está desconectado `
+      + '(voltam a ser tentadas quando ele voltar)');
     if (partes.length) console.log(`quazar responde quem espera: em ${Date.now() - inicio} ms — ${partes.join('; ')}.`);
   }
 }

@@ -28012,6 +28012,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       "059-o-quazar-a-noite-valendo.sql", "064-a-faxina-do-quazar.sql", "065-a-retomada-so-onde-se-escolhe.sql",
       "066-quem-pede-atencao-nao-e-finalizado.sql", "067-a-lista-de-atencao-se-troca-com-where.sql",
       "068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql", "069-o-quazar-responde-quem-espera.sql",
+      "070-o-quazar-nao-escreve-para-telefone-desconectado.sql",
     ].map((a) => [a.slice(0, 3), ler(a)]));
     const ESQUEMA = `
 do $$ begin
@@ -28536,6 +28537,182 @@ create policy conversas_mexer on conversas for update to authenticated using (po
            && (await q.query(`select pg_get_functiondef('public.zorvin_faxina_retomadas_da_vez(integer, integer, integer)'::regprocedure)
                               ~ 'zorvin_quazar_responde' as f`)).rows[0].f === true);
       }
+      // ============================================================
+      //  142. O QUAZAR NÃO ESCREVE PARA TELEFONE DESCONECTADO (070), no mesmo Postgres (25/11)
+      //
+      //    - num banco limpo e sem o 069, nada, e diz;
+      //    - a linha caída: o erro de desconexão sem sinal de vida depois
+      //      (nada saiu, nada chegou); o sinal de vida a põe de pé; o erro de
+      //      mais de 30 dias não conta; o erro que não é desconexão não conta;
+      //    - a lista de quem espera pula a linha caída; uma hora depois do
+      //      erro, uma conversa só, como sonda, e nenhuma enquanto outra da
+      //      linha está a caminho;
+      //    - a confirmação: a que falhou porque a linha caiu devolve a vez; a
+      //      que falhou por outro motivo fica 'nao_saiu'; a que saiu descarta
+      //      as bolhas vermelhas antigas do Quazar, e não as da equipe;
+      //    - a instalação devolve a vez das 'nao_saiu' por linha caída, e só
+      //      delas;
+      //    - quem entrou e quem não entrou não alcançam;
+      //    - rodar de novo, e a pasta na ordem, mantém tudo.
+      // ============================================================
+      console.log("\n142. O Quazar não escreve para telefone desconectado (070), num Postgres de verdade");
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S["070"]));
+        ok("142a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
+        const sem = await zorvin([...ANTES, "068"]);
+        const r1 = await guardado(() => aplicar(sem, S["070"]));
+        ok("e sem o 069, diz que falta e não cria nada", /rode-o antes/.test(String(item(r1, /falta o 069/)))
+           && (await sem.query("select to_regprocedure('public.zorvin_linha_caida_desde(uuid)') is null as n")).rows[0].n, JSON.stringify(r1));
+      }
+      {
+        const q = await zorvin([...ANTES, "068"]);
+        // AS COLUNAS DE PRODUÇÃO que o esquema da prova não tem (o 070 as lê por to_jsonb).
+        await q.query(`alter table fila_envio add column if not exists erro_detalhe text,
+                         add column if not exists erro_motivo text, add column if not exists enviado_em timestamptz`);
+        await aplicar(q, S["069"]);
+        const CAIU = 'Uazapi respondeu 503: {"error":true,"message":"WhatsApp disconnected: session is not reconnectable"}';
+        const OUTRO = "Uazapi respondeu 400: número não existe no WhatsApp";
+        const minutos = (m) => new Date(Date.now() - m * 60e3).toISOString();
+        const telefone = async (nome) => (await q.query(
+          "insert into advogados (nome, numero, departamento_id) values ($1, $1, 1) returning id", [nome])).rows[0].id;
+        const conversaEm = async (tel, numero) => {
+          const ct = (await q.query("insert into contatos (numero, nome) values ($1, 'Cliente') returning id", [numero])).rows[0].id;
+          return (await q.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [tel, ct])).rows[0].id;
+        };
+        const esperaEm = async (tel, numero, d) => {
+          const x = { conv: await conversaEm(tel, numero) };
+          await q.msg(x.conv, "advogado", dias(d + 2)); x.m = await q.msg(x.conv, "contato", dias(d));
+          x.fx = (await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status)
+                                 values ($1, $2, $3, $4, 'pendente') returning id`, [x.conv, tel, x.m, dias(d)])).rows[0].id;
+          return x;
+        };
+        const erroNa = async (conv, quando, detalhe = CAIU, quazar = false) => (await q.query(
+          `insert into fila_envio (conversa_id, texto, status, erro_detalhe, criado_em, pelo_quazar)
+           values ($1, 'x', 'erro', $2, $3, $4) returning id`, [conv, detalhe, quando, quazar])).rows[0].id;
+        const caidaDesde = async (tel) => (await q.query("select zorvin_linha_caida_desde($1) d", [tel])).rows[0].d;
+        const pendentes = async () => lista((await q.query("select zorvin_quazar_responde_pendentes(100, 100) r")).rows[0].r);
+        const confirmar = async () => (await q.query("select zorvin_quazar_responde_confirmar(50) r")).rows[0].r;
+        const faxina = async (fx) => (await q.query(
+          "select resposta, respondida_em, resposta_fila_id from zorvin_quazar_faxina where id = $1", [fx])).rows[0];
+        const statusDa = async (id) => (await q.query("select status from fila_envio where id = $1", [id])).rows[0]?.status;
+        const naFila = async (x, status, detalhe = null) => {
+          const f = (await q.query(`insert into fila_envio (conversa_id, texto, status, erro_detalhe, pelo_quazar, enviado_em)
+                                    values ($1, 'x', $2, $3, true, case when $2 = 'enviada' then now() end) returning id`,
+                                   [x.conv, status, detalhe])).rows[0].id;
+          await q.query(`update zorvin_quazar_faxina set resposta = 'na_fila', resposta_em = now(), respondida_em = now(),
+                           resposta_fila_id = $2, resposta_resolveu = false where id = $1`, [x.fx, f]);
+          return f;
+        };
+
+        const tB = await telefone("Caido");        // caiu há 5 minutos
+        const tC = await telefone("Sonda");        // caiu há 2 horas, e nada depois
+        const tD = await telefone("Voltou");       // caiu, e chegou mensagem depois
+        const tE = await telefone("Saiu");         // caiu, e saiu mensagem depois
+        const tF = await telefone("Antigo");       // o erro tem mais de 30 dias
+        const tG = await telefone("Outro erro");   // o erro não é de desconexão
+        // O ERRO E O SINAL DE VIDA moram numa conversa à parte, para não mexer na espera de ninguém.
+        const xB = await conversaEm(tB, "5571910000001"); await erroNa(xB, minutos(5));
+        const xC = await conversaEm(tC, "5571910000002"); await erroNa(xC, minutos(120));
+        const xD = await conversaEm(tD, "5571910000003"); await erroNa(xD, minutos(180)); await q.msg(xD, "contato", minutos(60));
+        const xE = await conversaEm(tE, "5571910000004"); await erroNa(xE, minutos(180));
+        await q.query("insert into fila_envio (conversa_id, texto, status, enviado_em) values ($1, 'x', 'enviada', $2)", [xE, minutos(60)]);
+        const xF = await conversaEm(tF, "5571910000005"); await erroNa(xF, dias(40));
+        const xG = await conversaEm(tG, "5571910000006"); await erroNa(xG, minutos(5), OUTRO);
+
+        const A1 = await esperaEm(q.tel, "5571920000001", 6);
+        const B1 = await esperaEm(tB, "5571920000002", 6);
+        const B2 = await esperaEm(tB, "5571920000003", 5);
+        const C1 = await esperaEm(tC, "5571920000004", 9);
+        const C2 = await esperaEm(tC, "5571920000005", 8);
+        const C3 = await esperaEm(tC, "5571920000006", 7);
+        const D1 = await esperaEm(tD, "5571920000007", 6);
+        const E1 = await esperaEm(tE, "5571920000008", 6);
+        const F1 = await esperaEm(tF, "5571920000009", 6);
+        const G1 = await esperaEm(tG, "5571920000010", 6);
+        // AS DE HOJE, antes do 070: uma que não saiu porque a linha caiu, e uma por outro motivo.
+        const B9 = await esperaEm(tB, "5571920000011", 4);
+        const fB9 = await erroNa(B9.conv, minutos(10), CAIU, true);
+        await q.query(`update zorvin_quazar_faxina set resposta = 'nao_saiu', resposta_em = now(), respondida_em = $2,
+                         resposta_fila_id = $3 where id = $1`, [B9.fx, minutos(10), fB9]);
+        const G9 = await esperaEm(tG, "5571920000012", 4);
+        const fG9 = await erroNa(G9.conv, minutos(10), OUTRO, true);
+        await q.query(`update zorvin_quazar_faxina set resposta = 'nao_saiu', resposta_em = now(), respondida_em = $2,
+                         resposta_fila_id = $3 where id = $1`, [G9.fx, minutos(10), fG9]);
+
+        const conf = await guardado(() => aplicar(q, S["070"]));
+        ok("142b o 070 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+        ok("a conferência diz quais telefones estão desconectados", item(conf, /desconectados agora/) === "Caido, Sonda", JSON.stringify(conf));
+        ok("e quantas respostas voltaram a ser tentadas", item(conf, /devolvidas/) === "1", JSON.stringify(conf));
+
+        // ---- 142c. a linha caída ----
+        ok("142c a linha com o erro de desconexão e nada depois está caída, desde o erro",
+           (await caidaDesde(tB)) !== null && (await caidaDesde(tC)) !== null);
+        ok("a que recebeu mensagem depois do erro está de pé", (await caidaDesde(tD)) === null);
+        ok("a que mandou mensagem depois do erro está de pé", (await caidaDesde(tE)) === null);
+        ok("o erro de mais de 30 dias não conta", (await caidaDesde(tF)) === null);
+        ok("o erro que não é de desconexão não conta", (await caidaDesde(tG)) === null);
+        ok("e a linha sem erro nenhum está de pé", (await caidaDesde(q.tel)) === null);
+
+        // ---- 142d. a instalação ----
+        const b9 = await faxina(B9.fx);
+        ok("142d a instalação devolve a vez da que não saiu porque a linha caiu",
+           b9.resposta === null && b9.respondida_em === null && b9.resposta_fila_id === null, JSON.stringify(b9));
+        ok("e não a que não saiu por outro motivo", (await faxina(G9.fx)).resposta === "nao_saiu");
+
+        // ---- 142e. a lista de quem espera ----
+        const ids = (await pendentes()).map((x) => x.conversa_id);
+        ok("142e a lista pula a linha caída", !ids.includes(B1.conv) && !ids.includes(B2.conv) && !ids.includes(B9.conv), JSON.stringify(ids));
+        ok("e mantém as de pé, as do erro antigo e as do outro erro",
+           [A1, D1, E1, F1, G1].every((x) => ids.includes(x.conv)), JSON.stringify(ids));
+        const daSonda = [C1, C2, C3].filter((x) => ids.includes(x.conv));
+        ok("uma hora depois do erro, uma conversa só da linha caída, como sonda, a que espera há mais tempo",
+           daSonda.length === 1 && daSonda[0] === C1, JSON.stringify(ids));
+        await q.query("update zorvin_quazar_faxina set resposta = 'pensando', resposta_em = now() where id = $1", [C1.fx]);
+        ok("nenhuma sonda enquanto outra da linha tem a vez reservada", !(await pendentes()).some((x) => x.advogado_id === tC));
+        await q.query("update zorvin_quazar_faxina set resposta = 'na_fila' where id = $1", [C1.fx]);
+        ok("nem enquanto a resposta dela está na fila", !(await pendentes()).some((x) => x.advogado_id === tC));
+        await q.query("update zorvin_quazar_faxina set resposta = null, resposta_em = null where id = $1", [C1.fx]);
+
+        // ---- 142f. a confirmação ----
+        const fC1 = await naFila(C1, "erro", CAIU);
+        const fG1 = await naFila(G1, "erro", OUTRO);
+        // NO D1, as bolhas vermelhas antigas: uma do Quazar, e uma da equipe.
+        const velhaDoQuazar = await erroNa(D1.conv, minutos(170), CAIU, true);
+        const velhaDaEquipe = await erroNa(D1.conv, minutos(170), CAIU, false);
+        const fD1 = await naFila(D1, "enviada");
+        const r = await confirmar();
+        ok("142f a confirmação diz quantas não saíram porque a linha caiu", r && r.linha_caida === 1 && r.nao_saiu === 1 && r.abertas === 1,
+           JSON.stringify(r));
+        const c1 = await faxina(C1.fx);
+        ok("a que falhou porque a linha caiu devolve a vez", c1.resposta === null && c1.respondida_em === null && c1.resposta_fila_id === null,
+           JSON.stringify(c1));
+        ok("e a linha, com o erro novo, fica fora da lista: sem sonda por mais uma hora",
+           !(await pendentes()).some((x) => x.advogado_id === tC));
+        ok("a que falhou por outro motivo fica 'nao_saiu'", (await faxina(G1.fx)).resposta === "nao_saiu");
+        ok("a que saiu tira da tela a bolha vermelha antiga do Quazar", (await faxina(D1.fx)).resposta === "saiu"
+           && (await statusDa(velhaDoQuazar)) === "descartada");
+        ok("e não a da equipe, nem a própria resposta", (await statusDa(velhaDaEquipe)) === "erro" && (await statusDa(fD1)) === "enviada"
+           && (await statusDa(fC1)) === "erro" && (await statusDa(fG1)) === "erro");
+
+        // ---- 142g. quem entrou e quem não entrou ----
+        const ent = await comoPessoa(q, U.ana, async () => guardado(() => q.query("select zorvin_linha_caida_desde($1)", [tB])));
+        ok("142g quem entrou não chama a função da linha caída", ent.codigo === "42501", JSON.stringify(ent));
+        ok("quem não entrou também não", !(await q.query(
+          "select has_function_privilege('anon', 'public.zorvin_linha_caida_desde(uuid)', 'execute') p")).rows[0].p);
+
+        // ---- 142h. rodar de novo, e a pasta na ordem ----
+        const de2 = await guardado(() => aplicar(q, S["070"]));
+        ok("142h rodar de novo não acusa defeito, e não acha mais nada para devolver", lista(de2).length > 0 && !defeito(de2)
+           && item(de2, /devolvidas/) === "0" && (await faxina(G1.fx)).resposta === "nao_saiu", JSON.stringify(de2));
+        await q.query(S["069"]);
+        const sem070 = (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
+                                       ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f;
+        await q.query(S["070"]);
+        ok("e a pasta na ordem devolve a lista que pula a linha caída", sem070 === false
+           && (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
+                              ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f === true);
+      }
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
@@ -28679,7 +28856,7 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
       },
       zorvin_quazar_responde_confirmar: (json) => {
         chamadas.confirmar.push(json);
-        return { corpo: chamadas.confirmar.length === 2 ? { finalizadas: 1, abertas: 2, nao_saiu: 1 } : { finalizadas: 0, abertas: 0, nao_saiu: 0 } };
+        return { corpo: chamadas.confirmar.length === 2 ? { finalizadas: 1, abertas: 2, nao_saiu: 1, linha_caida: 2 } : { finalizadas: 0, abertas: 0, nao_saiu: 0, linha_caida: 0 } };
       },
     } };
   };
@@ -28729,6 +28906,7 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
     const log = registro(t);
     ok("o log diz só números", /quazar responde quem espera: em \d+ ms — 1 resposta\(s\) na fila/.test(log)
        && /1 finalizada\(s\) depois de a resposta sair; 2 aberta\(s\) para a equipe depois de a resposta sair; 1 resposta\(s\) que não saíram/.test(log)
+       && /1 resposta\(s\) que não saíram; 2 que não saíram porque o telefone está desconectado \(voltam a ser tentadas quando ele voltar\)/.test(log)
        && !/Andreia|segunda via/.test(log), log.slice(-500));
     await espera(900);
     ok("e não escreve duas vezes para a mesma espera", claude.pedidos.length === 1 && fila(t).length === 1, `${claude.pedidos.length} pedidos`);
