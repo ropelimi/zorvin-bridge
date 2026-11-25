@@ -27064,7 +27064,8 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     ["cP40", "mP40", "Vocês receberam meu comprovante?", 40, "ANDREIA CRISTINA"],
   ];
   const tabelas = () => ({
-    contatos: CONVS.map(([c, , , , nome]) => ({ id: `k-${c}`, numero: `55719${c}`, nome })),
+    // O NOME É O DO CADASTRO (25/11): o do perfil do WhatsApp não chega à IA.
+    contatos: CONVS.map(([c, , , , nome]) => ({ id: `k-${c}`, numero: `55719${c}`, nome: "Apelido do Zap", vantoro_nome: nome })),
     conversas: CONVS.map(([c]) => ({ id: c, advogado_id: TELEFONE.id, contato_id: `k-${c}`, situacao: "aberto" })),
     mensagens: CONVS.flatMap(([c, m, texto, d]) => [
       { id: `${m}-0`, conversa_id: c, origem: "advogado", tipo: "texto", texto: "Bom dia, em que posso ajudar?", criado_em: haDias(d + 1) },
@@ -27148,6 +27149,8 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     ok("a mensagem: a saudação, o nome, as desculpas e a pergunta, sem se apresentar (de dia, 25/11)",
        /^(Bom dia|Boa tarde|Boa noite), Andreia! Peço desculpas pela demora em responder a sua mensagem\. Você ainda precisa de ajuda com isso\? Se precisar, é só responder aqui que a nossa equipe retoma o seu atendimento\.$/
          .test((fila[0] || {}).texto || ""), (fila[0] || {}).texto);
+    ok("e o apelido do perfil do WhatsApp não vai no pedido da faxina (25/11)", claude.pedidos.length > 0
+       && claude.pedidos.every((p) => !JSON.stringify(p).includes("Apelido do Zap")));
     const l40 = linhaDe(t, "cP40");
     ok("e a linha vira 'retomada', com a mensagem da fila", l40.status === "retomada" && l40.fila_id === (fila[0] || {}).id && Boolean(l40.retomada_em),
        JSON.stringify(l40));
