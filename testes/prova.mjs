@@ -28609,7 +28609,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
         const tC = await telefone("Sonda");        // caiu há 2 horas, e nada depois
         const tD = await telefone("Voltou");       // caiu, e chegou mensagem depois
         const tE = await telefone("Saiu");         // caiu, e saiu mensagem depois
-        const tF = await telefone("Antigo");       // o erro tem mais de 30 dias
+        const tF = await telefone("Antigo");       // o erro tem mais de 30 dias, e nada depois dele
         const tG = await telefone("Outro erro");   // o erro não é de desconexão
         // O ERRO E O SINAL DE VIDA moram numa conversa à parte, para não mexer na espera de ninguém.
         const xB = await conversaEm(tB, "5571910000001"); await erroNa(xB, minutos(5));
@@ -28628,7 +28628,9 @@ create policy conversas_mexer on conversas for update to authenticated using (po
         const C3 = await esperaEm(tC, "5571920000006", 7);
         const D1 = await esperaEm(tD, "5571920000007", 6);
         const E1 = await esperaEm(tE, "5571920000008", 6);
-        const F1 = await esperaEm(tF, "5571920000009", 6);
+        // O CLIENTE DO F1 escreveu ANTES do erro antigo: uma mensagem dele depois do erro seria sinal de vida,
+        // e a cena deixaria de medir o teto de 30 dias.
+        const F1 = await esperaEm(tF, "5571920000009", 50);
         const G1 = await esperaEm(tG, "5571920000010", 6);
         // AS DE HOJE, antes do 070: uma que não saiu porque a linha caiu, e uma por outro motivo.
         const B9 = await esperaEm(tB, "5571920000011", 4);

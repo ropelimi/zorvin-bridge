@@ -5175,7 +5175,27 @@ a confirmação (devolve a vez, `nao_saiu` por outro motivo, a bolha antiga do
 Quazar descartada e a da equipe não); quem entrou; e a pasta na ordem. E a 141
 confere o log.
 
-SABOTAGENS_070
+**23 sabotagens e 23 pegas**, rodadas em cópias e lidas uma a uma (e as duas
+cópias de controle passaram inteiras):
+
+- **a lista:** sem pular a linha caída (a do 069); a sonda sem o limite de uma;
+  sem sonda (a linha caída fica fora para sempre); a sonda sem olhar a vez
+  reservada, e sem olhar a que está na fila; a janela de 1 hora com 3 horas;
+- **a linha caída:** o erro sem o teto de 30 dias; sem o sinal de vida da
+  mensagem que saiu, e da que chegou; qualquer erro contando como desconexão;
+- **a confirmação:** a de antes (a linha caída vira `nao_saiu`); devolver a vez
+  sem limpar o `respondida_em`; o erro por outro motivo também devolvendo a vez;
+  sem descartar a bolha antiga do Quazar; descartando também a da equipe;
+- **a instalação:** sem devolver as de hoje; devolvendo toda `nao_saiu`;
+- **o banco:** a função para quem entrou; para todos (sem tirar de `public`); sem
+  a guarda do 069; sem a guarda do banco limpo; a conferência dizendo nenhum
+  telefone;
+- **a ponte:** sem contar a linha caída no log (pega pela 141).
+
+**Uma vazou na primeira rodada, e a culpa era da cena:** a do teto de 30 dias. O
+cliente da linha do erro antigo tinha escrito depois do erro, e a mensagem dele
+já contava como sinal de vida. Hoje ele escreveu antes do erro, e a mesma
+sabotagem é pega por duas conferências.
 
 ### O gasto do Quazar (script 058, 08/11)
 
