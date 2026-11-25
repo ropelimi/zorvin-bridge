@@ -4633,6 +4633,57 @@ resposta.
   tirou a conversa da espera, e o cliente que escreveu de novo também segura.
 - **A que não saiu** (erro, descartada, cancelada) vira `erro`, e a conversa
   fica aberta para a equipe.
+- **Só no Sucesso do Cliente e no Comercial** desde 25/11 (o 065, logo
+  abaixo). Nos outros departamentos, a pendente de 30 dias fica para a pessoa.
+
+### A retomada só no Sucesso do Cliente e no Comercial (script 065, 25/11)
+
+Pedido do Rodrigo, logo depois de a faxina entrar: *"a mensagem de retomada só
+no Sucesso do Cliente e no Comercial. Nos outros telefones, as conversas que já
+acabaram continuam sendo finalizadas, e as pendentes ficam para a pessoa."* Às
+05h14 de 25/11, 9 conversas esperavam a vez de receber a retomada (6 do Acordos,
+3 do Interno), e ela só sairia às 8h.
+
+`sql/automaticos/065-a-retomada-so-onde-se-escolhe.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_faxina_retomada` | por departamento, `ligada` ou não. **Sem linha, não manda**: o que fala com o cliente nasce desligado |
+| a semente `faxina:retomada-sdc-comercial-065` | liga, uma vez, o Sucesso do Cliente (slug `sdc`) e o Comercial (pelo nome). Desligado depois, rodar a pasta de novo não religa (regra 5) |
+| `zorvin_faxina_retomadas_da_vez` | a do 064, só com os departamentos ligados |
+| `zorvin_faxina_para_ler` | a do 064, com `retoma` em cada conversa: o departamento manda a retomada? |
+| a instalação | a `retomar` de um departamento que não manda vira `pendente`, e a conferência diz quantas |
+
+- **A ponte marca `retomar` só com `retoma` verdadeiro** (`item.retoma !==
+  false`). O banco de antes do 065 não diz, e vale o de antes: quem escolhe a
+  vez é o banco, que também confere.
+- **Finalizar não muda**: o silêncio de 7 dias e o que o Quazar leu como
+  encerrado ou propaganda continuam valendo no escritório todo.
+- **O 065 é a versão de referência** de `zorvin_faxina_para_ler` e
+  `zorvin_faxina_retomadas_da_vez` (regra 5): o 064 rodado de novo depois dele
+  tira o filtro, e o 065, na ordem da pasta, o devolve.
+- **A tabela só a ponte alcança** (RLS ligada, sem política, a herança tirada
+  de quem entrou e de quem não entrou). **Ainda não há tela** para ligar outro
+  departamento: por enquanto, pelo conector do Supabase, a pedido do Rodrigo.
+
+Provas: seção 133, cena 133g (a ponte: o departamento que não manda deixa a
+pendente para a pessoa, sem nada na fila; o banco sem o 065 manda como antes) e
+seção 134 (o 065 num Postgres de verdade: as guardas, a instalação que ajusta
+as que esperavam, só os ligados, o `retoma`, quem não alcança, e rodar de novo
+sem religar nem perder o filtro).
+
+**13 sabotagens e 13 pegas**, rodadas em cópias e lidas uma a uma (e a cópia de
+controle passou inteira): a vez sem o filtro do departamento; a vez pela linha,
+sem olhar se está ligada; a semente sem o slug, e sem o nome; a semente em toda
+rodada; sem o ajuste da instalação; o ajuste também nos ligados; o que o Quazar
+lê sem o `retoma`, e com o `retoma` sempre verdadeiro; a tabela aberta para quem
+entrou; sem a guarda do 064; a ponte sem olhar o `retoma` (a de antes); e a
+ponte com a falta do `retoma` valendo pendente (o banco sem o 065 deixaria de
+mandar).
+
+**A da guarda do 064 vazou na primeira rodada, e a culpa era dela**: tirava só
+a primeira condição do `if`, e as outras continuavam segurando o script. Refeita
+trocando a condição inteira, ela é pega. É a lição do 044 outra vez.
 
 ### O registro (`zorvin_quazar_faxina`)
 

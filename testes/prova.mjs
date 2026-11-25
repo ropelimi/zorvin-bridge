@@ -27048,7 +27048,7 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
     zorvin_quazar_faxina: [], fila_envio: [], zorvin_uso_da_ia: [],
   });
-  function falsoBanco({ quietas = [], fecha = () => true, itens = CONVS, semFiltro = false } = {}) {
+  function falsoBanco({ quietas = [], fecha = () => true, itens = CONVS, semFiltro = false, semRetoma = [], semCampo = false } = {}) {
     const chamadas = { quietas: 0, finalizar: [], para_ler: 0, retomadas: 0, confirmar: 0 };
     const finalizadas = new Set();
     const rpcs = {
@@ -27062,7 +27062,8 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
       zorvin_faxina_para_ler: (json, dados) => {
         chamadas.para_ler += 1;
         return { corpo: itens.filter(([c, m]) => semFiltro || !(dados.zorvin_quazar_faxina || []).some((q) => q.conversa_id === c && q.cliente_ate_id === m))
-          .map(([c, m, , d]) => ({ conversa_id: c, advogado_id: TELEFONE.id, cliente_ate_id: m, cliente_ate: haDias(d), esperando_desde: haDias(d), dias: d })) };
+          .map(([c, m, , d]) => ({ conversa_id: c, advogado_id: TELEFONE.id, cliente_ate_id: m, cliente_ate: haDias(d), esperando_desde: haDias(d), dias: d,
+            ...(semCampo ? {} : { retoma: !semRetoma.includes(c) }) })) };
       },
       zorvin_faxina_retomadas_da_vez: (json, dados) => {
         chamadas.retomadas += 1;
@@ -27213,6 +27214,27 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     await t.parar(); await claude.parar();
   }
 
+  // ---- 133g. a retomada só onde o departamento a manda (065) ----
+  {
+    Object.assign(cena, { status: 200, stop: "end_turn", motivo: null, retry: null });
+    const claude = await subirClaude();
+    const banco = falsoBanco({ itens: [CONVS[3]], semRetoma: ["cP40"] });
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: banco.rpcs });
+    await esperaAte(() => linhaDe(t, "cP40").status && linhaDe(t, "cP40").status !== "pensando" && banco.chamadas.confirmar >= 1);
+    ok("133g fora dos departamentos que mandam a retomada, a pendente de 40 dias fica 'pendente' (para a pessoa)",
+       linhaDe(t, "cP40").status === "pendente", JSON.stringify(linhas(t)));
+    ok("e nada vai para a fila", (t.sb.dados.fila_envio || []).length === 0, JSON.stringify(t.sb.dados.fila_envio));
+    await t.parar();
+    // SEM O 065 o banco não diz `retoma`, e vale o de antes: 'retomar'.
+    const banco2 = falsoBanco({ itens: [CONVS[3]], semCampo: true });
+    const t2 = await subirTudo(rapido(claude), { tabelas: tabelas(), rpcs: banco2.rpcs });
+    await esperaAte(() => (t2.sb.dados.fila_envio || []).length > 0 || !["pensando", undefined].includes(linhaDe(t2, "cP40").status));
+    await esperaAte(() => linhaDe(t2, "cP40").status === "retomada");
+    ok("sem o 065 (o banco não diz `retoma`), a pendente de 40 dias recebe a retomada, como antes",
+       linhaDe(t2, "cP40").status === "retomada" && (t2.sb.dados.fila_envio || []).length === 1, JSON.stringify(linhas(t2)));
+    await t2.parar(); await claude.parar();
+  }
+
   // ---- 133e. desligada; e sem o 064 ----
   {
     const banco = falsoBanco({ quietas: ["q1"] });
@@ -27230,6 +27252,242 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     ok("sem o 064, uma linha no log e a faxina para", perguntas === 1 && (reg.match(/faxina fica parada/g) || []).length === 1
        && /064-a-faxina-do-quazar\.sql/.test(reg), `${perguntas} perguntas; ${reg.slice(-300)}`);
     await t2.parar();
+  }
+}
+
+// ============================================================
+//  134. A RETOMADA SÓ ONDE SE ESCOLHE (065), num Postgres de verdade (25/11)
+//
+//  Rodrigo, em 25/11: a mensagem de retomada da faxina só no Sucesso do
+//  Cliente e no Comercial; nos outros telefones, a pendente fica para a
+//  pessoa. A seção guarda:
+//    - num banco limpo e sem o 064, nada, e diz;
+//    - a semente liga o Sucesso do Cliente (pelo slug) e o Comercial (pelo
+//      nome), e mais ninguém; desligada depois, rodar de novo não religa;
+//    - as que esperavam a vez fora dos departamentos ligados viram 'pendente'
+//      na instalação (e de novo em toda rodada);
+//    - as retomadas da vez só nos departamentos ligados, com o expediente
+//      aberto em todos (só o 065 separa um do outro); sem linha, não manda;
+//    - o que o Quazar lê diz `retoma` em cada conversa;
+//    - quem entrou e quem não entrou não alcançam a tabela.
+// ============================================================
+{
+  console.log("\n134. A retomada só onde se escolhe (065), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 065 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S = Object.fromEntries([
+      "004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql", "006-a-espera-nao-comeca-no-rabicho.sql",
+      "008-o-responsavel-pela-conversa.sql", "009-o-assunto-outros.sql", "018-tarefas-e-lembretes.sql",
+      "020-a-auditoria-do-banco.sql", "021-a-resposta-fora-do-horario.sql", "025-o-repasse-e-a-ordem-alfabetica.sql",
+      "026-o-outros-fica-no-fim.sql", "027-duvidas-tratadas.sql", "028-aguardando-em-aberto-e-finalizados.sql",
+      "037-o-aviso-automatico-nao-e-atendimento.sql", "055-o-quazar-a-noite-em-ensaio.sql",
+      "059-o-quazar-a-noite-valendo.sql", "064-a-faxina-do-quazar.sql", "065-a-retomada-so-onde-se-escolhe.sql",
+    ].map((a) => [a.slice(0, 3), ler(a)]));
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, ordem int not null default 0);
+create table usuarios (id uuid primary key, nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean not null default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, tipo text not null default 'texto', texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, unique (conversa_id, id_uazapi));
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+create policy conversas_mexer on conversas for update to authenticated using (pode_ver_conversa(advogado_id)) with check (pode_ver_conversa(advogado_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a" };
+    const comoPessoa = async (c, uid, fn) => {
+      await c.query("select set_config('request.jwt.claim.sub', $1, false)", [uid]);
+      await c.query("set role authenticated");
+      try { return await fn(); } finally { await c.query("reset role"); await c.query("select set_config('request.jwt.claim.sub', '', false)"); }
+    };
+    const comoAnon = async (c, fn) => { await c.query("set role anon"); try { return await fn(); } finally { await c.query("reset role"); } };
+    const dias = (d) => new Date(Date.now() - d * 86400e3).toISOString();
+    const DIAS = ["seg", "ter", "qua", "qui", "sex", "sab", "dom"];
+    const ABERTA = JSON.stringify(Object.fromEntries(DIAS.map((d) => [d, ["00:00", "23:59"]])));
+    const ANTES = ["004", "005", "006", "008", "009", "018", "020", "021", "025", "026", "027", "028", "037", "055", "059"];
+
+    // OS DEPARTAMENTOS: o Sucesso do Cliente pelo slug (o nome é outro, para a
+    // semente ter de achá-lo pelo slug), o Comercial pelo nome (sem slug), e
+    // Acordos e Interno sem a retomada. O expediente aberto em todos.
+    async function zorvin(scripts = ANTES) {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query("alter table departamentos add column slug text");
+      await c.query(`insert into departamentos (nome, ordem, slug) values
+        ('Atendimento ao Cliente', 1, 'sdc'), ('Acordos', 2, 'acordos'), ('COMERCIAL', 3, null), ('Interno', 4, 'interno')`);
+      for (const k of scripts) await c.query(S[k]);
+      await c.query(`insert into usuarios (id, nome) values ('${U.ana}', 'Ana')`);
+      const tel = async (nome, dep) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id) values ($1, $2, $3) returning id", [nome, nome, dep])).rows[0]?.id;
+      c.F = { sdc: await tel("SAC", 1), acordos: await tel("Acordos 1", 2), comercial: await tel("Comercial", 3), interno: await tel("Interno", 4) };
+      c.n = 0;
+      c.conversa = async (t) => {
+        const ct = (await c.query("insert into contatos (numero, nome) values ($1, $2) returning id",
+          [`5511${String(++c.n).padStart(8, "0")}`, `Cliente ${c.n}`])).rows[0].id;
+        return (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [t, ct])).rows[0].id;
+      };
+      c.msg = async (conv, origem, quando) => (await c.query(
+        `insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em, enviado_por_id)
+         values ($1, $2, 'x', $3, $4, $5) returning id`,
+        [conv, origem, crypto.randomBytes(6).toString("hex"), quando, origem === "advogado" ? U.ana : null])).rows[0].id;
+      // UMA CONVERSA COM O CLIENTE ESPERANDO HÁ `d` DIAS, e o que o Quazar decidiu.
+      c.pendente = async (t, d, status = "retomar") => {
+        const conv = await c.conversa(t); await c.msg(conv, "advogado", dias(d + 2)); const m = await c.msg(conv, "contato", dias(d));
+        const id = status ? (await c.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status)
+          values ($1, $2, $3, $4, $5) returning id`, [conv, t, m, dias(d), status])).rows[0].id : null;
+        return { conv, m, id };
+      };
+      c.status = async (id) => (await c.query("select status from zorvin_quazar_faxina where id = $1", [id])).rows[0]?.status;
+      c.retomadas = async () => lista((await c.query("select zorvin_faxina_retomadas_da_vez(50, 50, 30) q")).rows[0].q).map((x) => x.conversa_id);
+      c.ler = async () => lista((await c.query("select zorvin_faxina_para_ler(2000, 2) q")).rows[0].q);
+      return c;
+    }
+
+    try {
+      await raiz.query(`do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+        if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+      end $$;`);
+
+      // ---- 134a. as guardas ----
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S["065"]));
+        ok("134a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
+        const sem = await zorvin();
+        const r1 = await guardado(() => aplicar(sem, S["065"]));
+        ok("e sem o 064, diz que falta e não cria a tabela", /rode-o antes/.test(String(item(r1, /falta o 064/)))
+           && (await sem.query("select to_regclass('public.zorvin_faxina_retomada') is null as n")).rows[0].n, JSON.stringify(r1));
+      }
+
+      // ---- 134b. a instalação ----
+      const c = await zorvin([...ANTES, "064"]);
+      await c.query(`insert into zorvin_fora_do_horario (departamento_id, ligada, texto, semana)
+                     select id, false, 'x', $1::jsonb from departamentos`, [ABERTA]);
+      // O QUE A FAXINA DE ANTES JÁ TINHA MARCADO PARA RETOMAR, nos quatro.
+      const R = { sdc: await c.pendente(c.F.sdc, 40), acordos: await c.pendente(c.F.acordos, 40),
+                  comercial: await c.pendente(c.F.comercial, 40), interno: await c.pendente(c.F.interno, 40) };
+      ok("134b antes do 065, a retomada sai nos quatro departamentos (o defeito)", (await c.retomadas()).length === 4,
+         JSON.stringify(await c.retomadas()));
+      const conf = await guardado(() => aplicar(c, S["065"]));
+      ok("o 065 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+      const ligados = (await c.query("select departamento_id::int d from zorvin_faxina_retomada where ligada order by 1")).rows.map((x) => x.d);
+      ok("a semente liga o Sucesso do Cliente (pelo slug) e o Comercial (pelo nome), e mais ninguém",
+         JSON.stringify(ligados) === JSON.stringify([1, 3]), JSON.stringify(ligados));
+      ok("a conferência diz quais", item(conf, /retomada ligada/) === "Atendimento ao Cliente, COMERCIAL", JSON.stringify(conf));
+      ok("as que esperavam a vez em Acordos e no Interno ficam para a pessoa ('pendente')",
+         (await c.status(R.acordos.id)) === "pendente" && (await c.status(R.interno.id)) === "pendente");
+      ok("e as do Sucesso do Cliente e do Comercial continuam esperando a vez",
+         (await c.status(R.sdc.id)) === "retomar" && (await c.status(R.comercial.id)) === "retomar");
+      ok("a conferência conta as que mudaram", item(conf, /ficaram para a pessoa/) === "2", JSON.stringify(conf));
+
+      // ---- 134c. as retomadas da vez ----
+      let rt = await c.retomadas();
+      ok("134c a retomada sai só no Sucesso do Cliente e no Comercial", rt.length === 2
+         && rt.includes(R.sdc.conv) && rt.includes(R.comercial.conv), JSON.stringify(rt));
+      const pAc = await c.pendente(c.F.acordos, 45, "pendente");
+      const pSdc = await c.pendente(c.F.sdc, 45, "pendente");
+      rt = await c.retomadas();
+      ok("a pendente de 45 dias em Acordos também não; a do Sucesso do Cliente, sim", !rt.includes(pAc.conv) && rt.includes(pSdc.conv), JSON.stringify(rt));
+      await c.query("update zorvin_faxina_retomada set ligada = false where departamento_id = 3");
+      ok("desligado o Comercial, a dele sai da lista", !(await c.retomadas()).includes(R.comercial.conv));
+      await c.query("insert into zorvin_faxina_retomada (departamento_id, ligada) values (2, true)");
+      rt = await c.retomadas();
+      ok("ligado Acordos, as dele entram", rt.includes(R.acordos.conv) && rt.includes(pAc.conv), JSON.stringify(rt));
+      await c.query("delete from zorvin_faxina_retomada where departamento_id = 2");
+      ok("e sem linha, não manda", !(await c.retomadas()).includes(R.acordos.conv));
+
+      // ---- 134d. o que o Quazar lê ----
+      const lSdc = await c.pendente(c.F.sdc, 35, null), lInt = await c.pendente(c.F.interno, 35, null);
+      const l = await c.ler();
+      const de = (conv) => l.find((x) => x.conversa_id === conv) || {};
+      ok("134d o que o Quazar lê diz `retoma`: sim no Sucesso do Cliente, não no Interno",
+         de(lSdc.conv).retoma === true && de(lInt.conv).retoma === false, JSON.stringify([de(lSdc.conv), de(lInt.conv)]));
+      ok("e continua dizendo o resto (a mensagem e os dias)", de(lSdc.conv).cliente_ate_id === lSdc.m && de(lSdc.conv).dias === 35,
+         JSON.stringify(de(lSdc.conv)));
+
+      // ---- 134e. quem pode o quê ----
+      const leu = await guardado(() => comoPessoa(c, U.ana, () => c.query("select * from zorvin_faxina_retomada")));
+      ok("134e quem entrou não lê onde a retomada sai", leu.codigo === "42501", JSON.stringify(leu).slice(0, 200));
+      const mudou = await guardado(() => comoPessoa(c, U.ana, () => c.query("insert into zorvin_faxina_retomada (departamento_id, ligada) values (2, true)")));
+      ok("nem liga um departamento", mudou.codigo === "42501", JSON.stringify(mudou).slice(0, 200));
+      const anon = await guardado(() => comoAnon(c, () => c.query("select * from zorvin_faxina_retomada")));
+      ok("e quem não entrou também não", anon.codigo === "42501", JSON.stringify(anon).slice(0, 200));
+      const chamou = await guardado(() => comoPessoa(c, U.ana, () => c.query("select zorvin_faxina_retomadas_da_vez(6, 10, 30)")));
+      ok("nem chama as retomadas da vez", chamou.codigo === "42501", JSON.stringify(chamou).slice(0, 200));
+
+      // ---- 134f. rodar de novo ----
+      // Comercial desligado à mão (134c); uma 'retomar' nova no Interno, marcada
+      // por uma ponte de antes do 065.
+      const nova = await c.pendente(c.F.interno, 50);
+      const de2 = await guardado(() => aplicar(c, S["065"]));
+      ok("134f rodar de novo não acusa defeito", lista(de2).length > 0 && !defeito(de2), JSON.stringify(de2));
+      ok("não religa o Comercial desligado", (await c.query("select ligada from zorvin_faxina_retomada where departamento_id = 3")).rows[0]?.ligada === false);
+      ok("e a 'retomar' que ficou fora da regra vira 'pendente'", (await c.status(nova.id)) === "pendente");
+      // O 064 RODADO DE NOVO devolve as funções sem o filtro; o 065, na ordem, as põe de volta.
+      await guardado(() => aplicar(c, S["064"]));
+      await guardado(() => aplicar(c, S["065"]));
+      rt = await c.retomadas();
+      ok("a pasta inteira de novo, na ordem: a retomada continua só onde está ligada", rt.includes(R.sdc.conv)
+         && !rt.includes(R.comercial.conv) && !rt.includes(pAc.conv), JSON.stringify(rt));
+    } catch (e) {
+      ok("a seção 134 rodou até o fim", false, e.stack || e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end().catch(() => {});
+    }
   }
 }
 

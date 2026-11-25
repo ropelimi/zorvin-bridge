@@ -13530,6 +13530,9 @@ setInterval(() => { acompanharOFunil().catch(() => {}); }, ACOMPANHAMENTO_INTERV
 //       máximo 6 por telefone por hora (`zorvin_faxina_retomadas_da_vez`). A
 //       mensagem que saiu finaliza a conversa (`zorvin_faxina_confirmar`). Se
 //       o cliente responder, ela reabre (028), com protocolo novo.
+//       SÓ NOS DEPARTAMENTOS QUE A MANDAM (065, `zorvin_faxina_retomada`: o
+//       Sucesso do Cliente e o Comercial). Nos outros, a pendente fica para a
+//       pessoa, e o "obrigado" e a propaganda continuam sendo finalizados.
 //
 //  FINALIZAR É O "JÁ TRATEI" SEM PESSOA (`quem` nulo), com o porquê no texto
 //  do registro: o painel diz "Quazar". E o banco confere, na hora de
@@ -13774,7 +13777,10 @@ async function faxinaDoQuazar() {
         let status;
         if (r.decisao === 'pendente') {
           conta.pendentes += 1;
-          status = (Number(item.dias) || 0) >= FAXINA_DIAS_DA_RETOMADA ? 'retomar' : 'pendente';
+          // A RETOMADA SÓ ONDE O DEPARTAMENTO A MANDA (065): fora dele, a
+          // pendente fica para a pessoa. Sem o 065 o banco não diz, e vale o
+          // de antes (quem escolhe a vez é o banco, que também confere).
+          status = (Number(item.dias) || 0) >= FAXINA_DIAS_DA_RETOMADA && item.retoma !== false ? 'retomar' : 'pendente';
         } else {
           const qual = r.decisao === 'propaganda' ? 'propaganda' : 'tratada';
           const fez = await chamarAFaxina('zorvin_faxina_finalizar', {
