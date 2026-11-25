@@ -14773,7 +14773,11 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
       quebrar: (metodo, tabela, busca) => (metodo === "GET" && tabela === "advogados"
         && /select=id%2Cnome%2Cnumero%2Cativo/.test(busca) && falhar-- > 0 ? "o banco tossiu" : null),
     });
-    await esperarAte(() => desfechos(t, "A-1", "enviado").length > 0, 10000);
+    // A PONTE AVISA O VANTORO ANTES DE GRAVAR O HISTÓRICO (o envio confirma e
+    // depois grava a linha): esperar só o "/enviado" lia o histórico antes da
+    // linha. Espera-se a última coisa que a ponte faz (24/11).
+    await esperarAte(() => desfechos(t, "A-1", "enviado").length > 0
+      && (t.sb.dados.mensagens || []).some((m) => m.texto === aviso("A-1").texto), 10000);
     ok("a leitura que falhou não disse '/erro' ao Vantoro — lá, erro é o fim", desfechos(t, "A-1", "erro").length === 0,
        JSON.stringify(t.van.recebidas.filter((r) => /avisos\//.test(r.caminho)).map((r) => r.caminho)));
     ok("o log diz que adiou, e por quê", /Aviso A-1: não consegui ler os telefones do Zorvin \(o banco tossiu\)\. Ele continua pendente no Vantoro/.test(log(t)),
@@ -14845,11 +14849,17 @@ create policy mensagens_ver on mensagens for select to authenticated using (exis
     const t = await subirTudo({ AVISOS_INTERVALO_MS: "400" }, {
       vantoro: { avisos: [aviso("C-1")], pendentesAteODesfecho: true, desfechosQueFalham: 1 },
     });
-    await esperarAte(() => desfechos(t, "C-1", "enviado").length >= 2, 10000);
+    // ESPERA A LINHA DO LOG, E NÃO SÓ A CONFIRMAÇÃO CHEGAR AO VANTORO DE MENTIRA:
+    // a ponte escreve "confirmado" depois que a resposta volta, um instante
+    // depois de o Vantoro anotar o pedido. Esperando só a segunda, a conferência
+    // lia o log antes da linha (24/11, na PR #251: 1 de 2965, sem defeito).
+    await esperarAte(() => desfechos(t, "C-1", "enviado").length >= 2
+      && /Aviso C-1 confirmado no Vantoro/.test(log(t)), 10000);
     ok("a confirmação que o Vantoro recusou é dita no log como recusa, e não como confirmada",
        /Aviso C-1: o Vantoro respondeu 500 à confirmação/.test(log(t)), log(t).split("\n").filter((l) => /C-1/.test(l)).join(" | "));
     ok("e a rodada seguinte confirma de novo — e então diz confirmado",
-       desfechos(t, "C-1", "enviado").length === 2 && /Aviso C-1 confirmado no Vantoro/.test(log(t)));
+       desfechos(t, "C-1", "enviado").length === 2 && /Aviso C-1 confirmado no Vantoro/.test(log(t)),
+       `${desfechos(t, "C-1", "enviado").length} confirmações; ${log(t).split("\n").filter((l) => /C-1/.test(l)).join(" | ")}`);
     const envios = t.uaz.recebidas.filter((r) => /^\/send\//.test(r.caminho));
     ok("o cliente recebe o aviso UMA vez", envios.length === 1 && filaDe(t, "C-1").length === 1, JSON.stringify(envios.map((e) => e.caminho)));
     await t.parar();

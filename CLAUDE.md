@@ -6318,6 +6318,18 @@ com a espera nova: quem sai fica, sem tirar as permissões, sem bloquear,
 quem volta não volta, volta sem desbloquear. É a régua de 26/10 outra vez:
 **espere a ÚLTIMA coisa que o código faz, e não a primeira.**
 
+**E duas cenas dos avisos tinham a mesma corrida (24/11).** Na PR #251, a
+83c reprovou uma conferência de 2.965 sem defeito nenhum: ela esperava o
+Vantoro de mentira receber a segunda confirmação e lia o log, e a ponte só
+escreve "confirmado no Vantoro" depois que a resposta volta. A 83a lia o
+histórico logo depois do "/enviado", e a ponte avisa o Vantoro ANTES de
+gravar a linha no histórico: aqui ela reprovou uma vez em quatro, sem atraso
+nenhum. Reproduzido com 300 ms de atraso antes do log: a prova de antes
+reprova as duas, e a de agora passa. As duas esperam a última coisa: a linha
+do log e a linha do histórico. Sabotadas (a linha sem a marca de automática,
+e a ponte sem dizer "confirmado"), as duas continuam pegas. A seção 113 tem o
+mesmo feitio e não precisou: ela já espera 600 ms depois.
+
 ## As senhas voltam ao histórico (script 039, 29/10)
 
 Pedido do Rodrigo, logo depois do merge da auditoria: *"As senhas do SERASA e
