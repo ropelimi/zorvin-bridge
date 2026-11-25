@@ -28012,7 +28012,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       "059-o-quazar-a-noite-valendo.sql", "064-a-faxina-do-quazar.sql", "065-a-retomada-so-onde-se-escolhe.sql",
       "066-quem-pede-atencao-nao-e-finalizado.sql", "067-a-lista-de-atencao-se-troca-com-where.sql",
       "068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql", "069-o-quazar-responde-quem-espera.sql",
-      "070-o-quazar-nao-escreve-para-telefone-desconectado.sql",
+      "070-o-quazar-nao-escreve-para-telefone-desconectado.sql", "071-o-quazar-pede-o-nome-e-o-cpf.sql",
     ].map((a) => [a.slice(0, 3), ler(a)]));
     const ESQUEMA = `
 do $$ begin
@@ -28715,6 +28715,118 @@ create policy conversas_mexer on conversas for update to authenticated using (po
            && (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
                               ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f === true);
       }
+      // ============================================================
+      //  144. O QUAZAR PEDE O NOME E O CPF (071), no mesmo Postgres (25/11)
+      //
+      //    - num banco limpo e sem o 070, nada, e diz;
+      //    - a marca `pediu_identificacao` nasce falsa;
+      //    - o Quazar fala de novo na mesma espera quando TODAS as respostas
+      //      dela pediram os dados e o cliente mandou um CPF depois da última
+      //      (no texto ou no áudio transcrito); no máximo três respostas;
+      //    - a resposta que não pediu os dados, o cliente que respondeu sem
+      //      CPF e o CPF de antes da resposta continuam segurando a espera;
+      //    - a linha caída (070) continua de fora;
+      //    - quem entrou não alcança;
+      //    - rodar de novo, e a pasta na ordem, mantém a régua nova.
+      // ============================================================
+      console.log("\n144. O Quazar pede o nome e o CPF (071), num Postgres de verdade");
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S["071"]));
+        ok("144a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
+        const sem = await zorvin([...ANTES, "068"]);
+        await aplicar(sem, S["069"]);
+        const r1 = await guardado(() => aplicar(sem, S["071"]));
+        ok("e sem o 070, diz que falta e não cria a marca", /rode-os antes/.test(String(item(r1, /falta o 069 ou o 070/)))
+           && (await sem.query(`select not exists (select 1 from information_schema.columns where table_name = 'zorvin_quazar_faxina'
+                                and column_name = 'pediu_identificacao') as n`)).rows[0].n, JSON.stringify(r1));
+      }
+      {
+        const q = await zorvin([...ANTES, "068"]);
+        await q.query(`alter table fila_envio add column if not exists erro_detalhe text,
+                         add column if not exists erro_motivo text, add column if not exists enviado_em timestamptz;
+                       alter table mensagens add column if not exists transcricao text`);
+        await aplicar(q, S["069"]);
+        await aplicar(q, S["070"]);
+        const conf = await guardado(() => aplicar(q, S["071"]));
+        ok("144b o 071 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+        ok("a marca nasce falsa", (await q.query(`select column_default, is_nullable from information_schema.columns
+             where table_name = 'zorvin_quazar_faxina' and column_name = 'pediu_identificacao'`)).rows[0]?.column_default === "false");
+
+        const CPF = "Maria das Graças Souza, CPF 123.456.789-09";
+        const escreve = async (conv, origem, quando, texto = "x", transcricao = null) => (await q.query(
+          `insert into mensagens (conversa_id, origem, texto, transcricao, id_uazapi, criado_em) values ($1, $2, $3, $4, $5, $6) returning id`,
+          [conv, origem, texto, transcricao, crypto.randomBytes(6).toString("hex"), quando])).rows[0].id;
+        // UMA ESPERA: a equipe respondeu há 8 dias, o cliente escreveu há 6, e o Quazar já respondeu `respostas` vezes.
+        // Cada resposta: { pediu, depois } — `depois` é o que o cliente escreveu em seguida ({ texto, transcricao, antes }).
+        const umaEspera = async (numero, respostas, tel = q.tel) => {
+          const ct = (await q.query("insert into contatos (numero, nome) values ($1, 'Cliente') returning id", [numero])).rows[0].id;
+          const conv = (await q.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [tel, ct])).rows[0].id;
+          await escreve(conv, "advogado", dias(8));
+          let ultima = await escreve(conv, "contato", dias(6), "Como está meu processo?");
+          let t = 5;
+          for (const r of respostas) {
+            await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status,
+                             resposta, resposta_em, respondida_em, pediu_identificacao)
+                           values ($1, $2, $3, $4, 'pendente', 'saiu', $5, $5, $6)`, [conv, tel, ultima, dias(6), dias(t), r.pediu]);
+            const quando = r.depois.antes ? dias(t + 0.1) : dias(t - 0.5);
+            ultima = await escreve(conv, "contato", quando, r.depois.texto || "x", r.depois.transcricao || null);
+            if (r.depois.antes) ultima = await escreve(conv, "contato", dias(t - 0.5), "?");
+            t -= 1;
+          }
+          const fx = (await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status)
+                                     values ($1, $2, $3, $4, 'pendente') returning id`, [conv, tel, ultima, dias(6)])).rows[0].id;
+          return { conv, fx };
+        };
+        const pendentes = async () => lista((await q.query("select zorvin_quazar_responde_pendentes(100, 100) r")).rows[0].r).map((x) => x.id);
+
+        const pediuEMandou = await umaEspera("5571930000001", [{ pediu: true, depois: { texto: CPF } }]);
+        const peloAudio = await umaEspera("5571930000002", [{ pediu: true, depois: { texto: "", transcricao: "meu cpf é 123 456 789 09" } }]);
+        const semPedir = await umaEspera("5571930000003", [{ pediu: false, depois: { texto: CPF } }]);
+        const semCpf = await umaEspera("5571930000004", [{ pediu: true, depois: { texto: "ok, obrigada" } }]);
+        const cpfAntes = await umaEspera("5571930000005", [{ pediu: true, depois: { texto: CPF, antes: true } }]);
+        const duas = await umaEspera("5571930000006", [{ pediu: true, depois: { texto: "123.456.789-09" } },
+                                                    { pediu: true, depois: { texto: CPF } }]);
+        const tres = await umaEspera("5571930000007", [{ pediu: true, depois: { texto: "123.456.789" } },
+                                                    { pediu: true, depois: { texto: "123.456.789-09" } },
+                                                    { pediu: true, depois: { texto: CPF } }]);
+        const respondeuDepois = await umaEspera("5571930000008", [{ pediu: true, depois: { texto: CPF } },
+                                                               { pediu: false, depois: { texto: CPF } }]);
+        // A LINHA CAÍDA (070): o erro de desconexão sem sinal de vida depois.
+        const tCaido = (await q.query("insert into advogados (nome, numero, departamento_id) values ('Caido', 'Caido', 1) returning id")).rows[0].id;
+        const caida = await umaEspera("5571930000009", [{ pediu: true, depois: { texto: CPF } }], tCaido);
+        await q.query(`insert into fila_envio (conversa_id, texto, status, erro_detalhe, criado_em) values ($1, 'x', 'erro',
+                       'WhatsApp disconnected: session is not reconnectable', now() - interval '5 minutes')`, [caida.conv]);
+
+        const ids = await pendentes();
+        ok("144c quem pediu o nome e o CPF, e recebeu o CPF depois, é respondido de novo", ids.includes(pediuEMandou.fx), JSON.stringify(ids));
+        ok("também com o CPF dito num áudio transcrito", ids.includes(peloAudio.fx), JSON.stringify(ids));
+        ok("e depois de dois pedidos (a segunda resposta pediu a correção)", ids.includes(duas.fx), JSON.stringify(ids));
+        ok("a resposta que não pediu os dados continua sendo a única da espera", !ids.includes(semPedir.fx));
+        ok("o cliente que respondeu sem CPF fica para a equipe", !ids.includes(semCpf.fx));
+        ok("o CPF de antes da resposta não conta", !ids.includes(cpfAntes.fx));
+        ok("no máximo três respostas por espera", !ids.includes(tres.fx));
+        ok("e depois da resposta que não pediu os dados, mais nenhuma", !ids.includes(respondeuDepois.fx));
+        ok("a linha caída continua de fora (070)", !ids.includes(caida.fx));
+        // A VEZ RESERVADA noutra linha da mesma conversa (a ponte pegou a de antes) segura a nova.
+        await q.query("update zorvin_quazar_faxina set resposta = 'pensando', resposta_em = now() where conversa_id = $1 and id <> $2",
+                      [pediuEMandou.conv, pediuEMandou.fx]);
+        ok("e a vez reservada noutra linha da mesma conversa continua segurando", !(await pendentes()).includes(pediuEMandou.fx));
+
+        const ent = await comoPessoa(q, U.ana, async () => guardado(() => q.query("select zorvin_quazar_responde_pendentes(10, 10)")));
+        ok("144d quem entrou não chama a função", ent.codigo === "42501", JSON.stringify(ent));
+
+        const de2 = await guardado(() => aplicar(q, S["071"]));
+        ok("144e rodar de novo não acusa defeito", lista(de2).length > 0 && !defeito(de2), JSON.stringify(de2));
+        await q.query(S["069"]); await q.query(S["070"]);
+        const sem071 = (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
+                                       ~ 'pediu_identificacao' as f`)).rows[0].f;
+        await q.query(S["071"]);
+        ok("e a pasta na ordem devolve a régua nova", sem071 === false
+           && (await q.query(`select pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
+                              ~ 'pediu_identificacao' and pg_get_functiondef('public.zorvin_quazar_responde_pendentes(integer, integer)'::regprocedure)
+                              ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f === true);
+      }
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
@@ -28996,6 +29108,337 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
     ok("QUAZAR_RESPONDE=desligado não chama nada, e diz", !b.chamadas.pendentes.length && !b.chamadas.confirmar.length
        && /QUAZAR_RESPONDE=desligado/.test(registro(t2)) && est2.responde === false, JSON.stringify(est2));
     await t2.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+//  145. O QUAZAR PEDE O NOME E O CPF DE QUEM NÃO TEM FICHA — a ponte (25/11)
+//
+//  Pedido do Rodrigo: "o Quazar precisa pedir o nome completo e CPF da
+//  cliente, ele mesmo fazer a consulta da Ficha no Vantoro e salvar o novo
+//  número de contato acrescentando a ficha dela."
+//
+//    - quem espera (valendo): acha o cadastro pelo CPF e confere o nome,
+//      lê a ficha, acrescenta o número como mais um telefone, liga a conversa,
+//      deixa a nota do Quazar e lê o caso pelo cadastro achado;
+//    - sem o CPF ainda, ele pede o nome e o CPF, e a resposta não resolve;
+//    - o CPF sem o nome que confere: pede o nome; depois de pedir, a equipe
+//      confere; o CPF inválido; o CPF sem cadastro; o número que já estava;
+//    - o Vantoro que recusa o número, e a ficha que não vem: nada muda;
+//    - o telefone do próprio cliente não é lido como CPF;
+//    - com um cadastro pelo telefone, nada disso acontece;
+//    - de dia, em ensaio: procura, lê o caso, e não grava nada;
+//    - à noite: grava só valendo e dentro da janela do Vantoro; fora dela,
+//      não chama o Vantoro;
+//    - o CPF nunca vai para o log nem para a nota;
+//    - sem a coluna do 071, a resposta sai assim mesmo, e o log diz.
+// ============================================================
+console.log("\n145. O Quazar pede o nome e o CPF de quem não tem ficha — a ponte");
+{
+  const CPF = "12345678909";            // um CPF válido, de mentira
+  const NOME = "MARIA DAS GRAÇAS SOUZA";
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: JSON.stringify({ responder: true, resolveu: true,
+          mensagem: "Bom dia, Maria! Localizei o seu cadastro e atualizei o seu número de contato.", resumo: "Localizou o cadastro.", motivo: "" }) }],
+        stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 60 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  // O VANTORO DE MENTIRA: a busca pelo telefone, o CPF, a ficha, o número que entra e o caso.
+  async function subirVantoro(cena = {}) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      pedidos.push({ metodo: req.method, url: req.url, corpo });
+      const json = (st, c) => { res.writeHead(st, { "Content-Type": "application/json" }); res.end(JSON.stringify(c)); };
+      if (/\/clientes\/buscar\?/.test(req.url)) return json(200, { ok: true, clientes: cena.porTelefone || [] });
+      const cpf = /\/clientes\/cpf-existe\?cpf=(\d+)/.exec(req.url);
+      if (cpf) {
+        const c = (cena.cpfs || { [CPF]: { id: 88, nome: "MARIA DAS GRACAS SOUZA" } })[cpf[1]];
+        return json(200, c ? { ok: true, encontrado: true, cliente: c } : { ok: true, encontrado: false });
+      }
+      if (/\/clientes\/\d+\/telefones$/.test(req.url) && req.method === "POST") {
+        return cena.recusaNumero ? json(500, { ok: false, erro: "falhou" }) : json(200, { ok: true });
+      }
+      const ctx = /\/clientes\/(\d+)\/contexto$/.exec(req.url);
+      if (ctx) {
+        return json(200, { ok: true, cliente: { id: Number(ctx[1]), nome: NOME },
+          processos: [{ id: 1, numero: "0001234-56.2026.8.05.0001", tipo_acao: "Revisional", reu: "Banco X", status: "ATIVO",
+                        andamentos: [{ data: "2026-11-10", titulo: "Conclusos para despacho" }] }],
+          intimacoes: [], tarefas: [], cortou: { processos: false, tarefas: false } });
+      }
+      if (/\/clientes\/\d+$/.test(req.url) && req.method === "GET") {
+        if (cena.semFicha) return json(500, { ok: false });
+        return json(200, { ok: true, cliente: { id: 88, nome: NOME,
+          telefones: cena.telefones || [{ numero: "(71) 3333-4444", digitos: "7133334444" }] } });
+      }
+      json(404, { ok: false });
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haDias = (d) => new Date(AGORA - d * 86400e3).toISOString();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const NUMERO = "5571988881111";
+  const msg = (id, origem, texto, quando, extra = {}) => ({ id, conversa_id: "c1", origem, tipo: "texto", texto, criado_em: quando, ...extra });
+  const quazar = (id, texto, quando) => msg(id, "advogado", texto, quando, { pelo_quazar: true, automatica: true });
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const registro = (t) => t.registro.join("");
+  const cpfEm = (texto) => /12345678909|123\.456\.789-09/.test(String(texto || ""));
+  const posts = (van) => van.pedidos.filter((x) => x.metodo === "POST");
+  const contato = (t) => (t.sb.dados.contatos || []).find((c) => c.id === "k1") || {};
+  const notasDe = (t) => t.sb.dados.notas || [];
+
+  // ---- QUEM ESPERA (valendo) ----
+  const ITEM = { id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate: haDias(4.8), esperando_desde: haDias(5), dias: 5,
+                 nome: "", departamento: "Sucesso do Cliente", pede_atencao: false };
+  async function quemEspera(mensagens, van, opcoes = {}) {
+    const ultima = mensagens.filter((m) => m.origem === "contato").pop();
+    const claude = await subirClaude();
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van ? van.url : "", VANTORO_API_TOKEN: van ? "tok-vantoro" : "",
+      QUAZAR_RESPONDE_PRIMEIRA_MS: "200", QUAZAR_RESPONDE_INTERVALO_MS: "400" }, {
+      semColunas: opcoes.semColunas,
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria", ...(opcoes.contato || {}) }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aberto", esperando_desde: haDias(5) }],
+        mensagens: [msg("m1", "advogado", "Vou verificar.", haDias(7)), ...mensagens],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_quazar_faxina: [{ id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate_id: ultima.id, esperando_desde: haDias(5),
+                                 status: "pendente", resposta: null }],
+        fila_envio: [], notas: [],
+      },
+      rpcs: {
+        zorvin_quazar_responde_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_faxina || [])
+          .some((f) => f.id === "f1" && f.resposta == null) ? [{ ...ITEM, cliente_ate_id: ultima.id }] : [] }),
+        zorvin_quazar_responde_confirmar: () => ({ corpo: { finalizadas: 0, abertas: 0, nao_saiu: 0, linha_caida: 0 } }),
+      },
+    });
+    const linha = () => (t.sb.dados.zorvin_quazar_faxina || []).find((f) => f.id === "f1") || {};
+    await esperaAte(() => linha().resposta === "na_fila");
+    return { t, claude, linha: linha(), ped: pedidoDe(claude.pedidos[0]), sis: sistemaDe(claude.pedidos[0]),
+             parar: async () => { await t.parar(); await claude.parar(); } };
+  }
+  const PERGUNTA = msg("m3", "contato", "Como está meu processo?", haDias(5));
+  const PEDIU = quazar("m4", "Sou o Quazar. Pode me mandar o seu nome completo e o CPF?", haDias(4.9));
+  const MANDOU = msg("m5", "contato", "Maria das Graças Souza, CPF 123.456.789-09", haDias(4.8));
+
+  // ---- 145a. acha o cadastro, acrescenta o número, liga a conversa e lê o caso ----
+  {
+    const van = await subirVantoro();
+    const c = await quemEspera([PERGUNTA, PEDIU, MANDOU], van);
+    const urls = van.pedidos.map((x) => `${x.metodo} ${x.url}`);
+    const iCpf = urls.findIndex((u) => /cpf-existe\?cpf=12345678909$/.test(u));
+    const iFicha = urls.findIndex((u) => /^GET .*\/clientes\/88$/.test(u));
+    const iPost = urls.findIndex((u) => /^POST .*\/clientes\/88\/telefones$/.test(u));
+    ok("145a sem cadastro pelo telefone, procura o CPF que o cliente mandou", iCpf >= 0, JSON.stringify(urls));
+    ok("lê a ficha inteira antes de acrescentar o número", iFicha > iCpf && iPost > iFicha, JSON.stringify(urls));
+    const corpo = JSON.parse((posts(van)[0] || {}).corpo || "{}");
+    ok("e acrescenta o número desta conversa, como o painel escreve", corpo.numero === "(71) 98888-1111", JSON.stringify(corpo));
+    ok("liga a conversa ao cadastro achado", contato(c.t).vantoro_cliente_id === 88 && contato(c.t).vantoro_nome === NOME, JSON.stringify(contato(c.t)));
+    const n = notasDe(c.t)[0] || {};
+    ok("deixa a nota do Quazar dizendo o que fez", notasDe(c.t).length === 1 && n.autor === "Quazar" && !n.autor_id && n.conversa_id === "c1"
+       && /localizou, pelo nome e pelo CPF que o cliente mandou, o cadastro de MARIA DAS GRAÇAS SOUZA/.test(n.texto || "")
+       && /acrescentou este número \(\(71\) 98888-1111\) ao cadastro, como mais um telefone/.test(n.texto || ""), JSON.stringify(notasDe(c.t)));
+    ok("e o CPF não vai para a nota", !cpfEm(n.texto));
+    ok("lê o caso pelo cadastro achado", urls.some((u) => /\/clientes\/88\/contexto$/.test(u)) && /Conclusos para despacho/.test(c.ped), c.ped.slice(0, 900));
+    ok("o pedido diz que localizou o cadastro e atualizou o número", /<identificacao>/.test(c.ped) && /este número de WhatsApp foi acrescentado/.test(c.ped),
+       c.ped.slice(-900));
+    ok("e as regras dizem como pedir os dados e que o CPF nunca vai na mensagem", /QUEM NÃO TEM CADASTRO/.test(c.sis)
+       && /peça o nome completo e o CPF juntos/.test(c.sis) && /Nunca escreva o CPF na mensagem/.test(c.sis), c.sis.slice(0, 300));
+    ok("a resposta resolve, e não marca que pediu os dados", c.linha.resposta_resolveu === true && c.linha.pediu_identificacao === false, JSON.stringify(c.linha));
+    ok("o log diz o que fez, sem o CPF", /quazar responde quem espera: identificou o cliente pelo CPF e acrescentou o número ao cadastro/.test(registro(c.t))
+       && !cpfEm(registro(c.t)), registro(c.t).slice(-400));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145b. sem o CPF ainda: pede o nome e o CPF, e não resolve ----
+  {
+    const van = await subirVantoro();
+    const c = await quemEspera([PERGUNTA], van);
+    ok("145b sem cadastro e sem CPF, o pedido manda pedir o nome completo e o CPF", /Peça ao cliente, numa frase só, o nome completo e o CPF/.test(c.ped),
+       c.ped.slice(-700));
+    ok("a resposta não resolve, mesmo com a IA dizendo que sim, e marca que pediu os dados",
+       c.linha.resposta_resolveu === false && c.linha.pediu_identificacao === true, JSON.stringify(c.linha));
+    ok("e não consulta o CPF nem mexe em nada", !van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length
+       && !contato(c.t).vantoro_cliente_id && !notasDe(c.t).length, JSON.stringify(van.pedidos.map((x) => x.url)));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145c. os outros desfechos ----
+  for (const [nome, mensagens, cena, frase, pediu] of [
+    ["o CPF sem o nome", [PERGUNTA, PEDIU, msg("m5", "contato", "123.456.789-09", haDias(4.8))], {}, /Peça o nome completo, como está nos documentos/, true],
+    ["o nome que não confere, depois de pedir", [PERGUNTA, PEDIU, msg("m5", "contato", "12345678909", haDias(4.8)),
+      quazar("m6", "Pode me mandar o seu nome completo?", haDias(4.7)), msg("m7", "contato", "Joana Pereira", haDias(4.6))], {},
+     /não permitem confirmar o cadastro/, false],
+    ["o CPF inválido", [PERGUNTA, PEDIU, msg("m5", "contato", "Maria das Graças Souza, CPF 123.456.789-00", haDias(4.8))], {}, /não formam um CPF válido/, true],
+    ["o CPF sem cadastro", [PERGUNTA, PEDIU, MANDOU], { cpfs: {} }, /Não há cadastro no escritório com o CPF/, false],
+    ["o telefone do próprio cliente escrito na mensagem", [PERGUNTA, PEDIU, msg("m5", "contato", "Meu número é 71988881111", haDias(4.8))], {},
+     /Peça ao cliente, numa frase só, o nome completo e o CPF/, true],
+    ["o nome que só confere no primeiro nome", [PERGUNTA, PEDIU, msg("m5", "contato", "Maria Pereira, CPF 123.456.789-09", haDias(4.8))], {},
+     /Peça o nome completo, como está nos documentos/, true],
+    // O QUE VEIO ANTES DA ÚLTIMA FALA DA EQUIPE a equipe já viu: não conta.
+    ["o CPF de antes da última fala da equipe", [msg("m2", "contato", "Maria das Graças Souza, CPF 123.456.789-09", haDias(6.5)),
+      msg("m2b", "advogado", "Recebido, obrigada.", haDias(6)), PERGUNTA], {}, /Peça ao cliente, numa frase só, o nome completo e o CPF/, true],
+  ]) {
+    const van = await subirVantoro(cena);
+    const c = await quemEspera(mensagens, van);
+    ok(`145c ${nome}: o pedido diz o que fazer`, frase.test(c.ped), c.ped.slice(-700));
+    ok("e não acrescenta número, não liga a conversa e não deixa nota", !posts(van).length && !contato(c.t).vantoro_cliente_id && !notasDe(c.t).length,
+       JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    ok(`a resposta não resolve, e ${pediu ? "marca" : "não marca"} que pediu os dados`, c.linha.resposta_resolveu === false
+       && c.linha.pediu_identificacao === pediu, JSON.stringify(c.linha));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145d. o número que já estava no cadastro ----
+  {
+    const van = await subirVantoro({ telefones: [{ numero: "(71) 98888-1111", digitos: "71988881111" }] });
+    const c = await quemEspera([PERGUNTA, PEDIU, MANDOU], van);
+    ok("145d o número que já estava no cadastro não é mandado de novo", !posts(van).length, JSON.stringify(van.pedidos.map((x) => x.url)));
+    ok("e a conversa é ligada, com a nota dizendo que ele já estava", contato(c.t).vantoro_cliente_id === 88
+       && /este número já estava no cadastro/.test((notasDe(c.t)[0] || {}).texto || ""), JSON.stringify(notasDe(c.t)));
+    ok("o pedido diz que localizou o cadastro", /este número já estava nele/.test(c.ped) && c.linha.resposta_resolveu === true, c.ped.slice(-500));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145d2. o aviso automático no meio não apaga o CPF (ele não é a equipe) ----
+  {
+    const van = await subirVantoro();
+    const c = await quemEspera([PERGUNTA, PEDIU, MANDOU, msg("m6", "advogado", "Aviso de audiência.", haDias(4.7), { automatica: true }),
+      msg("m7", "contato", "?", haDias(4.6))], van);
+    ok("145d2 o aviso automático no meio não apaga o CPF que o cliente mandou", posts(van).length === 1 && contato(c.t).vantoro_cliente_id === 88,
+       JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145e. o Vantoro que recusa o número; a ficha que não vem ----
+  for (const [nome, cena, porQue] of [["o Vantoro que recusa o número", { recusaNumero: true }, /recusou acrescentar o número ao cadastro \(500\)/],
+                                       ["a ficha que não vem", { semFicha: true }, null]]) {
+    const van = await subirVantoro(cena);
+    const c = await quemEspera([PERGUNTA, PEDIU, MANDOU], van);
+    ok(`145e ${nome}: nada muda (nem o vínculo, nem a nota)`, !contato(c.t).vantoro_cliente_id && !notasDe(c.t).length
+       && (cena.semFicha ? !posts(van).length : true), JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    ok("o pedido manda dizer que a equipe confirma o cadastro, e a resposta não resolve",
+       /não deu para consultar o cadastro agora/.test(c.ped) && c.linha.resposta_resolveu === false && c.linha.pediu_identificacao === false,
+       JSON.stringify(c.linha));
+    if (porQue) ok("e o log diz por quê", porQue.test(registro(c.t)), registro(c.t).slice(-400));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145f. com um cadastro pelo telefone, nada disso ----
+  {
+    const van = await subirVantoro({ porTelefone: [{ id: 5 }] });
+    const c = await quemEspera([PERGUNTA, PEDIU, MANDOU], van);
+    ok("145f com um cadastro pelo telefone, não consulta o CPF nem pede os dados",
+       !van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !/<identificacao>/.test(c.ped) && !posts(van).length, c.ped.slice(-500));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145g. sem a coluna do 071 ----
+  {
+    const van = await subirVantoro();
+    const c = await quemEspera([PERGUNTA], van, { semColunas: { zorvin_quazar_faxina: ["pediu_identificacao"] } });
+    ok("145g sem a coluna do 071, a resposta sai assim mesmo", c.linha.resposta === "na_fila" && (c.t.sb.dados.fila_envio || []).length === 1,
+       JSON.stringify(c.linha));
+    ok("e o log diz qual script falta", /pediu_identificacao — rode sql\/automaticos\/071-o-quazar-pede-o-nome-e-o-cpf\.sql/.test(registro(c.t)),
+       registro(c.t).slice(-400));
+    await c.parar(); await van.parar();
+  }
+
+  // ---- 145h. de dia, em ensaio: procura, lê o caso, e não grava nada ----
+  {
+    const claude = await subirClaude();
+    const van = await subirVantoro();
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro", QUAZAR_DIA_PRIMEIRA_MS: "200", QUAZAR_DIA_INTERVALO_MS: "400" }, {
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria" }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aguardando" }],
+        mensagens: [msg("m3", "contato", "Bom dia, como está meu processo?", haMin(8)),
+                    msg("m4", "contato", "Maria das Graças Souza 123.456.789-09", haMin(5))],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_quazar_noturno: [], fila_envio: [], notas: [],
+      },
+      rpcs: { zorvin_quazar_de_dia_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || []).some((q) => q.cliente_ate_id === "m4") ? []
+        : [{ conversa_id: "c1", advogado_id: TELEFONE.id, telefone: "SAC", departamento: "Sucesso do Cliente", fuso: "America/Sao_Paulo",
+             cliente_ate: haMin(5), cliente_ate_id: "m4" }] }) },
+    });
+    await esperaAte(() => (t.sb.dados.zorvin_quazar_noturno || []).some((l) => l.status === "pronta"));
+    const l = (t.sb.dados.zorvin_quazar_noturno || [])[0] || {};
+    const ped = pedidoDe(claude.pedidos[0]);
+    ok("145h de dia, em ensaio, procura o CPF e lê o caso pelo cadastro achado",
+       van.pedidos.some((x) => /cpf-existe\?cpf=12345678909$/.test(x.url)) && van.pedidos.some((x) => /\/clientes\/88\/contexto$/.test(x.url))
+       && /Conclusos para despacho/.test(ped), JSON.stringify(van.pedidos.map((x) => x.url)));
+    ok("e não grava nada: nem o número, nem o vínculo, nem a nota", !posts(van).length && !contato(t).vantoro_cliente_id && !notasDe(t).length,
+       JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    ok("o pedido diz que é ensaio, e o registro diz o que ele faria", /É ensaio: o número não foi acrescentado/.test(ped)
+       && /acrescentaria o número \(no ensaio, nada foi gravado\)/.test(l.contexto || ""), l.contexto);
+    ok("e as regras do dia dizem como pedir os dados", /QUEM NÃO TEM CADASTRO/.test(sistemaDe(claude.pedidos[0])));
+    await t.parar(); await claude.parar(); await van.parar();
+  }
+
+  // ---- 145i. à noite: valendo e na janela grava; fora da janela, não chama o Vantoro; em ensaio, não grava ----
+  const ATE = new Date(AGORA + 9 * 3600000).toISOString();
+  for (const [nome, modo, janela, grava, chama, cena] of [
+    ["valendo, dentro da janela do Vantoro", "valendo", true, true, true, {}],
+    ["valendo, fora da janela do Vantoro", "valendo", false, false, false, {}],
+    ["em ensaio, dentro da janela", "ensaio", true, false, true, {}],
+    ["valendo, com um cadastro pelo telefone", "valendo", true, false, true, { porTelefone: [{ id: 5 }] }],
+  ]) {
+    const claude = await subirClaude();
+    const van = await subirVantoro(cena);
+    const item = { conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo,
+                   fuso: "America/Sao_Paulo", ate: ATE, fechou_em: haMin(240), cliente_ate: haMin(5), cliente_ate_id: "m4" };
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro", QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400",
+      VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: janela ? "24" : "0", VANTORO_ACORDADO_SABADO: "1", VANTORO_ACORDADO_DOMINGO: "1" }, {
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria" }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+        mensagens: [msg("m1", "advogado", "Combinado.", haMin(600)), msg("m3", "contato", "Boa noite, como está meu processo?", haMin(10)),
+                    msg("m4", "contato", "Maria das Graças Souza, CPF 123.456.789-09", haMin(5))],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_fora_do_horario: [{ departamento_id: 1, ligada: true, texto: "Pronta.", quazar: modo }],
+        zorvin_respostas_automaticas: [], zorvin_quazar_noturno: [], fila_envio: [], notas: [],
+      },
+      rpcs: { zorvin_quazar_noturno_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || [])
+        .some((q) => q.cliente_ate_id === "m4") ? [] : [item] }) },
+    });
+    await esperaAte(() => (t.sb.dados.zorvin_quazar_noturno || []).some((l) => ["pronta", "enviada"].includes(l.status)), 9000);
+    const ped = pedidoDe(claude.pedidos[0]);
+    if (grava) {
+      ok(`145i ${nome}: acha o cadastro, acrescenta o número e liga a conversa`, posts(van).length === 1 && contato(t).vantoro_cliente_id === 88
+         && (notasDe(t)[0] || {}).autor === "Quazar", JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+      ok("e à noite não lê o caso, e as regras dizem para continuar sem falar do processo",
+         !van.pedidos.some((x) => /contexto/.test(x.url)) && /mesmo com o cadastro localizado, você continua sem enxergar o processo/.test(sistemaDe(claude.pedidos[0])));
+    } else if (cena.porTelefone) {
+      ok(`145i ${nome}: procura pelo telefone, e não consulta o CPF nem pede os dados`, van.pedidos.some((x) => /buscar\?telefone=/.test(x.url))
+         && !van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length && !/<identificacao>/.test(ped),
+         JSON.stringify(van.pedidos.map((x) => x.url)));
+    } else if (chama) {
+      ok(`145i ${nome}: procura, mas não grava`, van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length
+         && !contato(t).vantoro_cliente_id && !notasDe(t).length && /É ensaio/.test(ped), JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    } else {
+      ok(`145i ${nome}: não chama o Vantoro, e diz que a equipe confirma`, !van.pedidos.length && /não deu para consultar o cadastro agora/.test(ped),
+         JSON.stringify(van.pedidos.map((x) => x.url)));
+    }
+    ok("e o CPF não vai para o log", !cpfEm(registro(t)), registro(t).slice(-300));
+    await t.parar(); await claude.parar(); await van.parar();
   }
 }
 
