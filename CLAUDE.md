@@ -77,11 +77,13 @@ Variáveis de ambiente (no Render):
   resposta". **Opcional: sem ela, a IA pesquisa quando a pergunta do cliente é
   de fora do que o escritório sabe.** Ver "O "Sugerir resposta" pesquisa na
   internet (19/11)".
-- `QUAZAR_DIA` — `desligado` faz o Quazar não escrever o ensaio de dia (o
-  SAC). **Opcional: sem ela, ele escreve nos telefones em ensaio** (e só com
+- `QUAZAR_DIA` — `desligado` faz o Quazar de dia parar: nem o ensaio, nem a
+  resposta aos contatos novos dos telefones que valem. **Opcional: sem ela, ele
+  escreve nos telefones em ensaio e responde nos que valem** (e só com
   `ANTHROPIC_API_KEY`). `QUAZAR_DIA_INTERVALO_MS`, `QUAZAR_DIA_PRIMEIRA_MS` e
   `QUAZAR_DIA_QUIETO_S` são para a bancada. Ver "O Quazar de dia no SAC, em
-  ensaio (script 061, 19/11)".
+  ensaio (script 061, 19/11)" e "O Quazar de dia, valendo: os contatos novos
+  (script 072, 25/11)".
 - `QUAZAR_MODELO_BASTIDORES` — o modelo das tarefas de bastidor do Quazar
   (ler as conversas para aprender e ler as respostas aos avisos). **Opcional**,
   padrão `claude-haiku-5-5`. Ver "O gasto do Quazar (script 058, 08/11)".
@@ -5404,6 +5406,89 @@ cópias de controle passaram inteiras):
   sem o contato ligado (procura pelo telefone, e não acha) (5); o caso no
   "Melhorar o texto"; o log com o que está no caso; o log sem dizer o caso
   (pega pela 62).
+
+### O Quazar de dia, valendo: os contatos novos (script 072, 25/11)
+
+Pedido do Rodrigo: *"E já pode ativar as respostas do Quazar para novos
+clientes. novos contatos"*. Até aqui o Quazar de dia (061) só escrevia em
+ensaio: a resposta ficava guardada, e nada ia ao cliente. Agora, nos telefones
+**valendo**, a resposta vai ao cliente.
+
+`sql/automaticos/072-o-quazar-de-dia-valendo.sql`:
+
+| peça | o quê |
+|---|---|
+| `zorvin_quazar_de_dia.modo` | ganha `valendo` (ao lado de `desligado` e `ensaio`). A regra do 061 nasceu sem nome: sai toda regra que fala do modo, e entra `zorvin_quazar_de_dia_modo_valido` |
+| `zorvin_quazar_de_dia_pendentes` | a do 061, que diz o `modo` de cada conversa, e **não oferece a linha caída (070) quando vale**: a mensagem não sairia, e a IA seria paga à toa. No ensaio a linha caída continua (nada sai). **É a versão de referência** (regra 5) |
+| a semente `quazar:dia-valendo-sdc-comercial-072` | liga, uma vez, os telefones ativos do Sucesso do Cliente (`slug` `sdc`) e do Comercial (pelo nome sem acento, a chave do 025). Desligado depois, rodar a pasta de novo não religa |
+
+**Quem o Quazar responde não muda** (o 061): a conversa em "Novos" (ninguém da
+equipe respondeu), a última mensagem do cliente, quieto há 1 minuto, nas
+últimas 12 horas, o escritório aberto, sem grupo nem arquivada, e nada da
+equipe saindo na fila. **Ele conversa**: cada mensagem nova do cliente, enquanto
+a conversa está em "Novos", ganha uma resposta. **Quando alguém da equipe
+responde, a conversa vai para "Em Atendimento", e o Quazar sai dela.**
+
+**A ponte** (`quazarDeDia`, no `index.js`):
+
+- **a reserva diz o modo** (`modo` 'valendo' ou 'ensaio' na linha
+  `zorvin_quazar_noturno`, `periodo = 'dia'`);
+- **valendo, a resposta pronta vai pela fila** com a régua da noite
+  (`mandarANoite`): antes de pôr na fila, confere se o cliente escreveu de novo
+  enquanto a IA pensava (refazer) ou se a equipe entrou na conversa (largar). Os
+  dois soltam a vez e **esperam 1, 5 e 30 minutos** (a lição de 24/11);
+- **na fila**, `pelo_quazar` e `enviado_por` "Quazar" (059): sai sem marcar a
+  conversa como lida, e entra na conversa como automática, sem tirar o cliente
+  de "Novos" nem contar como resposta da equipe (037);
+- **o registro diz `enviada`**, com o `fila_id`;
+- **as regras são as do dia, sem o "é ensaio"** (`QUAZAR_DIA_REGRAS_VALENDO`):
+  a primeira linha diz que a mensagem vai direto ao cliente, sem ninguém da
+  equipe ler antes. O resto é o mesmo: apresenta-se pelo nome na primeira
+  mensagem, conta o andamento em linguagem simples, não promete prazo nem
+  resultado, não pede senha, os assuntos que só a equipe responde (19/11);
+- **a primeira mensagem** é a que não tem nem ensaio nem resposta de verdade do
+  Quazar nas últimas 12 horas: na segunda ele não se apresenta de novo;
+- **quem não tem ficha** (071): valendo, o número achado pelo CPF é
+  **acrescentado de verdade** no Vantoro, a conversa é ligada e a nota do
+  Quazar fica (no ensaio, nada é gravado);
+- **o log** diz "resposta enviada ao cliente", só com números.
+
+**E o rótulo das mensagens do Quazar no pedido da sugestão** (`linhaParaOCopiloto`)
+deixou de dizer "fora do horário": ele responde de dia também. Fica de fora da
+prova, e é decisão: é uma palavra no pedido, e nenhuma conferência a lia.
+
+**O que fica de fora, e é decisão:**
+
+- **os outros departamentos** (Acordos, Interno): o Quazar não responde lá (o
+  pedido do Rodrigo de 25/11). A chave é por telefone, e ainda não há tela; por
+  enquanto, pelo conector do Supabase;
+- **o Quazar de dia e o que responde quem espera (069) não se cruzam**: o de dia
+  só olha as últimas 12 horas, e o 069 não responde quem já recebeu uma mensagem
+  do Quazar depois da que leu.
+
+Provas: seção 147 (o 072 num Postgres de verdade, com a função da linha caída
+recortada do próprio 070, 27 conferências), seção 148 (a ponte, 13) e a cena
+145h-bis (o CPF, valendo, grava de verdade).
+
+**22 sabotagens e 22 pegas**, todas limpas, rodadas em cópias e lidas uma a uma
+(e as três cópias de controle passaram inteiras):
+
+- a ponte de antes inteira (10 reprovações na 148 e 3 na 145);
+- **o 072:** o modo sem `valendo` (10); sem tirar a regra antiga (10); quem
+  espera só no ensaio; sem dizer o modo; sem a guarda da linha caída; a linha
+  caída também no ensaio; a semente em toda rodada; a semente sem o nome; a
+  semente sem o `slug`; a linha desativada ligada; a função para quem entrou;
+  sem a guarda do 070;
+- **a ponte:** valendo sem mandar (8); a reserva sempre ensaio; sem o item da
+  fila no registro; as regras de ensaio no valendo; a primeira sem olhar as do
+  Quazar; o refazer sem esperar (5 pedidos à IA em vez de 1); a identificação
+  sem gravar no valendo; o log de ensaio no valendo.
+
+**A primeira escrita da 147 errou duas vezes, e as duas eram dela:** o
+`item(conf, /valendo/)` achava a primeira linha da conferência ("o modo aceita
+valendo"), e a hora da mensagem lida pelo `pg` perdia os microssegundos (a
+lição do 050) e não cobria a mensagem. Hoje a 147 procura a linha pelo nome
+dela, e a hora vai pelo banco.
 
 ### O gasto do Quazar (script 058, 08/11)
 

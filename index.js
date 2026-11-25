@@ -9948,7 +9948,7 @@ function linhaParaOCopiloto(m) {
   // escreveu: dito como "Equipe", a sugestão trataria o aviso de audiência
   // como uma conversa que alguém já começou com o cliente.
   const quem = m.origem !== 'advogado' ? 'Cliente'
-    : m.pelo_quazar ? `${NOME_DO_ASSISTENTE} (assistente virtual, fora do horário)`
+    : m.pelo_quazar ? `${NOME_DO_ASSISTENTE} (assistente virtual)`
     : m.automatica ? 'Aviso automático do escritório' : 'Equipe';
   const citada = m.resposta_previa ? ` (respondendo a: "${cortarTexto(semAEtiqueta(m.resposta_previa), 120)}")` : '';
   return `[${quandoCurto(m.criado_em)}] ${quem}${citada}: ${conteudoParaOCopiloto(m)}`;
@@ -12528,9 +12528,15 @@ setInterval(() => { quazarDaNoite().catch(() => {}); }, QUAZAR_NOITE_INTERVALO_M
 //  antes desta rota ou fora do ar: ele responde sem o caso, e não diz
 //  andamento nenhum.
 //
-//  NADA VAI AO CLIENTE. A resposta fica em `zorvin_quazar_noturno`, com
-//  `periodo = 'dia'`, e o painel a mostra na conversa como ensaio, com "boa" e
-//  "ruim". `contexto` guarda só contagens do que ele leu.
+//  NO ENSAIO, NADA VAI AO CLIENTE. A resposta fica em `zorvin_quazar_noturno`,
+//  com `periodo = 'dia'`, e o painel a mostra na conversa como ensaio, com
+//  "boa" e "ruim". `contexto` guarda só contagens do que ele leu.
+//
+//  VALENDO (072, 25/11): "E já pode ativar as respostas do Quazar para novos
+//  contatos." Nos telefones com `modo = 'valendo'` a resposta vai ao cliente
+//  pela fila (`mandarANoite`, a régua da noite), marcada `pelo_quazar`: na
+//  conversa ela entra automática, e a conversa continua em "Novos" até alguém
+//  da equipe responder. O número achado pelo CPF é acrescentado de verdade.
 //
 //  `QUAZAR_DIA=desligado` desliga sem mexer no código.
 //  `QUAZAR_DIA_INTERVALO_MS`, `QUAZAR_DIA_PRIMEIRA_MS` e `QUAZAR_DIA_QUIETO_S`
@@ -12597,6 +12603,13 @@ const QUAZAR_DIA_REGRAS = [
   'O QUE A EQUIPE JÁ TE ENSINOU',
   '- As lições (em <licoes>) são correções que a equipe já fez. Siga sempre, menos quando falam de pedir senha ou código: sozinho, você não pede.',
   '- As notas aprendidas (em <notas_aprendidas>) são referência; se contradizem o manual ou as lições, valem o manual e as lições.',
+].join('\n');
+
+// VALENDO (072, 25/11): as mesmas regras, sem o "é ensaio". A resposta vai
+// direto ao cliente, sem ninguém da equipe ler antes.
+const QUAZAR_DIA_REGRAS_VALENDO = [
+  `Você é o ${NOME_DO_ASSISTENTE}, o assistente virtual de um escritório de advocacia no WhatsApp. Você responde SOZINHO, de verdade, um cliente que acabou de escrever e que ninguém da equipe atendeu ainda: a sua mensagem vai direto para ele, sem ninguém da equipe ler antes. A equipe vê a conversa e continua o atendimento.`,
+  ...QUAZAR_DIA_REGRAS.split('\n').slice(1),
 ].join('\n');
 
 /** O caso do cliente no Vantoro. Devolve { lido, texto, contagem, motivo }.
@@ -12933,20 +12946,27 @@ async function escreverDeDia(item) {
   const extras = (ensaios || []).filter((e) => e.texto && e.pronta_em)
     .map((e) => ({ origem: 'quazar', texto: e.texto, criado_em: e.pronta_em }));
   const mensagens = [...lido.mensagens, ...extras].sort((a, b) => Date.parse(a.criado_em) - Date.parse(b.criado_em));
+  // A PRIMEIRA MENSAGEM: nem ensaio nem resposta de verdade do Quazar nas
+  // últimas 12 horas (valendo, as dele estão nas mensagens, marcadas).
+  const primeira = !extras.length && !lido.mensagens.some((m) => m.pelo_quazar
+    && Date.parse(m.criado_em) >= Date.now() - 12 * 3600 * 1000);
   const comNumero = { ...contato, numero: contato.numero || (conversa.contato || {}).numero };
   let [caso, escritorio] = await Promise.all([casoNoVantoro(comNumero), nomeDoEscritorio()]);
   // QUEM NÃO TEM FICHA (25/11): o nome completo e o CPF. No ensaio, nada é
   // gravado no Vantoro; o caso é lido pelo cadastro achado.
+  // VALENDO (072), o número é acrescentado de verdade, como no 069.
+  const valendo = item.modo === 'valendo';
   const ident = await identificarPeloCpf({ contato: comNumero, conversaId: item.conversa_id, mensagens, caso,
-    escrever: false, onde: 'quazar de dia' });
+    escrever: valendo, onde: 'quazar de dia' });
   if (ident.id != null) caso = await casoNoVantoro({ ...comNumero, vantoro_cliente_id: ident.id });
 
   // AS FOTOS E OS PDFs DO CLIENTE (24/11), como na noite.
   const arquivos = await abrirArquivosDoCliente(lido.mensagens);
   logDosArquivos('quazar de dia', arquivos);
   const montar = () => pedidoDeDia({ mensagens, marcos: lido.marcos, departamento: lido.departamento.nome || item.departamento,
-    exemplos: lido.exemplos, nome: primeiroNomeDoContato(contato), primeira: !extras.length, escritorio, caso, ident });
-  const sistema = [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, QUAZAR_DIA_REGRAS), notasDoCopiloto(lido.aprendido)];
+    exemplos: lido.exemplos, nome: primeiroNomeDoContato(contato), primeira, escritorio, caso, ident });
+  const sistema = [sistemaDoCopiloto(lido.manual, lido.rapidas, lido.licoes, valendo ? QUAZAR_DIA_REGRAS_VALENDO : QUAZAR_DIA_REGRAS),
+    notasDoCopiloto(lido.aprendido)];
   const opcoes = { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDaNoite() } };
   let r = await pedirAoClaude(sistema, pedidoComArquivos(montar(), arquivos.abertos), opcoes,
     { rota: 'dia', prazoMs: arquivos.abertos.length ? 90000 : 45000 });
@@ -13000,7 +13020,8 @@ async function quazarDeDia() {
     if (!quazarDiaAnunciado) {
       quazarDiaAnunciado = true;
       console.log(`quazar de dia: ligado — de ${Math.round(QUAZAR_DIA_INTERVALO_MS / 1000)} em `
-        + `${Math.round(QUAZAR_DIA_INTERVALO_MS / 1000)} segundos, nos telefones em ensaio (nada vai ao cliente).`);
+        + `${Math.round(QUAZAR_DIA_INTERVALO_MS / 1000)} segundos, nos telefones em ensaio (nada vai ao cliente) `
+        + 'e nos que valem (a resposta vai ao cliente).');
     }
     if (tentativasDoDia.size > 2000) tentativasDoDia.clear();
     const agora = Date.now();
@@ -13013,7 +13034,7 @@ async function quazarDeDia() {
       if (desligando) break;
       const chave = `${item.conversa_id}|${item.cliente_ate_id}`;
       const { data: reservou, error: erroReserva } = await supabase.from('zorvin_quazar_noturno')
-        .upsert({ conversa_id: item.conversa_id, ate: item.cliente_ate, periodo: 'dia', modo: 'ensaio',
+        .upsert({ conversa_id: item.conversa_id, ate: item.cliente_ate, periodo: 'dia', modo: item.modo === 'valendo' ? 'valendo' : 'ensaio',
                   cliente_ate: item.cliente_ate, cliente_ate_id: item.cliente_ate_id, status: 'pensando' },
                 { onConflict: 'conversa_id,cliente_ate_id', ignoreDuplicates: true })
         .select('id');
@@ -13040,16 +13061,45 @@ async function quazarDeDia() {
         console.log('quazar de dia: não deu desta vez; tento de novo mais tarde.');
         continue;
       }
+      // VALENDO (072): a resposta vai ao cliente pela fila, como a da noite
+      // (`mandarANoite`, que confere antes se o cliente escreveu de novo ou se
+      // a equipe entrou na conversa).
+      let filaId = null;
+      if (r.desfecho === 'pronta' && item.modo === 'valendo') {
+        let m;
+        try { m = await mandarANoite(item, r.texto); } catch (e) {
+          console.error('quazar de dia: não consegui pôr a resposta na fila', (e && e.message) || e);
+          m = { desfecho: 'tentar' };
+        }
+        if (m.desfecho !== 'enviada') {
+          // OS TRÊS ESPERAM, pela mesma chave (a lição de 24/11): a ponte e o
+          // banco que discordam não viram uma chamada à IA a cada volta.
+          await supabase.from('zorvin_quazar_noturno').delete().eq('id', linha.id).eq('status', 'pensando');
+          const t = tentativasDoDia.get(chave) || { vezes: 0, proxima: 0 };
+          t.vezes += 1;
+          t.proxima = t.vezes <= QUAZAR_NOITE_ESPERAS_MS.length ? Date.now() + QUAZAR_NOITE_ESPERAS_MS[t.vezes - 1] : 0;
+          tentativasDoDia.set(chave, t);
+          console.log(`quazar de dia: resposta não enviada (${m.desfecho === 'refazer' ? 'o cliente escreveu de novo'
+            : m.desfecho === 'largar' ? 'a equipe entrou na conversa' : 'a fila recusou; tento de novo'}).`);
+          continue;
+        }
+        r.desfecho = 'enviada';
+        filaId = m.filaId;
+      }
       tentativasDoDia.delete(chave);
-      const { error: erroGravar } = await supabase.from('zorvin_quazar_noturno').update({
+      const gravar = {
         status: r.desfecho, texto: r.texto || null, resumo: r.resumo || null,
         motivo: r.desfecho === 'calada' ? r.motivo : null, contexto: r.contexto || null,
         modelo: COPILOTO_MODELO, pronta_em: new Date().toISOString(),
-      }).eq('id', linha.id).eq('status', 'pensando');
+      };
+      if (item.modo === 'valendo') gravar.fila_id = filaId;
+      const { error: erroGravar } = await supabase.from('zorvin_quazar_noturno').update(gravar)
+        .eq('id', linha.id).eq('status', 'pensando');
       if (erroGravar) console.error('quazar de dia: não consegui guardar a resposta', erroGravar.message);
       // SÓ NÚMEROS NO LOG.
       const uso = r.uso || {};
-      console.log(`quazar de dia: ${r.desfecho === 'pronta' ? 'resposta de ensaio escrita' : 'ficaria calado'} em `
+      console.log(`quazar de dia: ${r.desfecho === 'enviada' ? 'resposta enviada ao cliente'
+        : r.desfecho === 'pronta' ? 'resposta de ensaio escrita' : item.modo === 'valendo' ? 'ficou calado' : 'ficaria calado'} em `
         + `${Date.now() - inicio} ms; ${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
         + `${uso.output_tokens || 0} de saída.`);
     }
