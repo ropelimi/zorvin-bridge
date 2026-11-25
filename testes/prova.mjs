@@ -22700,6 +22700,9 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
        && /de uma a duas nas seguintes/.test(sis), sis.slice(0, 1500));
     ok("e que decide antes se é \"o senhor\" ou \"a senhora\", sem se corrigir no meio do texto (24/11)",
        /COMO TRATAR O CLIENTE/.test(sis) && /nunca se corrija no meio do texto/.test(sis), sis.slice(-2500));
+    ok("e como chamar o cliente: o nome que ele disse na conversa, o do cadastro, ou só \"Oi!\" (25/11)",
+       /COMO CHAMAR O CLIENTE/.test(sis) && /chame-o pelo primeiro nome que ele disse/.test(sis)
+       && /use o primeiro nome do cadastro/.test(sis) && /cumprimente só com "Oi!"/.test(sis), sis.slice(-2500));
     ok("e que não diz o que um arquivo é pelo nome dele (a conta de luz chamada \"Boleto\") (23/11)",
        /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /uma conta de luz pode se chamar "Boleto"/.test(sis)
        && /nunca diga o que o arquivo é/.test(sis) && /não peça outro documento por causa do nome/.test(sis), sis.slice(-2500));
@@ -25215,8 +25218,11 @@ console.log("\n123. O Quazar de dia no SAC, em ensaio — a rodada da ponte");
     ok("e não diz o que um arquivo é pelo nome, nem repete o que já disse nas seguintes (23/11)",
        /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sis) && /uma conta de luz pode se chamar "Boleto"/.test(sis)
        && /Agradeça e confirme que recebeu; a equipe confere\./.test(sis) && /não repita o que você já disse ou pediu/.test(sis));
-    ok("e manda ele se apresentar pelo nome, com o nome do escritório",
-       ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")'), ped.slice(0, 600));
+    ok("e NÃO manda ele se apresentar: de dia o escritório está aberto (25/11, invertida)",
+       ped.includes("Não se apresente: o escritório está aberto.") && !ped.includes('apresente-se ("Sou o Quazar')
+       && /NÃO se apresente/.test(sis) && !/apresente-se pelo nome/.test(sis), ped.slice(0, 600));
+    ok("e diz como chamar o cliente: o nome que ele disse, o do cadastro, ou só \"Oi!\" (25/11)",
+       /COMO CHAMAR O CLIENTE/.test(sis) && /chame-o pelo primeiro nome que ele disse/.test(sis) && /cumprimente só com "Oi!"/.test(sis));
     ok("o log diz só números", /quazar de dia: resposta de ensaio escrita em \d+ ms/.test(t.registro.join(""))
        && !t.registro.join("").includes("Andreia"), t.registro.join("").slice(-300));
     await espera(900);
@@ -27139,8 +27145,8 @@ console.log("\n133. A faxina do Quazar — a rodada da ponte");
     const fila = t.sb.dados.fila_envio || [];
     ok("a pendente de 40 dias recebe a retomada, pela fila, marcada do Quazar", fila.length === 1 && fila[0].conversa_id === "cP40"
        && fila[0].pelo_quazar === true && fila[0].enviado_por === "Quazar" && fila[0].status === "pendente", JSON.stringify(fila));
-    ok("a mensagem: a saudação, o nome, o Quazar com o escritório, as desculpas e a pergunta",
-       /^(Bom dia|Boa tarde|Boa noite), Andreia! Aqui é o Quazar, assistente virtual do escritório Escritório de Prova\. Peço desculpas pela demora em responder a sua mensagem\. Você ainda precisa de ajuda com isso\? Se precisar, é só responder aqui que a nossa equipe retoma o seu atendimento\.$/
+    ok("a mensagem: a saudação, o nome, as desculpas e a pergunta, sem se apresentar (de dia, 25/11)",
+       /^(Bom dia|Boa tarde|Boa noite), Andreia! Peço desculpas pela demora em responder a sua mensagem\. Você ainda precisa de ajuda com isso\? Se precisar, é só responder aqui que a nossa equipe retoma o seu atendimento\.$/
          .test((fila[0] || {}).texto || ""), (fila[0] || {}).texto);
     const l40 = linhaDe(t, "cP40");
     ok("e a linha vira 'retomada', com a mensagem da fila", l40.status === "retomada" && l40.fila_id === (fila[0] || {}).id && Boolean(l40.retomada_em),
@@ -29003,9 +29009,9 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
     const ped = pedidoDe(claude.pedidos[0]);
     ok("o pedido diz há quantos dias ele espera, e manda pedir desculpas pela demora",
        /sem resposta da equipe há 5 dias: peça desculpas pela demora/.test(ped), ped.slice(0, 700));
-    ok("e manda ele se apresentar, com o nome do escritório, e chama o cliente pelo nome",
-       ped.includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")') && /Primeiro nome do cliente.*: Andreia\./.test(ped),
-       ped.slice(0, 700));
+    ok("e NÃO manda ele se apresentar (de dia, 25/11, invertida), e chama o cliente pelo nome do cadastro",
+       ped.includes("Não se apresente: o escritório está aberto.") && !ped.includes('apresente-se ("Sou o Quazar')
+       && /Primeiro nome do cliente.*: Andreia\./.test(ped), ped.slice(0, 700));
     ok("a mensagem sem resposta vai na conversa", /Como tiro a segunda via\?/.test(ped));
     const sis = sistemaDe(claude.pedidos[0]);
     ok("as regras: vai direto ao cliente, desculpas uma vez, resolveu só sem sobrar nada para a equipe",
@@ -29068,7 +29074,7 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
         (dados.zorvin_quazar_faxina || []).some((f) => f.resposta == null) ? [{ ...ITEM, cliente_ate_id: "m3b" }] : [] }) } });
     await esperaAte(() => claude.pedidos.length >= 1);
     const ped = pedidoDe(claude.pedidos[0]);
-    ok("141e quem ele já respondeu nesta espera não ouve a apresentação de novo", /Você já falou com este cliente: não se apresente de novo/.test(ped)
+    ok("141e quem ele já respondeu nesta espera: não repetir o que já disse", /Você já falou com este cliente nesta espera: não repita o que você já disse ou pediu/.test(ped)
        && /Você \(assistente virtual\): Sou o Quazar/.test(ped), ped.slice(0, 900));
     await t.parar(); await claude.parar();
   }
@@ -29946,8 +29952,9 @@ console.log("\n148. O Quazar de dia, valendo — a ponte manda");
     const sis = sistemaDe(claude.pedidos[0]);
     ok("148b as regras dizem que a mensagem vai direto ao cliente, e não que é ensaio",
        /a sua mensagem vai direto para ele/.test(sis) && !/Isto é um ENSAIO/.test(sis) && /Não pede senha/.test(sis), sis.slice(0, 400));
-    ok("e ele se apresenta pelo nome, com o nome do escritório",
-       pedidoDe(claude.pedidos[0]).includes('apresente-se ("Sou o Quazar, assistente virtual do escritório Escritório de Prova")'));
+    ok("e ele NÃO se apresenta: de dia o escritório está aberto (25/11, invertida)",
+       pedidoDe(claude.pedidos[0]).includes("Não se apresente: o escritório está aberto.")
+       && !pedidoDe(claude.pedidos[0]).includes('apresente-se ("Sou o Quazar') && /NÃO se apresente/.test(sis));
     await esperaAte(() => /quazar de dia: resposta enviada ao cliente/.test(t.registro.join("")), 3000);
     ok("o log diz que enviou, só com números", /quazar de dia: resposta enviada ao cliente em \d+ ms/.test(t.registro.join(""))
        && !t.registro.join("").includes("Andreia"), t.registro.join("").slice(-400));
@@ -29995,9 +30002,33 @@ console.log("\n148. O Quazar de dia, valendo — a ponte manda");
       rpcs: { zorvin_quazar_de_dia_pendentes: pendentes() } });
     await esperaAte(() => claude.pedidos.length >= 1);
     const ped = pedidoDe(claude.pedidos[0]);
-    ok("148d na segunda mensagem do mesmo cliente, ele não se apresenta de novo",
-       /Você já respondeu este cliente: não se apresente de novo/.test(ped) && !/primeira mensagem para este cliente/.test(ped), ped.slice(0, 800));
+    ok("148d na segunda mensagem do mesmo cliente, ele não repete o que já disse",
+       /Você já respondeu este cliente: não repita o que você já disse ou pediu/.test(ped) && !/primeira mensagem para este cliente/.test(ped), ped.slice(0, 800));
     ok("e a resposta dele de antes aparece como a do assistente virtual", /Você \(assistente virtual\): Bom dia! Sou o Quazar\./.test(ped), ped.slice(-600));
+    await t.parar(); await claude.parar();
+  }
+
+  // ---- 148e. sem cadastro, o nome do WhatsApp não chega ao Quazar (25/11) ----
+  // O relato: o perfil do WhatsApp era um apelido, e o Quazar escreveu "Boa
+  // tarde" com ele, com o cliente tendo dito o próprio nome na conversa.
+  {
+    const claude = await subirClaude();
+    const t = await subirTudo(rapido(claude), { tabelas: tabelas({
+      contatos: [{ id: "k1", numero: "5571900000048", nome: "Chefinho Zap Apelido" }],
+      mensagens: [
+        { id: "m1", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Boa tarde", criado_em: haMin(7) },
+        { id: "m2", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Meu nome é Osvaldo Prova", criado_em: haMin(6) },
+        { id: "m3", conversa_id: "c1", origem: "contato", tipo: "texto", texto: "Bom dia, como está meu processo?", criado_em: haMin(5) },
+      ] }), rpcs: { zorvin_quazar_de_dia_pendentes: pendentes() } });
+    await esperaAte(() => claude.pedidos.length >= 1);
+    const ped = pedidoDe(claude.pedidos[0]);
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("148e sem cadastro, o nome do perfil do WhatsApp não vai no pedido", claude.pedidos.length >= 1
+       && !/Chefinho|Apelido/.test(ped) && !/Chefinho|Apelido/.test(sis), ped.slice(0, 900));
+    ok("e o pedido diz que não há nome no cadastro, e manda usar o que ele disse, ou só \"Oi!\"",
+       ped.includes('O cliente não tem nome no cadastro do escritório: chame-o pelo nome que ele disse na conversa, ou só "Oi!".')
+       && !/Primeiro nome do cliente/.test(ped), ped.slice(0, 900));
+    ok("e o nome que ele disse está na conversa, para a IA ler", /Cliente: Meu nome é Osvaldo Prova/.test(ped), ped.slice(-900));
     await t.parar(); await claude.parar();
   }
 }

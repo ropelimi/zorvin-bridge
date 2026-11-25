@@ -3776,9 +3776,10 @@ pela chave da ponte: ninguém pediu, e a lista do banco já é só do que ele po
 responder. Mais:
 
 - quando a equipe volta, por extenso, no fuso do departamento;
-- o primeiro nome do cliente, da ficha, do nome que a equipe deu ou do
+- ~~o primeiro nome do cliente, da ficha, do nome que a equipe deu ou do
   WhatsApp, nessa ordem, e arrumado ("ANDREIA" vira "Andreia"). A IA decide se
-  é nome de gente;
+  é nome de gente;~~ **desde 25/11, o do cadastro, e nunca o do WhatsApp**:
+  ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)";
 - se é a primeira mensagem dele nesta noite (é quando ele se apresenta);
 - a mensagem pronta que o cliente recebeu, na conversa;
 - **as respostas do ensaio desta noite, como se tivessem saído**. É a conversa
@@ -4437,8 +4438,8 @@ foi lido"): mais de um cadastro com o telefone, nenhum, o Vantoro sem a rota
 (404), fora do ar, em pausa (429), ou a ponte sem o Vantoro. O registro diz o
 motivo em `contexto`.
 
-**As regras do dia** (`QUAZAR_DIA_REGRAS`): é ensaio; apresenta-se pelo nome
-na primeira mensagem; conta o último andamento em linguagem simples e pede o
+**As regras do dia** (`QUAZAR_DIA_REGRAS`): é ensaio; ~~apresenta-se pelo nome
+na primeira mensagem~~ (desde 25/11 não se apresenta: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)"); conta o último andamento em linguagem simples e pede o
 documento de uma tarefa pendente que depende do cliente; **não promete prazo,
 data, valor nem resultado**; não cita número de processo inteiro, valor nem
 juiz; **não pede senha nem código** (a equipe pede quando for usar).
@@ -4633,11 +4634,11 @@ como em qualquer finalização. Nada se perde: o Reabrir também desfaz.
   volta à lista, com a mensagem nova.
 
 **A mensagem de retomada é fixa, e não escrita pela IA** (`mensagemDeRetomada`):
-*"Boa tarde, Maria! Aqui é o Quazar, assistente virtual do escritório X. Peço
-desculpas pela demora em responder a sua mensagem. Você ainda precisa de ajuda
-com isso? Se precisar, é só responder aqui que a nossa equipe retoma o seu
-atendimento."* A saudação é pela hora de Brasília, o nome é o que o Quazar
-leu (só se for nome de gente), e o escritório é `nome_do_escritorio` (059).
+*"Boa tarde, Maria! Peço desculpas pela demora em responder a sua mensagem.
+Você ainda precisa de ajuda com isso? Se precisar, é só responder aqui que a
+nossa equipe retoma o seu atendimento."* A saudação é pela hora de Brasília, e
+o nome é o que o Quazar leu. **Até 25/11 ela dizia "Aqui é o Quazar, assistente
+virtual do escritório X", e sem nome não dizia "Oi!"**: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)".
 Ela vai pela fila (`pelo_quazar`, `enviado_por` "Quazar"), e entra na conversa
 como automática (059): não tira o cliente da fila de espera nem conta como
 resposta.
@@ -5050,8 +5051,9 @@ rápidas, as lições, as notas, os exemplos, o caso no Vantoro e as fotos e os
 PDFs do cliente. As regras são outras (`QUAZAR_RESPONDE_REGRAS`):
 
 - **a mensagem vai direto ao cliente**: ninguém da equipe lê antes;
-- apresenta-se pelo nome **só na primeira mensagem desta espera** (a noite
-  pode já ter respondido; aí não se apresenta de novo);
+- ~~apresenta-se pelo nome **só na primeira mensagem desta espera** (a noite
+  pode já ter respondido; aí não se apresenta de novo);~~ **desde 25/11 não se
+  apresenta**: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)";
 - **pede desculpas pela demora, uma vez**, sem inventar motivo;
 - responde o que o manual, as lições, os exemplos e o caso respondem; o
   andamento em linguagem simples; o que não consegue resolver, diz que a
@@ -5443,8 +5445,8 @@ responde, a conversa vai para "Em Atendimento", e o Quazar sai dela.**
 - **o registro diz `enviada`**, com o `fila_id`;
 - **as regras são as do dia, sem o "é ensaio"** (`QUAZAR_DIA_REGRAS_VALENDO`):
   a primeira linha diz que a mensagem vai direto ao cliente, sem ninguém da
-  equipe ler antes. O resto é o mesmo: apresenta-se pelo nome na primeira
-  mensagem, conta o andamento em linguagem simples, não promete prazo nem
+  equipe ler antes. O resto é o mesmo: ~~apresenta-se pelo nome na primeira
+  mensagem~~ (desde 25/11 não se apresenta: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)"), conta o andamento em linguagem simples, não promete prazo nem
   resultado, não pede senha, os assuntos que só a equipe responde (19/11);
 - **a primeira mensagem** é a que não tem nem ensaio nem resposta de verdade do
   Quazar nas últimas 12 horas: na segunda ele não se apresenta de novo;
@@ -5489,6 +5491,43 @@ recortada do próprio 070, 27 conferências), seção 148 (a ponte, 13) e a cena
 valendo"), e a hora da mensagem lida pelo `pg` perdia os microssegundos (a
 lição do 050) e não cobria a mensagem. Hoje a 147 procura a linha pelo nome
 dela, e a hora vai pelo banco.
+
+### O nome que o cliente disse, e de dia sem se apresentar (25/11)
+
+Relato do Rodrigo, com a foto de um ensaio do Quazar de dia: o contato não
+tinha ficha no Vantoro, o perfil do WhatsApp dele era um apelido, e o Quazar
+escreveu "Boa tarde" com o apelido, embora o cliente tivesse dito o próprio
+nome na conversa. *"Nesse caso deveria chamar ele pelo nome que ele se
+apresentou. Quando não tiver o nome, não deve chamar pelo nome do WhatsApp,
+deve apenas dizer "Oi". E quando for horário de expediente, o Quazar não deve
+se apresentar."*
+
+**Medido em 25/11, só contando:** nenhuma resposta do Quazar de dia saiu ao
+cliente entre o 072 (16:46) e esta correção. A da foto foi um ensaio, às
+16:41.
+
+| | antes | agora |
+|---|---|---|
+| o nome que vai à IA (`primeiroNomeDoContato`) | a ficha, o nome que a equipe deu ou o do WhatsApp | **só a ficha ou o nome que a equipe deu**. O do WhatsApp não chega à IA |
+| como chamar (`regraDoNome`, na noite, no dia e em quem espera) | — | o primeiro nome que o cliente disse na conversa, mesmo que o cadastro diga outro (quem escreve pode ser outra pessoa); senão o do cadastro; **sem nenhum dos dois, só "Oi!"** |
+| a linha do pedido (`linhaDoNomeDoCliente`) | "Não sabemos o nome do cliente." | "O cliente não tem nome no cadastro do escritório: chame-o pelo nome que ele disse na conversa, ou só "Oi!"." |
+| de dia (os contatos novos, ensaio e valendo) e em quem espera | "Sou o Quazar, assistente virtual do escritório X" na primeira mensagem | **não se apresenta**. Só diz que é o assistente virtual se o cliente perguntar com quem está falando |
+| à noite | apresenta-se | igual: o escritório está fechado |
+| quem espera (069) | o nome que a faxina guardou, que podia ser o do WhatsApp | o do cadastro, e a IA lê o que o cliente disse na conversa |
+| a faxina (o `nome` que ela guarda) | "como o pedido diz, se for nome de gente" | o que o cliente disse na conversa, senão o do cadastro, senão vazio |
+| a retomada (`mensagemDeRetomada`) | "…! Aqui é o Quazar, assistente virtual do escritório X. Peço desculpas…" | "Boa tarde, Maria! Peço desculpas…", e sem nome "Oi! Peço desculpas…". Ela só sai no expediente (e, com o 065 e o 069, na prática não sai mais) |
+
+- **O "Sugerir resposta" não mudou**, e é decisão: lá o nome é o do alto da
+  conversa, preenchido pelo painel (`{nome}`), e a atendente lê antes de
+  mandar.
+- **Nenhum SQL.** As regras mudaram, e a primeira chamada de cada uma escreve
+  o cache de novo (uma vez).
+
+Prova: as seções 111 (a regra na noite), 123 e 148 (de dia, sem se apresentar,
+**invertidas**), 141 (quem espera, **invertida**), a retomada da faxina
+(**invertida**) e a cena 148e: sem cadastro, o nome do WhatsApp não vai no
+pedido nem nas regras, o pedido diz que não há nome no cadastro, e o nome que o
+cliente disse está na conversa.
 
 ### O gasto do Quazar (script 058, 08/11)
 
