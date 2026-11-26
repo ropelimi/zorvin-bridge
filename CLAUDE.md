@@ -5379,6 +5379,48 @@ cena seguinte tentava gravar nela, e a seção parou ali, sem dizer as
 conferências de depois. Hoje a cena confere a marca e, sem ela, reprova pelo
 nome e não segue.
 
+### O cliente que manda o nome e o CPF é vinculado sozinho (26/11)
+
+Relato do Rodrigo, com a foto de uma conversa: o telefone não estava na ficha
+do cliente, a atendente pediu, pelo "Sugerir resposta", o nome completo e o
+CPF, o cliente mandou, e nada foi vinculado. *"É possível o Quazar ter essa
+inteligência e autonomia?"* Até aqui a identificação do 071 só valia onde o
+Quazar responde sozinho; a conversa que a equipe atende ficava de fora. E,
+mesmo lá, contava só o que o cliente escreveu depois da última fala da
+equipe: no relato, a atendente respondeu depois do CPF.
+
+| caminho | o que faz |
+|---|---|
+| **a rodada em segundo plano** (`identificarQuemMandouOCpf`) | de 30 em 30 segundos, as mensagens de cliente dos últimos 30 minutos (na primeira volta depois de subir, das últimas 48 horas) com onze dígitos que formam um CPF válido; para cada conversa sem cadastro ligado (e sem grupo), até 5 por volta, a mesma `identificarPeloCpf` do 071, que confere o nome, lê a ficha, acrescenta o número, liga a conversa e deixa a nota do Quazar |
+| **o "Sugerir resposta"** | quando o caso diz que o telefone não tem cadastro, identifica na hora do clique (`escrever`), e, achando, lê o caso pelo cadastro achado: a sugestão já sai com o processo. O pedido leva o bloco `<identificacao>` |
+
+- **A janela é das mensagens do cliente nas últimas 24 horas**
+  (`IDENTIFICAR_JANELA_MS`, `mensagensDoClienteParaIdentificar`), e não "depois
+  da última fala da equipe": a equipe que respondeu depois do CPF não apagou o
+  que o cliente mandou. O que guarda contra o CPF de outra pessoa continua
+  sendo o nome que confere (o primeiro nome e um sobrenome).
+- **Não fala com o cliente**: só liga a conversa à ficha. Por isso vale em
+  todos os departamentos, inclusive no Acordos, onde o Quazar não responde.
+- **Uma vez por mensagem**: a mensagem do CPF resolvida (ligou, o nome não
+  confere, sem cadastro, já ligado) não é tentada de novo; o tropeço do Vantoro
+  espera 1, 5 e 30 minutos. A memória é da ponte, e a volta de depois de subir
+  pergunta de novo pelas 48 horas (o que já foi ligado sai pelo vínculo).
+- **Duas identificações da mesma conversa ao mesmo tempo são uma**
+  (`identificacoesEmVoo`): a rodada e o clique não acrescentam o número duas
+  vezes.
+- **O CPF nunca vai para o log, para a nota nem para a mensagem**; o log diz só
+  quantas conversas foram ligadas.
+- **`QUAZAR_IDENTIFICAR=desligado`** desliga a rodada. `IDENTIFICAR_INTERVALO_MS`,
+  `IDENTIFICAR_PRIMEIRA_MS` e `IDENTIFICAR_RECENTE_MIN` são para a bancada.
+  Nenhum SQL.
+
+Prova: seção 154 (o relato, com a equipe respondendo depois do CPF; o nome
+que não confere, o contato já ligado, o grupo, o CPF de três dias atrás e
+desligado; a ficha que não vem; e o "Sugerir resposta" ligando e lendo o caso).
+**7 sabotagens, 6 pegas e uma que vaza com razão**: tirar a guarda do contato
+já ligado da rodada passa, porque `identificarPeloCpf` também recusa o contato
+com `vantoro_cliente_id` (a segunda guarda, a régua de 25/09).
+
 ### O "Sugerir resposta": só a mensagem, e com o caso do cliente (25/11)
 
 Relato do Rodrigo, com a foto de uma conversa do SAC: o "Sugerir resposta" pôs

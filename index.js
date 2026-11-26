@@ -10257,11 +10257,12 @@ async function casoParaASugestao(conversa) {
   }
 }
 
-function pedidoDoCopiloto({ mensagens, marcos = [], departamento, grupo, exemplos = [], caso = null }) {
+function pedidoDoCopiloto({ mensagens, marcos = [], departamento, grupo, exemplos = [], caso = null, ident = null }) {
   const linhas = [`Agora: ${agoraPorExtenso()} (horário de Brasília).`];
   if (departamento) linhas.push(`Departamento desta conversa: ${departamento}.`);
   if (grupo) linhas.push('Esta conversa é um GRUPO do WhatsApp: a mensagem vai para todos os participantes.');
   linhas.push(...blocoDoCasoNaSugestao(caso));
+  linhas.push(...blocoDaIdentificacao(ident));
   linhas.push('', ...blocoDosExemplos(exemplos), '<conversa>', ...conversaNoPedido(mensagens, linhaParaOCopiloto, marcos), '</conversa>', '',
     'Escreva a próxima mensagem da atendente, entre <mensagem> e </mensagem>, e nada antes nem depois delas.');
   return linhas.join('\n');
@@ -10769,12 +10770,22 @@ async function sugerirResposta(jwt, conversaId) {
   const conversa = (conversas || [])[0];
   if (!conversa) return { status: 404, corpo: { ok: false, erro: 'Não achei esta conversa.' } };
 
-  const [lido, caso] = await Promise.all([
+  let [lido, caso] = await Promise.all([
     lerParaOCopiloto(comoQuemPediu, conversa, conversaId),
     casoParaASugestao(conversa),
   ]);
   if (lido.falha) return lido.falha;
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
+  // QUEM NÃO TEM FICHA (26/11, pedido do Rodrigo): o cliente que mandou o
+  // nome completo e o CPF tem o cadastro achado no clique, o número
+  // acrescentado e a conversa ligada, como o Quazar faz quando responde
+  // sozinho. Quem clicou vê a conversa (ela foi lida como quem pediu). A
+  // janela é de 24 horas, de qualquer lado da resposta da equipe: a atendente
+  // pede os dados, o cliente manda, e só então ela clica.
+  const ident = grupo || !caso ? { estado: null } : await identificarPeloCpf({
+    contato: { id: conversa.contato_id, numero: (conversa.contato || {}).numero, vantoro_cliente_id: null },
+    conversaId, mensagens, caso, escrever: true, onde: 'copiloto', janelaMs: IDENTIFICAR_JANELA_MS });
+  if (ident.id != null) caso = await casoParaASugestao(conversa);
   // A PESQUISA NA INTERNET (19/11): as regras de quando usar vão no fim das
   // regras de sempre (um texto fixo, que o cache guarda junto), e a
   // ferramenta no pedido.
@@ -10785,7 +10796,7 @@ async function sugerirResposta(jwt, conversaId) {
   const documento = grupo ? null : ferramentaDoDocumento(caso, 'copiloto');
   const r = await pedirAoClaude(
     [sistemaDoCopiloto(manual, rapidas, licoes, regras), notasDoCopiloto(aprendido)],
-    pedidoDoCopiloto({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, exemplos, caso: grupo ? null : caso }),
+    pedidoDoCopiloto({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, exemplos, caso: grupo ? null : caso, ident }),
     comAFerramentaDoDocumento(pesquisa ? { ...PEDIDO_DA_SUGESTAO, tools: [pesquisa] } : PEDIDO_DA_SUGESTAO, documento),
     { rota: 'sugerir', prazoMs: pesquisa || documento ? 90000 : 45000, ferramentas: documento && documento.executores });
   if (!r.ok) {
@@ -10805,7 +10816,7 @@ async function sugerirResposta(jwt, conversaId) {
   // para lá (a régua da mídia recebida).
   const uso = (r.corpo && r.corpo.usage) || {};
   console.log(`copiloto: sugestão em ${Date.now() - inicio} ms — ${mensagens.length} mensagens lidas, `
-    + `${exemplos.length} exemplos de verdade, ${!caso || grupo ? 'sem o caso' : caso.lido ? `o caso lido (${caso.contagem})` : `o caso não lido (${caso.motivo})`}; `
+    + `${exemplos.length} exemplos de verdade, ${ident.estado ? `a identificação: ${ident.estado}, ` : ''}${!caso || grupo ? 'sem o caso' : caso.lido ? `o caso lido (${caso.contagem})` : `o caso não lido (${caso.motivo})`}; `
     + `${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
     + `${uso.output_tokens || 0} de saída`
     + `${pesquisasFeitas(r.corpo) ? `; ${pesquisasFeitas(r.corpo)} pesquisa(s) na internet` : ''}`
@@ -13188,7 +13199,36 @@ function telefoneLegivel(valor) {
  *
  *    caso       o que `casoNoVantoro` (ou `casoComPrazo`) respondeu.
  *    escrever   acrescenta o número e liga a conversa (falso no ensaio). */
-async function identificarPeloCpf({ contato, conversaId, mensagens, caso, escrever, onde = 'quazar' }) {
+async function identificarPeloCpf(opcoes) {
+  // UMA DE CADA VEZ POR CONVERSA (26/11): a rodada que vincula sozinha, a
+  // sugestão e o Quazar podem chegar à mesma conversa ao mesmo tempo, e duas
+  // gravações juntas escreveriam a nota duas vezes. Quem chega depois espera
+  // a primeira e recebe a resposta dela.
+  const chave = opcoes && opcoes.escrever && opcoes.conversaId;
+  if (!chave) return identificarPeloCpfUmaVez(opcoes);
+  if (identificacoesEmVoo.has(chave)) return identificacoesEmVoo.get(chave);
+  const promessa = identificarPeloCpfUmaVez(opcoes).finally(() => identificacoesEmVoo.delete(chave));
+  identificacoesEmVoo.set(chave, promessa);
+  return promessa;
+}
+const identificacoesEmVoo = new Map();
+
+/** As mensagens do cliente que contam para identificá-lo. Sem `janelaMs`, as
+ *  de depois da última fala de gente da equipe (o Quazar, que fala com o
+ *  cliente). Com ela, as do cliente na janela, de qualquer lado da equipe: a
+ *  rodada que vincula sozinha e a sugestão chegam depois de a equipe ter
+ *  respondido, e o nome que confere continua sendo a guarda (26/11). */
+function mensagensDoClienteParaIdentificar(mensagens, janelaMs) {
+  if (!janelaMs) return mensagensDoClienteDepoisDaEquipe(mensagens);
+  const desde = Date.now() - janelaMs;
+  const saida = [];
+  (Array.isArray(mensagens) ? mensagens : []).forEach((m, i) => {
+    if (m && m.origem === 'contato' && Date.parse(m.criado_em) >= desde) saida.push({ m, i });
+  });
+  return saida;
+}
+
+async function identificarPeloCpfUmaVez({ contato, conversaId, mensagens, caso, escrever, onde = 'quazar', janelaMs = 0 }) {
   if (!VANTORO_URL || !VANTORO_TOKEN) return { estado: null };
   if (caso) {
     if (caso.lido || !caso.semCadastro) return { estado: null };
@@ -13204,7 +13244,7 @@ async function identificarPeloCpf({ contato, conversaId, mensagens, caso, escrev
       if (achados && achados.length === 1) return { estado: null };
     } catch (_) { /* segue para o CPF */ }
   }
-  const doCliente = mensagensDoClienteDepoisDaEquipe(mensagens);
+  const doCliente = mensagensDoClienteParaIdentificar(mensagens, janelaMs);
   const achado = cpfNasMensagens(doCliente, contato && contato.numero);
   if (!achado) return { estado: 'pedir' };
   if (achado.invalido) return { estado: 'cpf_invalido' };
@@ -13315,6 +13355,119 @@ function regraDoNome() {
 function linhaDoNomeDoCliente(nome) {
   return nome ? `Primeiro nome do cliente, como está no cadastro: ${nome}.`
     : 'O cliente não tem nome no cadastro do escritório: chame-o pelo nome que ele disse na conversa, ou só "Oi!".';
+}
+
+// ============================================================
+// O CLIENTE QUE MANDOU O NOME E O CPF É VINCULADO SOZINHO (26/11)
+// ============================================================
+// Pedido do Rodrigo, com a foto de uma conversa: o telefone não estava na
+// ficha do cliente, a atendente pediu o nome completo e o CPF, o cliente
+// mandou, e nada foi vinculado. Até aqui o Quazar só identificava quem ele
+// mesmo respondia (a noite, o dia e quem espera); a conversa que a equipe
+// atende ficava de fora.
+//
+// A RODADA: de 30 em 30 segundos, as mensagens de cliente dos últimos 30
+// minutos (na primeira volta depois de subir, das últimas 48 horas, para
+// pegar o que chegou com a ponte fora), e só as que têm onze dígitos que
+// formam um CPF válido. Para cada conversa sem cadastro ligado, a mesma
+// `identificarPeloCpf` do Quazar, com as mensagens do cliente das últimas 24
+// horas: o CPF no Vantoro, o nome que confere, a ficha inteira, o número
+// acrescentado, a conversa ligada e a nota interna. Ela não manda nada ao
+// cliente: quem responde é a equipe, ou o Quazar.
+//
+// O que fica de fora, e não é tentado de novo: o nome que não confere, o CPF
+// sem cadastro, o telefone que já tem um cadastro só. O tropeço do Vantoro
+// tenta de novo em 1, 5 e 30 minutos. A memória é da ponte, e se refaz ao
+// reiniciar (a primeira volta pergunta de novo pelas 48 horas, e o que já
+// foi vinculado sai pelo vínculo).
+//
+// Vale em todos os departamentos, inclusive onde o Quazar não responde: ligar
+// a conversa à ficha não fala com o cliente. Grupo fica de fora.
+// `QUAZAR_IDENTIFICAR=desligado` desliga sem mexer no código.
+// `IDENTIFICAR_INTERVALO_MS`, `IDENTIFICAR_PRIMEIRA_MS` e
+// `IDENTIFICAR_RECENTE_MIN` são para a bancada.
+const IDENTIFICAR_JANELA_MS = 24 * 60 * 60 * 1000;
+const IDENTIFICAR_INTERVALO_MS = Number(process.env.IDENTIFICAR_INTERVALO_MS) || 30 * 1000;
+const IDENTIFICAR_PRIMEIRA_MS = Number(process.env.IDENTIFICAR_PRIMEIRA_MS) || 60 * 1000;
+const IDENTIFICAR_RECENTE_MIN = Number(process.env.IDENTIFICAR_RECENTE_MIN) || 30;
+const IDENTIFICAR_NA_SUBIDA_H = 48;
+const IDENTIFICAR_POR_VOLTA = 5;
+const IDENTIFICAR_ESPERAS_MS = [60 * 1000, 5 * 60 * 1000, 30 * 60 * 1000];
+const identificacaoFeita = new Set();        // id da mensagem do CPF que já foi resolvida
+const identificacaoTropecos = new Map();     // id da mensagem → { vezes, depois }
+let identificandoAgora = false;
+let identificouAlgumaVez = false;
+
+/** As mensagens de cliente com um CPF válido, das mais novas para as mais velhas. */
+async function mensagensComCpf(desdeIso) {
+  const achadas = [];
+  for (let de = 0; de < 5000; de += 1000) {
+    const { data, error } = await supabase.from('mensagens').select('id, conversa_id, texto, transcricao, criado_em')
+      .eq('origem', 'contato').gte('criado_em', desdeIso)
+      .order('criado_em', { ascending: false }).order('id', { ascending: false }).range(de, de + 999);
+    if (error) throw new Error(error.code || error.message);
+    for (const m of data || []) {
+      const texto = textoDoCliente(m);
+      if ([...texto.matchAll(CPF_NO_TEXTO)].some((g) => cpfValido(g.slice(1, 5).join('')))) achadas.push(m);
+    }
+    if ((data || []).length < 1000) break;
+  }
+  return achadas;
+}
+
+async function identificarQuemMandouOCpf() {
+  if (identificandoAgora || !VANTORO_URL || !VANTORO_TOKEN || vantoroEmPausa()) return;
+  if (String(process.env.QUAZAR_IDENTIFICAR || '').toLowerCase() === 'desligado') return;
+  identificandoAgora = true;
+  try {
+    const horas = identificouAlgumaVez ? IDENTIFICAR_RECENTE_MIN / 60 : IDENTIFICAR_NA_SUBIDA_H;
+    const candidatas = await mensagensComCpf(new Date(Date.now() - horas * 60 * 60 * 1000).toISOString());
+    identificouAlgumaVez = true;
+    // UMA POR CONVERSA: a mensagem de CPF mais nova de cada uma.
+    const porConversa = new Map();
+    for (const m of candidatas) {
+      if (identificacaoFeita.has(m.id) || porConversa.has(m.conversa_id)) continue;
+      const tropeco = identificacaoTropecos.get(m.id);
+      if (tropeco && tropeco.depois > Date.now()) continue;
+      porConversa.set(m.conversa_id, m);
+    }
+    let feitas = 0;
+    let vinculadas = 0;
+    for (const [conversaId, m] of porConversa) {
+      if (feitas >= IDENTIFICAR_POR_VOLTA) break;
+      const { data: conversas, error } = await supabase.from('conversas')
+        .select('id, contato_id, contato:contato_id(id, numero, vantoro_cliente_id)').eq('id', conversaId).limit(1);
+      if (error) throw new Error(error.code || error.message);
+      const contato = ((conversas || [])[0] || {}).contato;
+      if (!contato || contato.vantoro_cliente_id || String(contato.numero || '').startsWith('grupo:')) {
+        identificacaoFeita.add(m.id);
+        continue;
+      }
+      feitas += 1;
+      const { data: lidas, error: erroLidas } = await supabase.from('mensagens')
+        .select('id, origem, texto, transcricao, automatica, pelo_quazar, criado_em').eq('conversa_id', conversaId)
+        .gte('criado_em', new Date(Date.now() - IDENTIFICAR_JANELA_MS).toISOString())
+        .order('criado_em', { ascending: true }).order('id', { ascending: true }).limit(500);
+      if (erroLidas) throw new Error(erroLidas.code || erroLidas.message);
+      const ident = await identificarPeloCpf({ contato, conversaId, mensagens: lidas || [], caso: null,
+        escrever: true, onde: 'identificar', janelaMs: IDENTIFICAR_JANELA_MS });
+      if (ident.estado === 'depois') {
+        const vezes = ((identificacaoTropecos.get(m.id) || {}).vezes || 0) + 1;
+        if (vezes > IDENTIFICAR_ESPERAS_MS.length) identificacaoFeita.add(m.id);
+        else identificacaoTropecos.set(m.id, { vezes, depois: Date.now() + IDENTIFICAR_ESPERAS_MS[vezes - 1] });
+        continue;
+      }
+      identificacaoTropecos.delete(m.id);
+      identificacaoFeita.add(m.id);
+      if (ident.estado === 'achou' || ident.estado === 'ja_tinha') vinculadas += 1;
+    }
+    // SÓ NÚMEROS NO LOG: nem o CPF, nem o nome, nem o telefone.
+    if (vinculadas) console.log(`identificar: ${vinculadas} conversa(s) ligada(s) ao cadastro do Vantoro pelo nome e pelo CPF que o cliente mandou.`);
+  } catch (e) {
+    console.error('identificar: não consegui conferir as mensagens com CPF —', (e && e.message) || e);
+  } finally {
+    identificandoAgora = false;
+  }
 }
 
 /** A regra das três: a sugestão não usa (lá quem responde é a atendente). */
@@ -15283,6 +15436,8 @@ if (QUAZAR_RESPONDE_DESLIGADO && process.env.ANTHROPIC_API_KEY) {
   console.log('quazar responde quem espera: desligado (QUAZAR_RESPONDE=desligado).');
 }
 setTimeout(() => { quazarRespondeQuemEspera().catch(() => {}); }, QUAZAR_RESPONDE_PRIMEIRA_MS).unref();
+setTimeout(() => { identificarQuemMandouOCpf().catch(() => {}); }, IDENTIFICAR_PRIMEIRA_MS).unref();
+setInterval(() => { identificarQuemMandouOCpf().catch(() => {}); }, IDENTIFICAR_INTERVALO_MS).unref();
 setInterval(() => { quazarRespondeQuemEspera().catch(() => {}); }, QUAZAR_RESPONDE_INTERVALO_MS).unref();
 
 app.get('/permissoes/diagnostico', rotaVantoro(async (req, usuario) => {

@@ -129,6 +129,10 @@ async function subirTudo(env = {}, { tabelas = {}, vantoro = null, quebrar, semC
            // encurta.
            QUAZAR_RESPONDE_PRIMEIRA_MS: "3600000",
            QUAZAR_RESPONDE_INTERVALO_MS: "3600000",
+           // A IDENTIFICAÇÃO PELO CPF EM SEGUNDO PLANO (26/11): a rodada lê as
+           // mensagens de cliente e pergunta ao Vantoro. A seção 154 encurta.
+           IDENTIFICAR_PRIMEIRA_MS: "3600000",
+           IDENTIFICAR_INTERVALO_MS: "3600000",
            ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -31201,6 +31205,155 @@ console.log("\n153. O Quazar lê o documento do andamento pelo LegalMail, só qu
        ferramentasDe(claude.pedidos[0]).includes("ler_documento_do_andamento") && linha().resposta === "na_fila"
        && /Abriu o documento de um andamento no LegalMail\./.test(linha().resposta_contexto || ""), JSON.stringify(linha()).slice(0, 400));
     await t.parar(); await claude.parar(); await s3.parar(); await van.parar();
+  }
+}
+
+
+// ============================================================
+// 154. O CLIENTE QUE MANDOU O NOME E O CPF É VINCULADO SOZINHO (26/11)
+// ============================================================
+// O relato: a atendente pediu o nome e o CPF, o cliente mandou, respondeu-se
+// depois, e o telefone não entrou na ficha. A rodada em segundo plano e o
+// "Sugerir resposta" passam a vincular. Os nomes e o CPF são de mentira.
+console.log("\n154. O cliente que mandou o nome e o CPF é vinculado sozinho — a ponte");
+{
+  const CPF = "12345678909";
+  async function subirVantoro(cena = {}) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      pedidos.push({ metodo: req.method, url: req.url, corpo });
+      const json = (st, c) => { res.writeHead(st, { "Content-Type": "application/json" }); res.end(JSON.stringify(c)); };
+      if (/\/clientes\/buscar\?/.test(req.url)) return json(200, { ok: true, clientes: cena.porTelefone || [] });
+      const cpf = /\/clientes\/cpf-existe\?cpf=(\d+)/.exec(req.url);
+      if (cpf) return json(200, cpf[1] === CPF ? { ok: true, encontrado: true, cliente: { id: 77, nome: "JOSE DA PROVA SANTOS" } } : { ok: true, encontrado: false });
+      if (/\/clientes\/\d+\/telefones$/.test(req.url) && req.method === "POST") return json(200, { ok: true });
+      const ctx = /\/clientes\/(\d+)\/contexto$/.exec(req.url);
+      if (ctx) return json(200, { ok: true, cliente: { id: Number(ctx[1]), nome: "JOSE DA PROVA SANTOS" },
+        processos: [{ id: 1, numero: "0007777-11.2026.8.05.0001", tipo_acao: "Revisional", reu: "Banco Z", status: "ATIVO",
+                      andamentos: [{ data: "2026-11-20", titulo: "Conclusos para despacho" }] }],
+        intimacoes: [], tarefas: [], cortou: { processos: false, tarefas: false } });
+      if (/\/clientes\/\d+$/.test(req.url) && req.method === "GET") {
+        if (cena.semFicha) return json(500, { ok: false });
+        return json(200, { ok: true, cliente: { id: 77, nome: "JOSE DA PROVA SANTOS", telefones: [{ numero: "(71) 3333-4444", digitos: "7133334444" }] } });
+      }
+      json(404, { ok: false });
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const haHoras = (h) => haMin(h * 60);
+  const msg = (id, conversa, origem, texto, quando, extra = {}) => ({ id, conversa_id: conversa, origem, tipo: "texto", texto, criado_em: quando, ...extra });
+  const esperaAte = async (f, ms = 8000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const posts = (van) => van.pedidos.filter((x) => x.metodo === "POST");
+  const cpfsPedidos = (van) => van.pedidos.filter((x) => /cpf-existe/.test(x.url)).length;
+  const cpfEm = (texto) => /12345678909|123\.456\.789-09/.test(String(texto || ""));
+  const contatoDe = (t, id) => (t.sb.dados.contatos || []).find((c) => c.id === id) || {};
+  // A CENA DO RELATO: a equipe pediu, o cliente mandou o nome e o CPF, e a equipe respondeu depois.
+  const RELATO = (conversa) => [
+    msg(`${conversa}-1`, conversa, "advogado", "Pode me mandar o seu nome completo e o CPF?", haMin(30), { enviado_por: "Atendente" }),
+    msg(`${conversa}-2`, conversa, "contato", "José da Prova Santos", haMin(25)),
+    msg(`${conversa}-3`, conversa, "contato", "123.456.789-09", haMin(24)),
+    msg(`${conversa}-4`, conversa, "advogado", "Obrigado, vou verificar.", haMin(20), { enviado_por: "Atendente" }),
+  ];
+  async function rodada(van, { contatos, conversas, mensagens, extra = {} }) {
+    return subirTudo({ VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro",
+      IDENTIFICAR_PRIMEIRA_MS: "200", IDENTIFICAR_INTERVALO_MS: "300", ...extra },
+      { tabelas: { contatos, conversas, mensagens, notas: [], fila_envio: [] } });
+  }
+
+  // ---- 154a. o relato: vincula, acrescenta o número e deixa a nota ----
+  {
+    const van = await subirVantoro();
+    const t = await rodada(van, {
+      contatos: [{ id: "k1", numero: "5571988887777", nome: "Zé" }],
+      conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aberto" }],
+      mensagens: RELATO("c1"),
+    });
+    await esperaAte(() => contatoDe(t, "k1").vantoro_cliente_id === 77 && (t.sb.dados.notas || []).length);
+    ok("154a a rodada acha o CPF que o cliente mandou, mesmo com a equipe respondendo depois",
+       van.pedidos.some((x) => new RegExp(`cpf-existe\\?cpf=${CPF}$`).test(x.url)), JSON.stringify(van.pedidos.map((x) => x.url)));
+    const corpo = JSON.parse((posts(van)[0] || {}).corpo || "{}");
+    ok("acrescenta o número da conversa à ficha", corpo.numero === "(71) 98888-7777", JSON.stringify(corpo));
+    ok("e liga a conversa ao cadastro", contatoDe(t, "k1").vantoro_cliente_id === 77, JSON.stringify(contatoDe(t, "k1")));
+    const nota = (t.sb.dados.notas || [])[0] || {};
+    ok("com a nota do Quazar, sem o CPF", /localizou, pelo nome e pelo CPF/.test(nota.texto || "") && !cpfEm(nota.texto), JSON.stringify(nota));
+    await espera(1200);
+    ok("e não pergunta de novo nas voltas seguintes", cpfsPedidos(van) === 1 && posts(van).length === 1, String(cpfsPedidos(van)));
+    ok("o log não tem o CPF", !cpfEm(t.registro.join("")), "");
+    await t.parar(); await van.parar();
+  }
+  // ---- 154b. o nome que não confere, o já ligado, o grupo, o CPF antigo, e desligado ----
+  {
+    const van = await subirVantoro();
+    const t = await rodada(van, {
+      contatos: [{ id: "k1", numero: "5571988880001", nome: "Mãe" }, { id: "k2", numero: "5571988880002", vantoro_cliente_id: 5 },
+                 { id: "k3", numero: "grupo:abc" }, { id: "k4", numero: "5571988880004" }],
+      conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }, { id: "c2", advogado_id: TELEFONE.id, contato_id: "k2" },
+                  { id: "c3", advogado_id: TELEFONE.id, contato_id: "k3" }, { id: "c4", advogado_id: TELEFONE.id, contato_id: "k4" }],
+      mensagens: [msg("c1-1", "c1", "contato", "Ana Outra Pessoa 123.456.789-09", haMin(10)),
+                  msg("c2-1", "c2", "contato", "José da Prova Santos 123.456.789-09", haMin(10)),
+                  msg("c3-1", "c3", "contato", "José da Prova Santos 123.456.789-09", haMin(10)),
+                  msg("c4-1", "c4", "contato", "José da Prova Santos 123.456.789-09", haHoras(72))],
+    });
+    await espera(1500);
+    ok("154b o nome que não confere: pergunta uma vez, e não liga nem grava", cpfsPedidos(van) === 1 && !posts(van).length
+       && !contatoDe(t, "k1").vantoro_cliente_id && !(t.sb.dados.notas || []).length, JSON.stringify(van.pedidos.map((x) => x.url)));
+    ok("o contato já ligado, o grupo e o CPF de três dias atrás nem são perguntados",
+       contatoDe(t, "k2").vantoro_cliente_id === 5 && cpfsPedidos(van) === 1, String(cpfsPedidos(van)));
+    await t.parar(); await van.parar();
+    const van2 = await subirVantoro();
+    const t2 = await rodada(van2, { extra: { QUAZAR_IDENTIFICAR: "desligado" },
+      contatos: [{ id: "k1", numero: "5571988887777" }], conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+      mensagens: RELATO("c1") });
+    await espera(1200);
+    ok("QUAZAR_IDENTIFICAR=desligado desliga", !van2.pedidos.some((x) => /\/clientes\//.test(x.url)) && !contatoDe(t2, "k1").vantoro_cliente_id, JSON.stringify(van2.pedidos));
+    await t2.parar(); await van2.parar();
+  }
+  // ---- 154c. a ficha que não vem: nada muda ----
+  {
+    const van = await subirVantoro({ semFicha: true });
+    const t = await rodada(van, { contatos: [{ id: "k1", numero: "5571988887777" }],
+      conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }], mensagens: RELATO("c1") });
+    await esperaAte(() => van.pedidos.some((x) => /\/clientes\/77$/.test(x.url)));
+    await espera(500);
+    ok("154c sem a ficha inteira, não acrescenta nem liga", !posts(van).length && !contatoDe(t, "k1").vantoro_cliente_id
+       && !(t.sb.dados.notas || []).length, JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    await t.parar(); await van.parar();
+  }
+  // ---- 154d. o Sugerir resposta vincula na hora, e lê o caso pelo cadastro achado ----
+  {
+    const pedidosIA = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = ""; for await (const p of req) corpo += p;
+      try { pedidosIA.push(JSON.parse(corpo)); } catch (_) { pedidosIA.push(null); }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", content: [{ type: "text", text: "<mensagem>Certo, José!</mensagem>" }],
+        stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    const van = await subirVantoro();
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: `http://127.0.0.1:${srv.address().port}`,
+      COPILOTO_PESQUISA: "desligada", VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro" }, {
+      tabelas: { contatos: [{ id: "k1", numero: "5571988887777", nome: "Zé" }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aberto" }],
+        mensagens: RELATO("c1"), notas: [], fila_envio: [],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_copiloto_licoes: [], zorvin_copiloto_aprendido: [], zorvin_sugestoes: [] } });
+    const r = await fetch(`http://127.0.0.1:${t.porta}/copiloto/sugerir`, { method: "POST",
+      headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" }, body: JSON.stringify({ conversa_id: "c1" }) })
+      .then(async (x) => ({ status: x.status, corpo: await x.json().catch(() => null) }));
+    ok("154d o Sugerir resposta responde", r.status === 200 && r.corpo && r.corpo.sugestao === "Certo, José!", JSON.stringify(r.corpo));
+    ok("e liga a conversa ao cadastro pelo CPF, acrescentando o número",
+       contatoDe(t, "k1").vantoro_cliente_id === 77 && posts(van).length === 1, JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
+    const ped = String((pedidosIA[0] && pedidosIA[0].messages && pedidosIA[0].messages[0].content) || "");
+    ok("e lê o caso pelo cadastro achado, que vai no pedido", van.pedidos.some((x) => /\/clientes\/77\/contexto$/.test(x.url))
+       && /<caso>/.test(ped) && /<identificacao>/.test(ped), ped.slice(-600));
+    ok("o log não tem o CPF", !cpfEm(t.registro.join("")), "");
+    await t.parar(); await van.parar(); await new Promise((r2) => srv.close(r2));
   }
 }
 
