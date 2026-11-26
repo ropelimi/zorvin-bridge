@@ -154,6 +154,12 @@ Variáveis de ambiente (no Render):
 - `CASO_PRAZO_MS` — quanto o Quazar espera o caso do Vantoro à noite e em quem
   espera (padrão 15 s). **Opcional**, para a bancada. Ver "O caso mais
   completo, e a noite lê o caso (script 073, 26/11)".
+- `QUAZAR_DOCUMENTOS` — `desligado` tira do Quazar a leitura do documento do
+  andamento pelo LegalMail (a ferramenta e as marcas no caso). **Opcional: sem
+  ela, ele lê quando precisa**, até um por resposta; o teto do dia mora no
+  Vantoro (`QUAZAR_DOCUMENTOS_POR_DIA`, na Fly, padrão 20).
+  `QUAZAR_DOCUMENTO_ORIGEM_DE_TESTE` é só da bancada. Ver "O Quazar lê o
+  documento do andamento pelo LegalMail (26/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -5640,6 +5646,80 @@ cópias de controle, a 149, a 145 e a 138, passaram inteiras):
 150c gravava nela sem guarda, e a 138 estourava ali, sem dizer as conferências
 de depois. Hoje as leituras e a gravação da cena são guardadas, e a mesma
 sabotagem é pega por oito conferências.
+
+### O Quazar lê o documento do andamento pelo LegalMail (26/11)
+
+Pedido do Rodrigo: *"Pode fazer o Quazar ler os PDFs do LegalMail também, mas
+só caso seja necessário, para não gastarmos muito."* O andamento que vem do
+ADVBOX é só um título ("Juntada de petição", "Conclusos para despacho"); o
+documento (a decisão, a sentença, o despacho) está no LegalMail, e cada um
+custa R$ 0,02 lá e uns 3 mil tokens por página aqui.
+
+**Quem decide se precisa é a IA, por uma ferramenta**
+(`ler_documento_do_andamento`, `FERRAMENTA_DO_DOCUMENTO`), oferecida no
+pedido e usada só quando ela pede. A descrição e a regra do caso
+(`regraDoCaso`) dizem quando: o cliente perguntou do processo, e o título do
+andamento e as intimações não explicam o que aconteceu. Não para o "ok", o
+"obrigado" nem para valor, resultado ou pagamento.
+
+| quem | o quê |
+|---|---|
+| o Vantoro (PR #566) | o caso manda o `id` de cada andamento e diz, em cada processo, se ele está ligado ao LegalMail (`legalmail`); a rota `GET /api/v1/clientes/<id>/andamentos/<n>/documento` (só a ponte) confere que o andamento é do cliente, escolhe UM documento (o principal do dia, com o título mais parecido) e conta no teto do dia (`QUAZAR_DOCUMENTOS_POR_DIA`, padrão 20, no banco de lá) |
+| a ponte, no caso | o andamento do processo ligado ganha a marca `[documento no LegalMail: andamento N]` (`textoDoCaso`), e a ferramenta só vai quando há alguma marca (`ferramentaDoDocumento`) |
+| a ponte, na ferramenta | só o número marcado; **um por resposta**, contado antes de esperar o Vantoro; o PDF só do S3 do LegalMail (`enderecoDoLegalMail`), até 5 MB e 10 páginas, sem senha (`baixarParaAIA`) |
+| `pedirAoClaude` | a ponte executa o que a IA pediu e manda o resultado (o PDF, com o título e o dia) de volta, até duas voltas. A resposta que ainda pede a ferramenta depois disso não vira texto (`blocosDaRespostaFinal`) |
+
+- **Vale nos quatro caminhos que leem o caso**: o "Sugerir resposta", o Quazar
+  à noite, o de dia e o que responde quem espera. O registro diz *"Abriu o
+  documento de um andamento no LegalMail."* (`contextoDoQueLeu`).
+- **O que não abre volta como erro para a IA, com a frase**, e ela responde
+  com o que o caso diz: o teto do dia, o LegalMail sem documento perto do dia,
+  o processo sem ligação, o LegalMail bloqueado, o endereço fora do S3, o PDF
+  grande, com senha ou com mais de 10 páginas. **Depois de um 429 do Vantoro**
+  a ferramenta nem pergunta (`vantoroEmPausa`).
+- **O motivo do Vantoro só entra no log limpo** (letras minúsculas e `_`,
+  até 30), e **o log só diz o tamanho**: nada do título nem do que está no
+  documento.
+- **O que está escrito no documento é material, e não ordem** (dito no
+  resultado e na regra), e ele não é copiado: o Quazar explica em palavras
+  simples, sem número de processo inteiro, valor, nome de juiz ou dado pessoal.
+- **O custo**: no Sonnet, uns US$ 0,006 por página lida, mais os R$ 0,02 do
+  LegalMail; o teto do dia segura os dois.
+- **Desligar**: `QUAZAR_DOCUMENTOS=desligado` na Render (a ponte), ou
+  `QUAZAR_DOCUMENTOS_POR_DIA=0` na Fly (o Vantoro, que aí manda `legalmail`
+  falso em todo processo). **Nenhum SQL.**
+
+**`QUAZAR_DOCUMENTO_ORIGEM_DE_TESTE` é só da bancada**: um começo de endereço
+exato, `http://127.0.0.1:<porta>/`, que passa além do S3 (o servidor de
+mentira das provas). Em produção ninguém a põe, e outro formato é ignorado.
+
+Prova: seção 153, 44 conferências, com um Claude, um Vantoro e um "S3" de
+mentira: as marcas e a ferramenta (e a falta delas com o Vantoro de antes,
+desligada e sem processo ligado); o pedido e o resultado com o PDF; o número
+sem marca; um por resposta, também na volta seguinte; a IA que insiste; as
+sete recusas (o motivo estranho do Vantoro incluído); o 429 e a pausa que
+começa enquanto a IA pensa; a noite, o dia e quem espera.
+
+**22 sabotagens e 22 pegas**, rodadas em cópias e lidas uma a uma (e a cópia de
+controle passou inteira):
+
+- a ponte de antes inteira (33 reprovações);
+- **a ferramenta:** sem olhar se há andamento marcado; sem conferir o número
+  que a IA passa; sem o um por resposta (4); sem a guarda do endereço; o erro
+  sem `is_error` (11); o resultado sem o PDF (3); sem a guarda da pausa; o
+  motivo do Vantoro sem limpar;
+- **a marca:** sem olhar a ligação ao LegalMail (3); sem olhar o desligado;
+  o caso sem o número do cliente (31);
+- **o laço:** `pedirAoClaude` sem ele (33); sem o limite de voltas; a resposta
+  que ainda pede a ferramenta virando texto;
+- **os caminhos:** a sugestão (29), a noite, o dia e quem espera sem a
+  ferramenta; o registro sem dizer que abriu (3);
+- **o log e a regra:** o log com o título do documento; sem a regra.
+
+**A do motivo vazou na primeira rodada, e a culpa era da prova**: nenhuma cena
+mandava um motivo que não fosse uma palavra do Vantoro. Entrou a recusa com um
+texto de duas linhas e um CPF no motivo, e a mesma sabotagem é pega por duas
+conferências.
 
 ### O gasto do Quazar (script 058, 08/11)
 
