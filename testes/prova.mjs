@@ -9714,9 +9714,10 @@ console.log("\n62. O copiloto sugere a resposta, ao clicar");
     ok("e a sugestão não fala de valor de repasse nem de causa ganha: escreve que vai verificar (19/11)",
        /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sistema) && /de repasse/.test(sistema) && /se a causa está ganha ou perdida/.test(sistema)
        && /escreva que vai verificar e já retorna/.test(sistema), sistema.slice(-1500));
-    ok("e não diz o que um arquivo é pelo nome dele: quem abre é a atendente (23/11)",
+    ok("e julga o arquivo pelo que vê, nunca pelo nome: a sugestão abre as fotos e os PDFs (26/11)",
        /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sistema) && /uma conta de luz pode se chamar "Boleto"/.test(sistema)
-       && /não peça outro documento por causa do nome/.test(sistema) && /quem abre o arquivo é a atendente/.test(sistema), sistema.slice(-1500));
+       && /Julgue pelo que você vê no arquivo aberto, nunca pelo nome/.test(sistema) && /não peça outro documento por causa do nome/.test(sistema)
+       && !/quem abre o arquivo é a atendente/.test(sistema), sistema.slice(-1500));
     await espera(100);
     ok("e o log diz qual script falta", /024-o-copiloto\.sql/.test(t.registro.join("")));
     await t.parar(); await claude.parar();
@@ -25743,7 +25744,7 @@ console.log("\n125. O Quazar abre as fotos e os PDFs que o cliente manda");
     await t.parar(); await claude.parar(); await dep.parar();
   }
 
-  // ---- 125g. o dia abre e diz no registro; a sugestão não abre ----
+  // ---- 125g. o dia abre e diz no registro; a sugestão e o ajuste também abrem (26/11) ----
   {
     const dep = await subirDeposito();
     const msgs = [doCliente(dep, "i1", 20, "documento", "/conta.pdf", { midia_mime: "application/pdf", midia_nome: "Boleto_123.pdf" }), texto("i9", 5, "contato", "Bom dia")];
@@ -25766,9 +25767,21 @@ console.log("\n125. O Quazar abre as fotos e os PDFs que o cliente manda");
     const r = await fetch(`http://127.0.0.1:${t2.porta}/copiloto/sugerir`, { method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
       body: JSON.stringify({ conversa_id: "c1" }) }).then((x) => x.json()).catch(() => ({}));
     const cs = conteudoDe(claude.pedidos[claude.pedidos.length - 1]);
-    ok("o \"Sugerir resposta\" não abre: o pedido é texto, e o depósito não é procurado", r.ok === true && typeof cs === "string"
-       && dep.pedidos.length === antes && /OS ARQUIVOS QUE O CLIENTE MANDA/.test(sistemaDe(claude.pedidos[claude.pedidos.length - 1]))
-       && /quem abre o arquivo é a atendente/.test(sistemaDe(claude.pedidos[claude.pedidos.length - 1])), `${dep.pedidos.length - antes} pedidos ao depósito`);
+    const ss = sistemaDe(claude.pedidos[claude.pedidos.length - 1]);
+    ok("o \"Sugerir resposta\" abre o PDF do cliente (26/11)", r.ok === true && Array.isArray(cs) && cs.some((b) => b.type === "document")
+       && dep.pedidos.length > antes, Array.isArray(cs) ? cs.map((b) => b.type).join(",") : `texto; ${dep.pedidos.length - antes} pedidos ao depósito`);
+    ok("e a conversa diz qual arquivo é, com as regras dos arquivos abertos", Array.isArray(cs)
+       && /aberto para você como Arquivo 1/.test(cs.filter((b) => b.type === "text").map((b) => b.text).join("\n"))
+       && /Julgue pelo que você vê no arquivo aberto, nunca pelo nome/.test(ss) && !/quem abre o arquivo é a atendente/.test(ss));
+    await espera(100);
+    ok("e o log diz quantos arquivos abriu, sem o nome", /copiloto: sugestão .*abriu 1 arquivo\(s\) do cliente/.test(t2.registro.join(""))
+       && !/Boleto_123/.test(t2.registro.join("")));
+    const antesAj = dep.pedidos.length;
+    const ra = await fetch(`http://127.0.0.1:${t2.porta}/copiloto/ajustar`, { method: "POST", headers: { Authorization: "Bearer jwt-bom", "Content-Type": "application/json" },
+      body: JSON.stringify({ conversa_id: "c1", pedido: "mais curto", sugestao: "Recebi, obrigado." }) }).then((x) => x.json()).catch(() => ({}));
+    const ca = conteudoDe(claude.pedidos[claude.pedidos.length - 1]);
+    ok("e o \"Pedir uma mudança\" também abre", Array.isArray(ca) && ca.some((b) => b.type === "document") && dep.pedidos.length > antesAj,
+       `${JSON.stringify(ra).slice(0, 200)} ${Array.isArray(ca) ? ca.map((b) => b.type).join(",") : "texto"}`);
     await t2.parar(); await claude.parar(); await dep.parar();
   }
 }
