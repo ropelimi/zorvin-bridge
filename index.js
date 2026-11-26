@@ -7211,6 +7211,103 @@ app.post('/vantoro/atendimento', async (req, res) => {
                     conversas });
 });
 
+// =====================================================================
+//  AS MENSAGENS DA EQUIPE, DIA A DIA — POST /vantoro/mensagens-da-equipe
+// =====================================================================
+//
+//  Pedido do escritório (26/11): as tarefas de SUBSÍDIO do Vantoro contam as
+//  tentativas de contato com o cliente, e conta como tentativa a mensagem que
+//  uma PESSOA da equipe mandou no Zorvin (pelo painel ou pelo celular), uma
+//  por dia. O resumo de /vantoro/atendimento traz só a ÚLTIMA mensagem de cada
+//  conversa — com ele, a tentativa de terça some quando alguém escreve na
+//  quarta. Esta porta entrega os DIAS: para cada conversa e cada dia, a
+//  primeira mensagem de gente da equipe. Quem decide o que é "gente" é a
+//  função do banco (script 074, com o porquê de cada regra no cabeçalho).
+//
+//  A MESMA TRANCA da porta acima, pelos mesmos motivos: ela LÊ conversas de
+//  todos os telefones, então só a assinatura do Vantoro abre, e o pedido
+//  vence em cinco minutos (um pedido assinado guardado não pode abrir a lista
+//  para sempre).
+//
+//  O `desde` VAI NO MÁXIMO A 400 DIAS ATRÁS. Mais longe que isso o pedido é
+//  trazido para dentro da régua (como os números da porta acima), e a
+//  resposta diz a data que valeu: o Vantoro não fica achando que recebeu o
+//  que não veio. O motivo do teto é a leitura: cada dia a mais é mais um dia
+//  de `mensagens` inteiro, de todos os telefones.
+//
+//  O `limite` corta o FIM (a função ordena do mais antigo para o mais novo), e
+//  `completo: false` diz que cortou. O Vantoro continua pedindo com `desde` no
+//  último dia que recebeu.
+const MENSAGENS_DA_EQUIPE_DIAS = 400;
+const MENSAGENS_DA_EQUIPE_TETO = 20000;
+
+/** A data AAAA-MM-DD, se for uma data que existe (o 30/02 não passa). */
+function dataDoPedido(valor) {
+  const s = String(valor || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === s ? s : null;
+}
+
+app.post('/vantoro/mensagens-da-equipe', async (req, res) => {
+  const conferencia = assinaturaDoVantoroConfere(req);
+  if (!conferencia.ok) {
+    console.warn(`Pedido das mensagens da equipe recusado: ${conferencia.motivo}.`
+      + (conferencia.motivo === 'sem-segredo'
+        ? ' VANTORO_WEBHOOK_SECRET não está preenchida na ponte — preencha com o'
+          + ' MESMO valor de ZORVIN_WEBHOOK_SECRET no Vantoro.'
+        : ''));
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  const corpo = req.body || {};
+  const pedidoEm = Date.parse(String(corpo.pedido_em || ''));
+  if (!Number.isFinite(pedidoEm) || Math.abs(Date.now() - pedidoEm) > ATENDIMENTO_VALE_MS) {
+    // A MESMA RESPOSTA da assinatura errada, e o motivo só no log — como na
+    // porta acima.
+    console.warn('Pedido das mensagens da equipe recusado: pedido vencido ou sem data'
+      + ' (o relógio da Render e o do Vantoro discordam em mais de 5 minutos?).');
+    return res.status(401).json({ ok: false, erro: 'Não autorizado.' });
+  }
+
+  // A DATA É OBRIGATÓRIA, e escrita errada é recusada em vez de adivinhada:
+  // "11/03/2026" lido como 3 de novembro marcaria tentativas no mês errado.
+  let desde = dataDoPedido(corpo.desde);
+  if (!desde) {
+    return res.status(400).json({ ok: false, erro: 'O campo "desde" precisa ser uma data no formato AAAA-MM-DD.' });
+  }
+  // O "HOJE" É O DE BRASÍLIA, que é o fuso dos dias que a função devolve.
+  const hoje = new Date(`${diaNoFuso(new Date(), 'America/Sao_Paulo')}T00:00:00Z`);
+  const maisAntigo = new Date(hoje.getTime() - MENSAGENS_DA_EQUIPE_DIAS * 86400e3).toISOString().slice(0, 10);
+  if (desde < maisAntigo) desde = maisAntigo;
+  const limite = inteiroEntre(corpo.limite, 1, MENSAGENS_DA_EQUIPE_TETO, MENSAGENS_DA_EQUIPE_TETO);
+
+  const { data, error } = await supabase.rpc('zorvin_mensagens_da_equipe',
+    { p_desde: desde, p_limite: limite });
+  if (error) {
+    // SEM A FUNÇÃO, A FRASE DIZ QUAL SCRIPT — o Vantoro publicado antes de a
+    // ponte aplicar o 074.
+    const semFuncao = error.code === 'PGRST202' || /zorvin_mensagens_da_equipe/.test(error.message || '');
+    console.error('Mensagens da equipe: o banco não respondeu:', error.message);
+    return res.status(503).json({
+      ok: false,
+      erro: semFuncao
+        ? 'O banco do Zorvin ainda não tem as mensagens da equipe por dia (script 074).'
+        : 'O banco do Zorvin não respondeu as mensagens da equipe.',
+    });
+  }
+  const mensagens = Array.isArray(data && data.mensagens) ? data.mensagens : [];
+  return res.json({
+    ok: true,
+    gerado_em: (data && data.gerado_em) || new Date().toISOString(),
+    desde,
+    // SÓ "true" QUANDO O BANCO DISSE: sem isso, o seguro é o Vantoro achar
+    // que pode faltar algo e pedir de novo.
+    completo: data ? data.completo === true : false,
+    mensagens,
+  });
+});
+
 // ============================================================
 //  AS NOTAS QUE JÁ EXISTEM SOBEM PARA O VANTORO
 // ============================================================
