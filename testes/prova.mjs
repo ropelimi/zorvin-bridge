@@ -22695,10 +22695,10 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     const sis = sistemaDe(claude.pedidos[0]);
     ok("111b as regras dizem que ele é o assistente virtual, sozinho, e se apresenta na primeira da noite",
        /assistente virtual/.test(sis) && /responde o cliente SOZINHO/.test(sis) && /primeira mensagem desta noite/.test(sis), sis.slice(0, 600));
-    ok("que à noite também lê o caso e conta o andamento, mas não promete e não pede senha nem código (26/11)",
+    ok("que à noite também lê o caso e conta o andamento, não promete, e pede a senha mas não o código (26/11)",
        !/Não diz em que pé está o processo/.test(sis) && /O CASO DO CLIENTE \(26\/11: à noite você também lê o caso\)/.test(sis)
        && /conte o último andamento em linguagem simples/.test(sis) && /Quando <caso> diz que não foi lido, você NÃO sabe nada do processo/.test(sis)
-       && /Não promete prazo, valor/.test(sis) && /Não pede senha nem código de confirmação/.test(sis), sis.slice(0, 2500));
+       && /Não promete prazo, valor/.test(sis) && /Pode pedir a senha do gov\.br ou do Serasa/.test(sis) && /O código de confirmação que chega no celular, não/.test(sis) && !/Não pede senha/.test(sis), sis.slice(0, 2500));
     ok("e as regras do caso: a intimação é o documento, o último andamento antigo e o subsídio (26/11)",
        /O QUE O CASO DIZ: ANDAMENTO, INTIMAÇÃO E SUBSÍDIO/.test(sis) && /TAREFA DE SUBSÍDIO/.test(sis)
        && /O juiz "determina", nunca "pede"/.test(sis) && /RETORNO DO SUBSÍDIO/.test(sis), sis.slice(-3000));
@@ -25219,8 +25219,8 @@ console.log("\n123. O Quazar de dia no SAC, em ensaio — a rodada da ponte");
     ok("e o registro guarda só as contagens do que ele leu", /Leu o caso no Vantoro: 1 processo\(s\), 1 intimação\(ões\), 1 tarefa\(s\) \(1 pendente\(s\)\)/.test(l.contexto || "")
        && !/Conclusos/.test(l.contexto || ""), l.contexto);
     const sis = sistemaDe(claude.pedidos[0]);
-    ok("123b as regras do dia: conta o andamento em linguagem simples, não promete prazo, não pede senha, é ensaio",
-       /conte o último andamento em linguagem simples/.test(sis) && /Não promete prazo/.test(sis) && /Não pede senha/.test(sis) && /ENSAIO/.test(sis), sis.slice(0, 300));
+    ok("123b as regras do dia: conta o andamento em linguagem simples, não promete prazo, pede a senha mas não o código, é ensaio",
+       /conte o último andamento em linguagem simples/.test(sis) && /Não promete prazo/.test(sis) && /Pode pedir a senha do gov\.br/.test(sis) && /código de confirmação que chega no celular, não/.test(sis) && /ENSAIO/.test(sis), sis.slice(0, 300));
     ok("e não fala de valor, resultado nem pagamento, nem pelo andamento: manda aguardar um atendente (19/11)",
        /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis) && /de repasse/.test(sis) && /aguardar o retorno de um atendente/.test(sis)
        && /Se o andamento fala de resultado, valor ou pagamento/.test(sis));
@@ -29085,7 +29085,7 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
     ok("as regras: vai direto ao cliente, desculpas uma vez, resolveu só sem sobrar nada para a equipe",
        /vai direto ao cliente/.test(sis) && /Peça desculpas pela demora em responder, uma vez/.test(sis) && /resolveu: true SÓ quando/.test(sis)
        && /Na dúvida, false/.test(sis), sis.slice(0, 400));
-    ok("e não pede senha, não promete prazo nem valor, e os assuntos da equipe", /Não pede senha nem código/.test(sis)
+    ok("e pede a senha mas não o código, não promete prazo nem valor, e os assuntos da equipe", /Pode pedir a senha do gov\.br/.test(sis) && /código de confirmação que chega no celular, não/.test(sis)
        && /Não promete prazo, data, valor nem resultado/.test(sis) && /ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis));
     const props = Object.keys(((((claude.pedidos[0] || {}).output_config || {}).format || {}).schema || {}).properties || {});
     ok("a resposta vem presa pelo formato, com o `resolveu`", ["responder", "mensagem", "resolveu", "resumo", "motivo"].every((k) => props.includes(k)),
@@ -30023,7 +30023,7 @@ console.log("\n148. O Quazar de dia, valendo — a ponte manda");
        && !m.enviado_por_id, JSON.stringify(m));
     const sis = sistemaDe(claude.pedidos[0]);
     ok("148b as regras dizem que a mensagem vai direto ao cliente, e não que é ensaio",
-       /a sua mensagem vai direto para ele/.test(sis) && !/Isto é um ENSAIO/.test(sis) && /Não pede senha/.test(sis), sis.slice(0, 400));
+       /a sua mensagem vai direto para ele/.test(sis) && !/Isto é um ENSAIO/.test(sis) && /Pode pedir a senha do gov\.br/.test(sis), sis.slice(0, 400));
     ok("e ele NÃO se apresenta: de dia o escritório está aberto (25/11, invertida)",
        pedidoDe(claude.pedidos[0]).includes("Não se apresente: o escritório está aberto.")
        && !pedidoDe(claude.pedidos[0]).includes('apresente-se ("Sou o Quazar') && /NÃO se apresente/.test(sis));

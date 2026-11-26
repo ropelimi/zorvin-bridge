@@ -3835,8 +3835,7 @@ assistente virtual e diz quando a equipe volta, nunca usa nome de atendente,
 ~~não diz o andamento do processo (não o enxerga)~~ (desde 26/11 ele lê o
 caso: ver "O caso mais completo, e a noite lê o caso (script 073, 26/11)"),
 não promete prazo nem valor,
-**não pede senha nem código de confirmação** (o código vence em minutos, e a
-senha a equipe pede quando for usar; as lições que mandam pedir valem de dia),
+~~**não pede senha nem código de confirmação**~~ (desde 26/11 pede a senha, e não o código: ver "O Quazar pede a senha (26/11)"),
 não dá orientação jurídica nova e não fala de honorários. Ele **não responde**
 robô, propaganda, cobrança de terceiros nem o "ok" e o "obrigado" do fim:
 fica `calada`, com o porquê, e isso também se avalia.
@@ -4487,7 +4486,7 @@ motivo em `contexto`.
 na primeira mensagem~~ (desde 25/11 não se apresenta: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)"); conta o último andamento em linguagem simples e pede o
 documento de uma tarefa pendente que depende do cliente; **não promete prazo,
 data, valor nem resultado**; não cita número de processo inteiro, valor nem
-juiz; **não pede senha nem código** (a equipe pede quando for usar).
+juiz; ~~**não pede senha nem código**~~ (desde 26/11 pede a senha, e não o código: ver "O Quazar pede a senha (26/11)").
 
 **Nada vai ao cliente**: nem fila, nem WhatsApp. **Só números no log.**
 `QUAZAR_DIA=desligado` desliga sem mexer no código.
@@ -5103,7 +5102,7 @@ PDFs do cliente. As regras são outras (`QUAZAR_RESPONDE_REGRAS`):
 - responde o que o manual, as lições, os exemplos e o caso respondem; o
   andamento em linguagem simples; o que não consegue resolver, diz que a
   equipe vai verificar e retornar, sem prazo;
-- **não promete prazo, data, valor nem resultado**, não pede senha nem código,
+- **não promete prazo, data, valor nem resultado**, ~~não pede senha nem código~~ (desde 26/11 pede a senha, e não o código: ver "O Quazar pede a senha (26/11)"),
   os assuntos que só a equipe responde (19/11), os arquivos abertos (24/11), a
   conversa inteira e o tratamento (24/11);
 - **`resolveu`**: verdadeiro SÓ quando a mensagem responde por inteiro o que o
@@ -5379,6 +5378,25 @@ cena seguinte tentava gravar nela, e a seção parou ali, sem dizer as
 conferências de depois. Hoje a cena confere a marca e, sem ela, reprova pelo
 nome e não segue.
 
+### O Quazar pede a senha (26/11)
+
+Pedido do Rodrigo, lendo o comunicado das novidades: *"sobre o Quazar nunca
+pedir senha à noite, ele pode pedir sim."*
+
+- **À noite, de dia (os contatos novos) e em quem espera**, as regras dizem:
+  pode pedir a senha do gov.br ou do Serasa quando o caso pedir, do jeito que
+  a equipe pede. Era "não pede senha nem código";
+- **o código de confirmação que chega no celular continua de fora**, e é
+  decisão: ele vence em minutos, e quando o Quazar escreve sozinho ninguém o
+  usa na hora. A equipe pede na hora de usar;
+- **as lições da equipe valem inteiras**, menos a que manda pedir o código;
+- **o que o cliente manda continua sem ser repetido** na resposta, e a
+  senha não vai para o resumo da noite;
+- **o "Sugerir resposta" não mudou**: lá a atendente já podia pedir as duas.
+
+Prova: as conferências das seções 111, 123, 141 e 148 que pediam "não pede
+senha" foram INVERTIDAS: pedem a senha liberada e o código de fora.
+
 ### O cliente que manda o nome e o CPF é vinculado sozinho (26/11)
 
 Relato do Rodrigo, com a foto de uma conversa: o telefone não estava na ficha
@@ -5537,7 +5555,7 @@ responde, a conversa vai para "Em Atendimento", e o Quazar sai dela.**
   a primeira linha diz que a mensagem vai direto ao cliente, sem ninguém da
   equipe ler antes. O resto é o mesmo: ~~apresenta-se pelo nome na primeira
   mensagem~~ (desde 25/11 não se apresenta: ver "O nome que o cliente disse, e de dia sem se apresentar (25/11)"), conta o andamento em linguagem simples, não promete prazo nem
-  resultado, não pede senha, os assuntos que só a equipe responde (19/11);
+  resultado, ~~não pede senha~~ (desde 26/11 pede a senha, e não o código: ver "O Quazar pede a senha (26/11)"), os assuntos que só a equipe responde (19/11);
 - **a primeira mensagem** é a que não tem nem ensaio nem resposta de verdade do
   Quazar nas últimas 12 horas: na segunda ele não se apresenta de novo;
 - **quem não tem ficha** (071): valendo, o número achado pelo CPF é
