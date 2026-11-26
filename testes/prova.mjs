@@ -22691,8 +22691,13 @@ console.log("\n111. O Quazar à noite — a rodada da ponte");
     const sis = sistemaDe(claude.pedidos[0]);
     ok("111b as regras dizem que ele é o assistente virtual, sozinho, e se apresenta na primeira da noite",
        /assistente virtual/.test(sis) && /responde o cliente SOZINHO/.test(sis) && /primeira mensagem desta noite/.test(sis), sis.slice(0, 600));
-    ok("que não diz o andamento do processo, não promete e não pede senha nem código",
-       /Não diz em que pé está o processo/.test(sis) && /Não promete prazo, valor/.test(sis) && /Não pede senha nem código de confirmação/.test(sis));
+    ok("que à noite também lê o caso e conta o andamento, mas não promete e não pede senha nem código (26/11)",
+       !/Não diz em que pé está o processo/.test(sis) && /O CASO DO CLIENTE \(26\/11: à noite você também lê o caso\)/.test(sis)
+       && /conte o último andamento em linguagem simples/.test(sis) && /Quando <caso> diz que não foi lido, você NÃO sabe nada do processo/.test(sis)
+       && /Não promete prazo, valor/.test(sis) && /Não pede senha nem código de confirmação/.test(sis), sis.slice(0, 2500));
+    ok("e as regras do caso: a intimação é o documento, o último andamento antigo e o subsídio (26/11)",
+       /O QUE O CASO DIZ: ANDAMENTO, INTIMAÇÃO E SUBSÍDIO/.test(sis) && /TAREFA DE SUBSÍDIO/.test(sis)
+       && /O juiz "determina", nunca "pede"/.test(sis) && /RETORNO DO SUBSÍDIO/.test(sis), sis.slice(-3000));
     ok("que não responde robô nem o \"ok\" do fim", /QUANDO NÃO RESPONDER/.test(sis) && /responder = false/.test(sis));
     ok("que, nas mensagens seguintes da noite, não repete o que já disse: nem quando a equipe volta, nem o que já pediu (23/11)",
        /NAS MENSAGENS SEGUINTES DA NOITE/.test(sis) && /Não repita nada disso/.test(sis) && /nem quando a equipe volta/.test(sis)
@@ -28022,6 +28027,7 @@ create policy conversas_mexer on conversas for update to authenticated using (po
       "066-quem-pede-atencao-nao-e-finalizado.sql", "067-a-lista-de-atencao-se-troca-com-where.sql",
       "068-so-quem-espera-resposta-fica-e-a-equipe-e-avisada.sql", "069-o-quazar-responde-quem-espera.sql",
       "070-o-quazar-nao-escreve-para-telefone-desconectado.sql", "071-o-quazar-pede-o-nome-e-o-cpf.sql",
+      "073-o-quazar-anota-se-leu-o-caso.sql",
     ].map((a) => [a.slice(0, 3), ler(a)]));
     const ESQUEMA = `
 do $$ begin
@@ -28841,6 +28847,61 @@ create policy conversas_mexer on conversas for update to authenticated using (po
                               ~ 'zorvin_linha_caida_desde' as f`)).rows[0].f === true);
         }
       }
+      // ============================================================
+      //  150. O QUAZAR ANOTA SE LEU O CASO (073), no mesmo Postgres (26/11)
+      //
+      //    - num banco limpo, e sem o 069, nada, e diz;
+      //    - a coluna `resposta_contexto` nasce, vazia, e só a ponte a alcança;
+      //    - a ponte grava nela, e quem entrou não lê nem grava;
+      //    - rodar de novo não acusa defeito nem apaga o que foi anotado.
+      // ============================================================
+      console.log("\n150. O Quazar anota se leu o caso (073), num Postgres de verdade");
+      {
+        const limpo = await bancoNovo();
+        const r0 = await guardado(() => aplicar(limpo, S["073"]));
+        ok("150a num banco sem o Zorvin, não faz nada e diz isso", /nada a fazer/.test(String(item(r0, /sem as tabelas/))), JSON.stringify(r0));
+        const sem = await zorvin([...ANTES, "068"]);
+        const r1 = await guardado(() => aplicar(sem, S["073"]));
+        ok("e sem o 069, diz que falta e não cria a coluna", /rode-os antes/.test(String(item(r1, /falta o 064 ou o 069/)))
+           && (await sem.query(`select not exists (select 1 from information_schema.columns where table_name = 'zorvin_quazar_faxina'
+                                and column_name = 'resposta_contexto') as n`)).rows[0].n, JSON.stringify(r1));
+      }
+      {
+        const q = await zorvin([...ANTES, "068"]);
+        await aplicar(q, S["069"]);
+        const conf = await guardado(() => aplicar(q, S["073"]));
+        ok("150b o 073 aplica, e a conferência não acusa defeito", lista(conf).length > 0 && !defeito(conf), JSON.stringify(conf));
+        const col = (await q.query(`select data_type, is_nullable, column_default from information_schema.columns
+             where table_name = 'zorvin_quazar_faxina' and column_name = 'resposta_contexto'`)).rows[0];
+        ok("a anotação é texto, opcional e sem valor padrão", col?.data_type === "text" && col?.is_nullable === "YES" && col?.column_default == null,
+           JSON.stringify(col));
+        ok("e a conferência conta as respostas anotadas", item(conf, /respostas a quem espera com a anotação/) === "0", JSON.stringify(conf));
+        const ct = (await q.query("insert into contatos (numero, nome) values ('5571950000001', 'Cliente') returning id")).rows[0].id;
+        const conv = (await q.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [q.tel, ct])).rows[0].id;
+        const m = (await q.query(`insert into mensagens (conversa_id, origem, texto, id_uazapi, criado_em)
+                                  values ($1, 'contato', 'Como está meu processo?', $2, now() - interval '3 days') returning id`,
+                                 [conv, crypto.randomBytes(6).toString("hex")])).rows[0].id;
+        const fx = (await q.query(`insert into zorvin_quazar_faxina (conversa_id, advogado_id, cliente_ate_id, esperando_desde, status, resposta)
+                                   values ($1, $2, $3, now() - interval '3 days', 'pendente', 'pensando') returning id`, [conv, q.tel, m])).rows[0].id;
+        // guardado: sem a coluna, a cena reprova pelo nome, e não para a seção
+        await guardado(() => q.query(`update zorvin_quazar_faxina set resposta = 'na_fila',
+                         resposta_contexto = 'Leu o caso no Vantoro: 1 processo(s), 1 intimação(ões), 2 tarefa(s) (1 pendente(s), 1 de subsídio).'
+                       where id = $1`, [fx]));
+        const gravada = (await guardado(() => q.query("select resposta_contexto from zorvin_quazar_faxina where id = $1", [fx]))).rows?.[0];
+        ok("150c a ponte grava o que o Quazar leu", /1 de subsídio/.test(gravada?.resposta_contexto || ""), JSON.stringify(gravada));
+        const ler = await comoPessoa(q, U.ana, async () => guardado(() => q.query("select resposta_contexto from zorvin_quazar_faxina")));
+        const lidas = Array.isArray(ler.rows) ? ler.rows.length : null;
+        ok("quem entrou não lê a anotação", ler.codigo === "42501" || lidas === 0, JSON.stringify(ler.codigo ? ler : { linhas: lidas }));
+        const grv = await comoPessoa(q, U.ana, async () => guardado(() => q.query(
+          "update zorvin_quazar_faxina set resposta_contexto = 'x' where id = $1", [fx])));
+        const depois = (await guardado(() => q.query("select resposta_contexto from zorvin_quazar_faxina where id = $1", [fx]))).rows?.[0];
+        ok("nem grava nela", (grv.codigo === "42501" || grv.rowCount === 0) && depois?.resposta_contexto !== "x", JSON.stringify(grv.codigo ? grv : { linhas: grv.rowCount }));
+        const de2 = await guardado(() => aplicar(q, S["073"]));
+        ok("150d rodar de novo não acusa defeito", lista(de2).length > 0 && !defeito(de2), JSON.stringify(de2));
+        ok("nem apaga o que foi anotado", item(de2, /respostas a quem espera com a anotação/) === "1"
+           && /1 de subsídio/.test((await guardado(() => q.query("select resposta_contexto from zorvin_quazar_faxina where id = $1", [fx]))).rows?.[0]?.resposta_contexto || ""),
+           JSON.stringify(de2));
+      }
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
@@ -29142,8 +29203,8 @@ console.log("\n141. O Quazar responde quem espera — a rodada da ponte");
 //    - o telefone do próprio cliente não é lido como CPF;
 //    - com um cadastro pelo telefone, nada disso acontece;
 //    - de dia, em ensaio: procura, lê o caso, e não grava nada;
-//    - à noite: grava só valendo e dentro da janela do Vantoro; fora dela,
-//      não chama o Vantoro;
+//    - à noite: grava só valendo, a qualquer hora (desde 26/11 o Vantoro mora
+//      no Fly, sempre ligado), e lê o caso pelo cadastro achado;
 //    - o CPF nunca vai para o log nem para a nota;
 //    - sem a coluna do 071, a resposta sai assim mesmo, e o log diz.
 // ============================================================
@@ -29435,11 +29496,11 @@ console.log("\n145. O Quazar pede o nome e o CPF de quem não tem ficha — a po
     await t.parar(); await claude.parar(); await van.parar();
   }
 
-  // ---- 145i. à noite: valendo e na janela grava; fora da janela, não chama o Vantoro; em ensaio, não grava ----
+  // ---- 145i. à noite (26/11): valendo grava e lê o caso, também fora da janela de antes; em ensaio, não grava ----
   const ATE = new Date(AGORA + 9 * 3600000).toISOString();
   for (const [nome, modo, janela, grava, chama, cena] of [
     ["valendo, dentro da janela do Vantoro", "valendo", true, true, true, {}],
-    ["valendo, fora da janela do Vantoro", "valendo", false, false, false, {}],
+    ["valendo, fora da janela de antes (o Vantoro no Fly não dorme)", "valendo", false, true, true, {}],
     ["em ensaio, dentro da janela", "ensaio", true, false, true, {}],
     ["valendo, com um cadastro pelo telefone", "valendo", true, false, true, { porTelefone: [{ id: 5 }] }],
   ]) {
@@ -29467,18 +29528,19 @@ console.log("\n145. O Quazar pede o nome e o CPF de quem não tem ficha — a po
     if (grava) {
       ok(`145i ${nome}: acha o cadastro, acrescenta o número e liga a conversa`, posts(van).length === 1 && contato(t).vantoro_cliente_id === 88
          && (notasDe(t)[0] || {}).autor === "Quazar", JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
-      ok("e à noite não lê o caso, e as regras dizem para continuar sem falar do processo",
-         !van.pedidos.some((x) => /contexto/.test(x.url)) && /mesmo com o cadastro localizado, você continua sem enxergar o processo/.test(sistemaDe(claude.pedidos[0])));
+      ok("e à noite lê o caso pelo cadastro achado, e as regras dizem para usá-lo (26/11)",
+         van.pedidos.some((x) => /\/clientes\/88\/contexto$/.test(x.url)) && /Conclusos para despacho/.test(ped)
+         && /Com o cadastro localizado pelo CPF, o caso dele é lido e vem em <caso>: use-o/.test(sistemaDe(claude.pedidos[0]))
+         && !/continua sem enxergar o processo/.test(sistemaDe(claude.pedidos[0])), JSON.stringify(van.pedidos.map((x) => x.url)));
+      ok("e o registro diz o que ele leu", /Leu o caso no Vantoro: 1 processo\(s\)/.test(((t.sb.dados.zorvin_quazar_noturno || [])[0] || {}).contexto || ""),
+         JSON.stringify(t.sb.dados.zorvin_quazar_noturno));
     } else if (cena.porTelefone) {
       ok(`145i ${nome}: procura pelo telefone, e não consulta o CPF nem pede os dados`, van.pedidos.some((x) => /buscar\?telefone=/.test(x.url))
          && !van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length && !/<identificacao>/.test(ped),
          JSON.stringify(van.pedidos.map((x) => x.url)));
-    } else if (chama) {
-      ok(`145i ${nome}: procura, mas não grava`, van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length
-         && !contato(t).vantoro_cliente_id && !notasDe(t).length && /É ensaio/.test(ped), JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
     } else {
-      ok(`145i ${nome}: não chama o Vantoro, e diz que a equipe confirma`, !van.pedidos.length && /não deu para consultar o cadastro agora/.test(ped),
-         JSON.stringify(van.pedidos.map((x) => x.url)));
+      ok(`145i ${nome}: procura, mas não grava`, chama && van.pedidos.some((x) => /cpf-existe/.test(x.url)) && !posts(van).length
+         && !contato(t).vantoro_cliente_id && !notasDe(t).length && /É ensaio/.test(ped), JSON.stringify(van.pedidos.map((x) => `${x.metodo} ${x.url}`)));
     }
     ok("e o CPF não vai para o log", !cpfEm(registro(t)), registro(t).slice(-300));
     await t.parar(); await claude.parar(); await van.parar();
@@ -29612,6 +29674,9 @@ console.log("\n146. O Sugerir resposta: só a mensagem, e com o caso do cliente"
     ok("sem prometer prazo, sem número de processo inteiro, e sem resultado, valor ou pagamento",
        /Não prometa prazo nem data/.test(sis) && /não cite número de processo inteiro nem nome de juiz/.test(sis)
        && /siga ASSUNTOS QUE SÓ A EQUIPE RESPONDE/.test(sis));
+    ok("e as regras do que o caso diz: a intimação é o documento, o último andamento antigo e o subsídio (26/11)",
+       /O QUE O CASO DIZ: ANDAMENTO, INTIMAÇÃO E SUBSÍDIO/.test(sis) && /O documento é a intimação/.test(sis)
+       && /o último andamento que existe/.test(sis) && /TAREFA DE SUBSÍDIO/.test(sis) && /O juiz "determina", nunca "pede"/.test(sis));
     ok("o log diz as contagens do caso, e não o que está nele",
        /o caso lido \(1 processo\(s\), 0 intimação\(ões\), 1 tarefa\(s\) \(1 pendente\(s\)\)\)/.test(t.registro.join(""))
        && !/Conclusos/.test(t.registro.join("")), t.registro.join("").slice(-400));
@@ -30033,6 +30098,272 @@ console.log("\n148. O Quazar de dia, valendo — a ponte manda");
        && !/Primeiro nome do cliente/.test(ped), ped.slice(0, 900));
     ok("e o nome que ele disse está na conversa, para a IA ler", /Cliente: Meu nome é Osvaldo Prova/.test(ped), ped.slice(-900));
     await t.parar(); await claude.parar();
+  }
+}
+
+// ============================================================
+//  149. O CASO MAIS COMPLETO: A INTIMAÇÃO INTEIRA, O ÚLTIMO ANDAMENTO E O
+//       SUBSÍDIO — a ponte (26/11)
+//
+//  Pedido do Rodrigo: "Faça as 3 melhorias. [...] O melhor você sugere que
+//  ele leia o documento? [...] Também é necessário ele entender quando tiver
+//  tarefa de subsídio, para ele ler o que precisa ser concluído da tarefa e
+//  solicitar ao cliente o que precisa." O Vantoro passou a mandar o texto
+//  inteiro das intimações, o último andamento que existe e, em cada tarefa de
+//  subsídio, a determinação que a originou. A seção guarda:
+//    - o caso no pedido: os subsídios primeiro, com o que a tarefa pede e a
+//      determinação inteira; a determinação que não veio é dita; o último
+//      andamento antigo é dito como tal; a intimação inteira passa do teto de
+//      uma linha; a determinação não é escrita duas vezes; o RETORNO DO
+//      SUBSÍDIO é uma tarefa comum;
+//    - quem espera: anota o que leu (`resposta_contexto`, 073) e, com um
+//      subsídio pendente, nunca finaliza (`resolveu` falso), mesmo com a IA
+//      dizendo que resolveu; o caso de antes (sem as chaves novas) resolve;
+//    - num banco sem o 073, a resposta sai, sem a anotação, e o log diz qual
+//      script falta, uma vez;
+//    - à noite: lê o caso a qualquer hora (fora da janela de antes), as
+//      regras dizem para usá-lo, e o registro diz o que leu; com o Vantoro
+//      que demora, o pedido diz que o caso não foi lido, e a resposta sai;
+//    - de dia: as regras do caso, e o registro com o subsídio.
+// ============================================================
+console.log("\n149. O caso mais completo: a intimação inteira, o último andamento e o subsídio — a ponte");
+{
+  const cena = { resolveu: true };
+  async function subirClaude() {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      let corpo = "";
+      for await (const p of req) corpo += p;
+      let json = null;
+      try { json = JSON.parse(corpo); } catch (_) { /* fica nulo */ }
+      pedidos.push(json);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "msg", type: "message", role: "assistant", model: json && json.model,
+        content: [{ type: "text", text: JSON.stringify({ responder: true, resolveu: cena.resolveu,
+          mensagem: "Boa tarde, Maria! Peço desculpas pela demora. Para o seu processo, preciso de um comprovante de endereço atualizado, no seu nome.",
+          resumo: "Pediu o comprovante do subsídio.", motivo: "" }) }],
+        stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 60 } }));
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  // O CASO COMO O VANTORO NOVO MANDA. Os nomes e os processos são de mentira.
+  const P1 = "0001111-11.2025.8.05.0001";
+  const P2 = "0002222-22.2024.8.05.0001";
+  const DETERMINACAO = `DESPACHO. Intime-se a parte autora para juntar comprovante de endereço atualizado, em seu nome. ${"Texto do tribunal. ".repeat(110)}FIM-DA-DETERMINACAO`;
+  const LONGA = `DECISÃO. ${"Fundamentação da decisão. ".repeat(110)}FIM-DA-INTIMACAO`;
+  const CASO_NOVO = {
+    ok: true, cliente: { id: 88, nome: "MARIA DA PROVA" },
+    processos: [
+      { id: 1, numero: P1, tipo_acao: "Revisional", reu: "Banco X", status: "ATIVO", andamentos: [{ data: "2026-11-20", titulo: "Juntada de petição" }] },
+      { id: 2, numero: P2, tipo_acao: "Indenizatória", reu: "Banco Y", status: "ATIVO",
+        andamentos: [{ data: "2026-03-02", titulo: "Conclusos para sentença", antigo: true }] },
+    ],
+    intimacoes: [
+      { data: "2026-11-18", processo: P1, teor: DETERMINACAO, texto_inteiro: true, cortado: false },
+      { data: "2026-11-10", processo: P2, teor: LONGA, texto_inteiro: true, cortado: false },
+      { data: "2026-10-01", processo: P2, teor: "Começo de uma intimação mais antiga", texto_inteiro: false, cortado: true },
+    ],
+    tarefas: [
+      { situacao: "pendente", origem: "Vantoro", titulo: "SUBSÍDIO - COMPROVANTE DE ENDEREÇO", processo: P1, subsidio: true,
+        descricao: "Solicitar ao cliente comprovante de endereço atualizado, em nome dele.",
+        determinacao: { data: "2026-11-18", processo: P1, texto: DETERMINACAO, cortado: false } },
+      { situacao: "pendente", origem: "ADVBOX", titulo: "SUBSÍDIO - EXTRATO BANCÁRIO", processo: P2, subsidio: true, determinacao: null },
+      { situacao: "pendente", origem: "Vantoro", titulo: "RETORNO DO SUBSÍDIO", processo: P1, subsidio: false },
+      { situacao: "concluida", concluida_em: "2026-11-01", origem: "Vantoro", titulo: "Protocolo da inicial", subsidio: false },
+    ],
+    cortou: { processos: false, tarefas: false },
+  };
+  const CASO_DE_ANTES = { ok: true, cliente: { id: 88, nome: "MARIA DA PROVA" },
+    processos: [{ id: 1, numero: P1, tipo_acao: "Revisional", reu: "Banco X", status: "ATIVO", andamentos: [{ data: "2026-11-20", titulo: "Juntada de petição" }] }],
+    intimacoes: [], tarefas: [{ situacao: "pendente", origem: "Vantoro", titulo: "Conferir cálculo", processo: P1 }], cortou: { processos: false, tarefas: false } };
+  async function subirVantoro(caso, atrasoMs = 0) {
+    const pedidos = [];
+    const srv = http.createServer(async (req, res) => {
+      for await (const _ of req) { /* corpo */ }
+      pedidos.push(req.url);
+      if (atrasoMs) await espera(atrasoMs);
+      const json = (st, c) => { res.writeHead(st, { "Content-Type": "application/json" }); res.end(JSON.stringify(c)); };
+      if (/\/clientes\/88\/contexto$/.test(req.url)) return json(200, caso);
+      if (/\/clientes\/buscar\?/.test(req.url)) return json(200, { ok: true, clientes: [] });
+      json(404, { ok: false });
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    return { url: `http://127.0.0.1:${srv.address().port}`, pedidos, parar: () => new Promise((r) => srv.close(r)) };
+  }
+  const AGORA = Date.now();
+  const haDias = (d) => new Date(AGORA - d * 86400e3).toISOString();
+  const haMin = (m) => new Date(AGORA - m * 60000).toISOString();
+  const NUMERO = "5571988881149";
+  const msg = (id, origem, texto, quando) => ({ id, conversa_id: "c1", origem, tipo: "texto", texto, criado_em: quando });
+  const esperaAte = async (f, ms = 9000) => { const fim = Date.now() + ms; while (!f() && Date.now() < fim) await espera(60); return f(); };
+  const pedidoDe = (p) => String((p && p.messages && p.messages[0] && p.messages[0].content) || "");
+  const sistemaDe = (p) => ((p && p.system) || []).map((b) => b.text || "").join("\n");
+  const vezes = (texto, trecho) => String(texto).split(trecho).length - 1;
+  const ITEM = { id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate: haDias(4), esperando_desde: haDias(4), dias: 4,
+                 nome: "", departamento: "Sucesso do Cliente", pede_atencao: false };
+
+  async function quemEspera(caso, opcoes = {}) {
+    const claude = await subirClaude();
+    const van = await subirVantoro(caso);
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro", QUAZAR_RESPONDE_PRIMEIRA_MS: "200", QUAZAR_RESPONDE_INTERVALO_MS: "400" }, {
+      semColunas: opcoes.semColunas,
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria", vantoro_cliente_id: 88 }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aberto", esperando_desde: haDias(4) }],
+        mensagens: [msg("m1", "advogado", "Vou verificar.", haDias(6)), msg("m3", "contato", "Como está meu processo?", haDias(4))],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_quazar_faxina: [{ id: "f1", conversa_id: "c1", advogado_id: TELEFONE.id, cliente_ate_id: "m3", esperando_desde: haDias(4),
+                                 status: "pendente", resposta: null }],
+        fila_envio: [], notas: [],
+      },
+      rpcs: {
+        zorvin_quazar_responde_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_faxina || [])
+          .some((f) => f.id === "f1" && f.resposta == null) ? [{ ...ITEM, cliente_ate_id: "m3" }] : [] }),
+        zorvin_quazar_responde_confirmar: () => ({ corpo: { finalizadas: 0, abertas: 0, nao_saiu: 0, linha_caida: 0 } }),
+      },
+    });
+    const linha = () => (t.sb.dados.zorvin_quazar_faxina || []).find((f) => f.id === "f1") || {};
+    await esperaAte(() => linha().resposta === "na_fila");
+    return { t, claude, van, linha: linha(), ped: pedidoDe(claude.pedidos[0]), sis: sistemaDe(claude.pedidos[0]),
+             parar: async () => { await t.parar(); await claude.parar(); await van.parar(); } };
+  }
+
+  // ---- 149a. o caso no pedido de quem espera ----
+  {
+    cena.resolveu = true;
+    const c = await quemEspera(CASO_NOVO);
+    const { ped } = c;
+    ok("149a o caso entra no pedido, com as tarefas de subsídio antes de tudo",
+       /<caso>\nTAREFAS DE SUBSÍDIO \(o juiz determinou algo que depende do cliente; peça a ele o que falta\):/.test(ped)
+       && ped.indexOf("TAREFAS DE SUBSÍDIO") < ped.indexOf(`Processo ${P1}`), ped.slice(0, 1500));
+    ok("cada subsídio diz o que a tarefa pede", ped.includes(`Tarefa de SUBSÍDIO pendente (Vantoro): SUBSÍDIO - COMPROVANTE DE ENDEREÇO [processo ${P1}]`)
+       && ped.includes("  o que a tarefa pede: Solicitar ao cliente comprovante de endereço atualizado, em nome dele."), ped.slice(0, 1500));
+    ok("e a determinação que o originou, inteira (passa do teto de uma linha)",
+       ped.includes(`  a determinação (intimação de 2026-11-18, processo ${P1}): DESPACHO. Intime-se a parte autora`)
+       && ped.includes("FIM-DA-DETERMINACAO") && DETERMINACAO.length > 1600, `${DETERMINACAO.length} caracteres`);
+    ok("a determinação que não veio é dita, e manda pedir o que a tarefa pede",
+       ped.includes(`Tarefa de SUBSÍDIO pendente (ADVBOX): SUBSÍDIO - EXTRATO BANCÁRIO [processo ${P2}]`)
+       && ped.includes("  a intimação que originou a tarefa não foi encontrada: peça o que a tarefa pede."), ped.slice(0, 2500));
+    ok("o último andamento antigo é dito como tal",
+       ped.includes("  o último andamento que existe, de 2026-03-02 (nenhum nos últimos 180 dias): Conclusos para sentença")
+       && ped.includes("  andamento 2026-11-20: Juntada de petição"), ped.slice(0, 3000));
+    ok("a intimação que é a determinação não é escrita duas vezes", vezes(ped, "FIM-DA-DETERMINACAO") === 1
+       && ped.includes(`Intimação 2026-11-18 (processo ${P1}): é a determinação do subsídio, escrita acima.`), `${vezes(ped, "FIM-DA-DETERMINACAO")} vezes`);
+    ok("a intimação inteira vai inteira, e a outra diz que é o começo",
+       ped.includes(`Intimação 2026-11-10 (processo ${P2}) (texto inteiro): DECISÃO.`) && ped.includes("FIM-DA-INTIMACAO")
+       && ped.includes(`Intimação 2026-10-01 (processo ${P2}) (o começo do texto): Começo de uma intimação mais antiga`), ped.slice(-3000));
+    ok("o RETORNO DO SUBSÍDIO é uma tarefa comum, e o subsídio não se repete na lista de tarefas",
+       ped.includes(`Tarefa pendente (Vantoro): RETORNO DO SUBSÍDIO [processo ${P1}]`)
+       && !/Tarefa pendente \([^)]*\): SUBSÍDIO - /.test(ped) && ped.includes("Tarefa concluída em 2026-11-01 (Vantoro): Protocolo da inicial"), ped.slice(-1500));
+    ok("e as regras dizem o que o caso diz: a intimação é o documento e o subsídio se pede",
+       /O QUE O CASO DIZ: ANDAMENTO, INTIMAÇÃO E SUBSÍDIO/.test(c.sis) && /TAREFA DE SUBSÍDIO/.test(c.sis)
+       && /peça ao cliente exatamente o que falta/.test(c.sis) && /RETORNO DO SUBSÍDIO é a tarefa do advogado/.test(c.sis));
+    ok("149b quem espera anota o que leu, só com contagens", c.linha.resposta_contexto
+       === "Leu o caso no Vantoro: 2 processo(s), 3 intimação(ões), 4 tarefa(s) (3 pendente(s), 2 de subsídio).", JSON.stringify(c.linha));
+    ok("e com um subsídio pendente nunca finaliza, mesmo com a IA dizendo que resolveu", c.linha.resposta_resolveu === false, JSON.stringify(c.linha));
+    ok("e o log não leva o que está no caso", !/FIM-DA|Intime-se|COMPROVANTE/.test(c.t.registro.join("")), c.t.registro.join("").slice(-400));
+    await c.parar();
+  }
+
+  // ---- 149c. o caso de antes (sem as chaves novas) sai como saía, e resolve ----
+  {
+    cena.resolveu = true;
+    const c = await quemEspera(CASO_DE_ANTES);
+    ok("149c o caso de antes sai como saía", !/TAREFAS DE SUBSÍDIO/.test(c.ped) && c.ped.includes(`Tarefa pendente (Vantoro): Conferir cálculo [processo ${P1}]`)
+       && !/o último andamento que existe/.test(c.ped), c.ped.slice(0, 1200));
+    ok("e, sem subsídio, a resposta que resolveu resolve", c.linha.resposta_resolveu === true
+       && c.linha.resposta_contexto === "Leu o caso no Vantoro: 1 processo(s), 0 intimação(ões), 1 tarefa(s) (1 pendente(s)).", JSON.stringify(c.linha));
+    await c.parar();
+  }
+
+  // ---- 149d. num banco sem o 073: a resposta sai sem a anotação, e o log diz uma vez ----
+  {
+    cena.resolveu = true;
+    const c = await quemEspera(CASO_NOVO, { semColunas: { zorvin_quazar_faxina: ["resposta_contexto"] } });
+    ok("149d sem a coluna do 073, a resposta é guardada assim mesmo, sem a anotação",
+       c.linha.resposta === "na_fila" && !("resposta_contexto" in c.linha) && c.linha.resposta_resolveu === false, JSON.stringify(c.linha));
+    const reg = c.t.registro.join("");
+    ok("e o log diz qual script falta, uma vez", vezes(reg, "073-o-quazar-anota-se-leu-o-caso.sql") === 1, reg.slice(-600));
+    await c.parar();
+  }
+
+  // ---- 149e. à noite: lê o caso a qualquer hora, e o registro diz o que leu ----
+  const ATE = new Date(AGORA + 9 * 3600000).toISOString();
+  async function aNoite(caso, env = {}, atrasoMs = 0) {
+    const claude = await subirClaude();
+    const van = await subirVantoro(caso, atrasoMs);
+    const item = { conversa_id: "c1", advogado_id: TELEFONE.id, departamento_id: 1, departamento: "Sucesso do Cliente", modo: "ensaio",
+                   fuso: "America/Sao_Paulo", ate: ATE, fechou_em: haMin(240), cliente_ate: haMin(5), cliente_ate_id: "m3" };
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro", QUAZAR_NOITE_PRIMEIRA_MS: "200", QUAZAR_NOITE_INTERVALO_MS: "400",
+      VANTORO_ACORDADO_DE: "0", VANTORO_ACORDADO_ATE: "0", ...env }, {
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria", vantoro_cliente_id: 88 }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1" }],
+        mensagens: [msg("m1", "advogado", "Combinado.", haMin(600)), msg("m3", "contato", "Boa noite, como está meu processo?", haMin(5))],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_fora_do_horario: [{ departamento_id: 1, ligada: true, texto: "Pronta.", quazar: "ensaio" }],
+        zorvin_respostas_automaticas: [], zorvin_quazar_noturno: [], fila_envio: [], notas: [],
+      },
+      rpcs: { zorvin_quazar_noturno_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || [])
+        .some((q) => q.cliente_ate_id === "m3") ? [] : [item] }) },
+    });
+    const linha = () => (t.sb.dados.zorvin_quazar_noturno || []).find((l) => ["pronta", "enviada"].includes(l.status)) || null;
+    await esperaAte(() => linha());
+    return { t, claude, van, linha: linha() || {}, ped: pedidoDe(claude.pedidos[0]), sis: sistemaDe(claude.pedidos[0]),
+             parar: async () => { await t.parar(); await claude.parar(); await van.parar(); } };
+  }
+  {
+    const c = await aNoite(CASO_NOVO);
+    ok("149e à noite, fora da janela de antes, lê o caso pelo cadastro ligado ao contato",
+       c.van.pedidos.some((u) => /\/clientes\/88\/contexto$/.test(u)) && /<caso>\nTAREFAS DE SUBSÍDIO/.test(c.ped)
+       && c.ped.includes("FIM-DA-DETERMINACAO"), JSON.stringify(c.van.pedidos));
+    ok("e as regras da noite dizem para usar o caso, com as regras do subsídio",
+       /O CASO DO CLIENTE \(26\/11: à noite você também lê o caso\)/.test(c.sis) && /TAREFA DE SUBSÍDIO/.test(c.sis)
+       && !/Não diz em que pé está o processo/.test(c.sis), c.sis.slice(0, 1500));
+    ok("e o registro da noite diz o que ele leu", c.linha.contexto
+       === "Leu o caso no Vantoro: 2 processo(s), 3 intimação(ões), 4 tarefa(s) (3 pendente(s), 2 de subsídio).", JSON.stringify(c.linha));
+    await c.parar();
+  }
+
+  // ---- 149f. à noite, com o Vantoro que demora: o caso não é lido, e a resposta sai assim mesmo ----
+  {
+    const c = await aNoite(CASO_NOVO, { CASO_PRAZO_MS: "300" }, 2000);
+    ok("149f com o Vantoro que demora, o pedido diz que o caso não foi lido", c.claude.pedidos.length >= 1
+       && c.ped.includes("O caso NÃO foi lido (o Vantoro demorou para responder). Não diga nada sobre o processo: diga que a equipe confere quando voltar.")
+       && !/TAREFAS DE SUBSÍDIO/.test(c.ped), c.ped.slice(0, 1200));
+    ok("e a resposta sai, com o registro dizendo por que não leu", c.linha.status === "pronta"
+       && c.linha.contexto === "Sem o caso: o Vantoro demorou para responder.", JSON.stringify(c.linha));
+    await c.parar();
+  }
+
+  // ---- 149g. de dia: as regras do caso, e o registro com o subsídio ----
+  {
+    const claude = await subirClaude();
+    const van = await subirVantoro(CASO_NOVO);
+    const t = await subirTudo({ ANTHROPIC_API_KEY: "sk-ant-de-mentira", ANTHROPIC_API_URL: claude.url, COPILOTO_MODELO: "",
+      VANTORO_API_URL: van.url, VANTORO_API_TOKEN: "tok-vantoro", QUAZAR_DIA_PRIMEIRA_MS: "200", QUAZAR_DIA_INTERVALO_MS: "400" }, {
+      tabelas: {
+        contatos: [{ id: "k1", numero: NUMERO, nome: "Maria", vantoro_cliente_id: 88 }],
+        conversas: [{ id: "c1", advogado_id: TELEFONE.id, contato_id: "k1", situacao: "aguardando" }],
+        mensagens: [msg("m3", "contato", "Bom dia, como está meu processo?", haMin(5))],
+        zorvin_copiloto: [{ id: true, instrucoes: "MANUAL", nome_do_escritorio: "Escritório de Prova" }],
+        zorvin_quazar_noturno: [], zorvin_respostas_automaticas: [], fila_envio: [], notas: [],
+      },
+      rpcs: { zorvin_quazar_de_dia_pendentes: (json, dados) => ({ corpo: (dados.zorvin_quazar_noturno || []).some((q) => q.cliente_ate_id === "m3") ? []
+        : [{ conversa_id: "c1", advogado_id: TELEFONE.id, telefone: "SAC", departamento: "Sucesso do Cliente", fuso: "America/Sao_Paulo",
+             modo: "ensaio", cliente_ate: haMin(5), cliente_ate_id: "m3" }] }) },
+    });
+    await esperaAte(() => (t.sb.dados.zorvin_quazar_noturno || []).some((l) => l.status === "pronta"));
+    const l = (t.sb.dados.zorvin_quazar_noturno || []).find((x) => x.status === "pronta") || {};
+    const sis = sistemaDe(claude.pedidos[0]);
+    ok("149g de dia, as regras do caso e o caso com o subsídio no pedido", /O QUE O CASO DIZ: ANDAMENTO, INTIMAÇÃO E SUBSÍDIO/.test(sis)
+       && /<caso>\nTAREFAS DE SUBSÍDIO/.test(pedidoDe(claude.pedidos[0])), sis.slice(-2000));
+    ok("e o registro do dia diz o que leu, com o subsídio", /^Leu o caso no Vantoro: 2 processo\(s\), 3 intimação\(ões\), 4 tarefa\(s\) \(3 pendente\(s\), 2 de subsídio\)\./.test(l.contexto || ""),
+       JSON.stringify(l));
+    await t.parar(); await claude.parar(); await van.parar();
   }
 }
 

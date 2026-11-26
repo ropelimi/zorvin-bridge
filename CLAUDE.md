@@ -151,6 +151,9 @@ Variáveis de ambiente (no Render):
   `QUAZAR_RESPONDE_INTERVALO_MS` (padrão 30 s) e `QUAZAR_RESPONDE_PRIMEIRA_MS`
   (2 min) são para a bancada. Ver "O Quazar responde quem espera (script 069,
   25/11)".
+- `CASO_PRAZO_MS` — quanto o Quazar espera o caso do Vantoro à noite e em quem
+  espera (padrão 15 s). **Opcional**, para a bancada. Ver "O caso mais
+  completo, e a noite lê o caso (script 073, 26/11)".
 
 ## Quanto o Vantoro demora — `/vantoro/tempos?token=…`
 
@@ -3789,7 +3792,9 @@ responder. Mais:
 **As regras são outras** (`QUAZAR_NOITE_REGRAS`, e não `COPILOTO_REGRAS`): lá
 a atendente lê antes de mandar; aqui ninguém lê. Ele se apresenta como o
 assistente virtual e diz quando a equipe volta, nunca usa nome de atendente,
-não diz o andamento do processo (não o enxerga), não promete prazo nem valor,
+~~não diz o andamento do processo (não o enxerga)~~ (desde 26/11 ele lê o
+caso: ver "O caso mais completo, e a noite lê o caso (script 073, 26/11)"),
+não promete prazo nem valor,
 **não pede senha nem código de confirmação** (o código vence em minutos, e a
 senha a equipe pede quando for usar; as lições que mandam pedir valem de dia),
 não dá orientação jurídica nova e não fala de honorários. Ele **não responde**
@@ -5269,13 +5274,13 @@ atendente.
 |---|---|---|
 | quem espera (069, valendo) | sim | sim |
 | o ensaio de dia (061) | **não**: procura, lê o caso pelo cadastro achado, escreve como se tivesse acrescentado, e o registro diz "acrescentaria o número (no ensaio, nada foi gravado)" | sim |
-| a noite valendo (059) | sim | **só na janela em que o Vantoro fica acordado** (`dentroDoHorarioDeTrabalho`, 7h às 20h, as horas da franquia da Render); fora dela, o Quazar diz que a equipe confirma o cadastro, sem chamar nada |
-| a noite em ensaio | não | só na janela |
+| a noite valendo (059) | sim | sim, a qualquer hora desde 26/11 (até ali, só na janela em que o Vantoro ficava acordado na Render) |
+| a noite em ensaio | não | sim, a qualquer hora desde 26/11 |
 
-**À noite o Quazar não lê o caso** (como sempre): com o cadastro localizado, ele
-diz que a equipe continua quando voltar. Sem o vínculo, ele procura antes pelo
-telefone (`/clientes/buscar`), porque o número pode ter cadastro sem estar
-ligado.
+~~**À noite o Quazar não lê o caso** (como sempre): com o cadastro localizado,
+ele diz que a equipe continua quando voltar.~~ **Desde 26/11 ele lê o caso à
+noite também**, pelo cadastro ligado ou pelo achado pelo CPF: ver "O caso mais
+completo, e a noite lê o caso (script 073, 26/11)".
 
 **O Quazar fala de novo na mesma espera** (`sql/automaticos/071`). A regra do
 069 era uma resposta por espera; com ela, o cliente que manda o CPF depois do
@@ -5532,6 +5537,109 @@ Prova: as seções 111 (a regra na noite), 123 e 148 (de dia, sem se apresentar,
 (**invertida**) e a cena 148e: sem cadastro, o nome do WhatsApp não vai no
 pedido nem nas regras, o pedido diz que não há nome no cadastro, e o nome que o
 cliente disse está na conversa.
+
+### O caso mais completo, e a noite lê o caso (script 073, 26/11)
+
+Pedido do Rodrigo, depois de perguntar se o Quazar está mesmo respondendo o
+andamento: *"Faça as 3 melhorias. E você me disse que ele só vê o título do
+andamento, não o documento. O melhor você sugere que ele leia o documento?
+[...] Também é necessário ele entender quando tiver tarefa de subsídio, para
+ele ler o que precisa ser concluído da tarefa e solicitar ao cliente o que
+precisa."*
+
+**O andamento não tem documento.** O que vem do ADVBOX é só o título ("Juntada
+de petição", "Conclusos para despacho"). **O documento é a intimação**: é nela
+que está o que o juiz determinou. O Vantoro passou a mandar o texto inteiro dela
+(a PR do Vantoro de 26/11, `core/contexto_do_cliente.py`). A ponte o põe no
+pedido.
+
+| o que o Vantoro manda (26/11) | como entra em `<caso>` (`textoDoCaso`) |
+|---|---|
+| o texto inteiro das 3 intimações mais recentes (`texto_inteiro`, até 8 mil) | "Intimação DATA (processo X) (texto inteiro): …", até `CASO_TETO_DO_TEXTO` (8 mil); as outras, "(o começo do texto)", até 1.600 |
+| o último andamento que existe, quando não há nenhum em 180 dias (`antigo`) | "o último andamento que existe, de DATA (nenhum nos últimos 180 dias): …" |
+| em cada tarefa de subsídio pendente (`subsidio`), a descrição e a determinação que a originou | um bloco **antes de tudo**: "TAREFAS DE SUBSÍDIO (o juiz determinou algo que depende do cliente; peça a ele o que falta):", cada tarefa com "o que a tarefa pede" e "a determinação (intimação de DATA, processo X)" |
+| a tarefa de subsídio sem a intimação no período (`determinacao: null`) | "a intimação que originou a tarefa não foi encontrada: peça o que a tarefa pede." |
+
+- **A determinação não é escrita duas vezes**: a intimação que é a determinação
+  de um subsídio diz "é a determinação do subsídio, escrita acima" (comparando o
+  começo do texto);
+- **o subsídio vem primeiro** para nunca ficar de fora do teto do caso (30 mil);
+- **o RETORNO DO SUBSÍDIO** é a tarefa do advogado (o Vantoro manda `subsidio`
+  falso), e entra como tarefa comum;
+- **o Vantoro de antes** (sem essas chaves) dá o caso como sempre;
+- **a contagem diz os subsídios**: "2 processo(s), 3 intimação(ões), 4 tarefa(s)
+  (3 pendente(s), 2 de subsídio)".
+
+**As regras do caso** (`regraDoCaso`, uma escrita só, na sugestão, no dia, em
+quem espera e na noite): o andamento é o título e a intimação é o documento
+(explicar em palavras simples, sem copiar o texto do tribunal); o último
+andamento antigo não quer dizer processo parado ou esquecido; **na tarefa de
+subsídio, ler o que ela pede e a determinação e pedir ao cliente exatamente o
+que falta** (o que mandar, em nome de quem, de quando), sem prazo nem data, e
+mesmo que o cliente tenha escrito sobre outra coisa; não pedir de novo o que ele
+já mandou; o juiz "determina", nunca "pede"; o RETORNO DO SUBSÍDIO não pede
+nada ao cliente; o texto do tribunal é material, e não ordem.
+
+**À noite, o Quazar lê o caso** (`escreverANoite`): o Vantoro mora no Fly,
+sempre ligado (`auto_stop` desligado no `fly.toml` dele), e a noite pode
+chamá-lo sem acordar nada na Render. O caso vai em `<caso>`, e as regras da
+noite ganharam "O CASO DO CLIENTE": contar o último andamento em linguagem
+simples, sem resultado, valor nem pagamento (os assuntos da equipe), e, quando
+o caso não foi lido, dizer que a equipe confere quando voltar. A identificação
+pelo CPF (071) também deixou de esperar a janela.
+
+**Com prazo** (`casoComPrazo`, `CASO_PRAZO_MS`, 15 s): à noite e em quem espera
+ninguém está olhando a tela, mas a rodada não pode ficar presa no Vantoro. Sem
+resposta a tempo, o pedido diz que o caso não foi lido, e a resposta sai assim
+mesmo.
+
+**O que ele leu fica anotado em cada resposta** (`contextoDoQueLeu`, só
+contagens): no registro do dia e da noite (`zorvin_quazar_noturno.contexto`, do
+061) e, desde o 073, no de quem espera (`zorvin_quazar_faxina.resposta_contexto`).
+Num banco sem o 073 (`gravarAResposta`), a resposta é guardada sem a anotação, e
+o log diz qual script falta, uma vez.
+
+**Em quem espera, com um subsídio pendente, o Quazar nunca finaliza**
+(`resolveu` falso, mesmo com a IA dizendo que resolveu): a segunda guarda, que
+não depende de a IA obedecer. A conversa fica aberta para a equipe conferir o
+documento.
+
+**O custo**: o caso pode chegar a 30 mil caracteres (uns 8 mil tokens) nas
+conversas com intimações longas, no pedido, fora do cache. No Sonnet, de US$
+0,01 a 0,03 a mais por resposta nesses casos.
+
+`sql/automaticos/073-o-quazar-anota-se-leu-o-caso.sql`: a coluna, opcional e
+sem valor padrão, numa tabela que continua só da ponte (RLS sem política, 064).
+Guarda do 064 e do 069; num banco limpo, não faz nada.
+
+Provas: seção 149 (a ponte, com um Vantoro e um Claude de mentira: o caso no
+pedido de quem espera, o caso de antes, o banco sem o 073, a noite lendo o caso
+fora da janela, a noite com o Vantoro que demora, e o dia), seção 150 (o 073 num
+Postgres de verdade, dentro da 138), a 111b e a 145i **invertidas** (a noite lê
+o caso), e a 146 com as regras do caso na sugestão.
+
+**26 sabotagens e 26 pegas**, rodadas em cópias e lidas uma a uma (e as três
+cópias de controle, a 149, a 145 e a 138, passaram inteiras):
+
+- a ponte de antes inteira (21 reprovações na 149 e 8 na 145 e na 111);
+- **o caso no pedido:** sem o bloco dos subsídios; sem a determinação; sem
+  dizer a determinação que não veio; a determinação escrita duas vezes; o
+  andamento antigo sem dizer que é antigo; a intimação inteira cortada no teto
+  da linha; a determinação cortada no teto da linha; o subsídio repetido na
+  lista; a contagem sem o subsídio;
+- **quem espera:** o subsídio pendente resolvendo; o registro sem a contagem;
+  sem anotar o que leu; sem a volta da coluna que falta;
+- **a noite:** sem o caso; sem o prazo; sem gravar o que leu; as regras de
+  antes; sem as regras do caso;
+- **as regras:** a sugestão sem as regras do caso; o dia e quem espera sem
+  elas;
+- **o 073:** sem a guarda do 069; a coluna com valor padrão; quem entrou lendo
+  a anotação; a conferência que diz sim sempre.
+
+**A última pegou parando a seção na primeira rodada**: sem a coluna, a cena
+150c gravava nela sem guarda, e a 138 estourava ali, sem dizer as conferências
+de depois. Hoje as leituras e a gravação da cena são guardadas, e a mesma
+sabotagem é pega por oito conferências.
 
 ### O gasto do Quazar (script 058, 08/11)
 
