@@ -329,6 +329,40 @@ porta, e a ponte responde com a função `zorvin_controle_atendimento` (script
   avisa na tela. A porta não mudou: ela já repassa cada conversa como vem.
   Prova: seção 74.
 
+### As mensagens da equipe, dia a dia — `POST /vantoro/mensagens-da-equipe` (script 074, 26/11)
+
+As tarefas de **subsídio** do Vantoro contam as **tentativas de contato** com
+o cliente: conta a mensagem que uma **pessoa** da equipe mandou no Zorvin
+(painel ou celular), sobre qualquer assunto, **uma por dia**. O resumo acima
+só traz a ÚLTIMA mensagem, e com ela a tentativa de terça some quando alguém
+escreve na quarta. Esta porta entrega os **dias**: para cada conversa e cada
+dia de Brasília desde `desde`, a **primeira** mensagem de gente da equipe
+(`zorvin_mensagens_da_equipe(p_desde, p_limite)`, do 074).
+
+- **A mesma tranca** da porta do resumo: assinatura do corpo, pedido que vence
+  em 5 minutos, função só da `service_role` (e não `security definer`).
+- **Pedido:** `{pedido_em, desde: "AAAA-MM-DD", limite}`. `desde` é
+  obrigatório (escrito errado: 400); mais de 400 dias atrás vira 400 dias, e a
+  resposta diz a data que valeu. `limite` vai de 1 a 20000 (padrão 20000).
+- **Resposta:** `{ok, gerado_em, desde, completo, mensagens: [{conversa_id,
+  linha_numero, contato_numero, vantoro_cliente_id, dia, primeira_em, quem,
+  pelo_celular}]}`, do mais antigo para o mais novo. `quem` e `pelo_celular`
+  são a mesma conta de `ultima_quem` e `ultima_pelo_celular`. O limite corta o
+  FIM, e `completo: false` diz que cortou: o Vantoro pede de novo a partir do
+  último dia recebido.
+- **O que é "gente"** é a régua de `ehDaEquipeDeVerdade` (origem `advogado`,
+  sem `automatica`, sem `pelo_quazar`) mais: com autor (`enviado_por_id` ou
+  `enviado_por`), não apagada, e fora de `zorvin_respostas_automaticas` pelo
+  id do WhatsApp. Ficam de fora o aviso de audiência, o Quazar, a resposta
+  fora do horário, o passado trazido por `/importar-historico` (chega sem
+  autor) e o grupo; entram a conversa finalizada, a arquivada e a de telefone
+  desativado depois. O porquê de cada uma está no cabeçalho do 074. **A
+  apagada de fora é decisão minha, a confirmar com o escritório.** A
+  automática do próprio WhatsApp Business do celular não tem como ser
+  separada: entra como "WhatsApp".
+- Sem o 074, 503 com *"(script 074)"*. Provas: seções 151 (a porta) e 152 (a
+  função, num Postgres de verdade).
+
 ## A entrada de mensagens — a caixa de entrada do webhook
 
 O "OK" que a ponte responde à Uazapi é uma **promessa**: dali em diante ela considera a
