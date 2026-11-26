@@ -9920,9 +9920,9 @@ function regraDoCaso() {
 }
 
 /** Os arquivos que o cliente manda, para o Quazar que ABRE as fotos e os
- *  PDFs (24/11): a noite e o dia. A sugestão continua com `regraDosArquivos`
- *  (lá quem abre o arquivo é a atendente). `depois` diz o que fazer com o
- *  arquivo que ele não abriu. */
+ *  PDFs (24/11): a noite, o dia, quem espera e, desde 26/11, o "Sugerir
+ *  resposta" e o "Pedir uma mudança". `depois` diz o que fazer com o arquivo
+ *  que ele não abriu. */
 function regraDosArquivosAbertos(depois) {
   return [
     'OS ARQUIVOS QUE O CLIENTE MANDA',
@@ -9969,7 +9969,10 @@ const COPILOTO_REGRAS = [
   '',
   regraDoCaso(),
   '',
-  regraDosArquivos('Se a resposta depende do que está no arquivo, escreva só que recebeu: quem abre o arquivo é a atendente.'),
+  // A SUGESTÃO ABRE OS ARQUIVOS (26/11, pedido do Rodrigo: "Ele tem que abrir
+  // sim, para entender do que se trata o conteúdo e poder responder o
+  // cliente"). Antes, ela via só o nome (regraDosArquivos, 23/11).
+  regraDosArquivosAbertos('Se a resposta depende do que está nele, escreva só que recebeu; a atendente confere.'),
   '',
   regraDaConversaInteira(),
   '',
@@ -10794,11 +10797,22 @@ async function sugerirResposta(jwt, conversaId) {
   // O DOCUMENTO DO ANDAMENTO (26/11): a ferramenta só vai quando o caso tem
   // andamento com documento no LegalMail, e a IA só a usa se precisar.
   const documento = grupo ? null : ferramentaDoDocumento(caso, 'copiloto');
-  const r = await pedirAoClaude(
-    [sistemaDoCopiloto(manual, rapidas, licoes, regras), notasDoCopiloto(aprendido)],
-    pedidoDoCopiloto({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, exemplos, caso: grupo ? null : caso, ident }),
-    comAFerramentaDoDocumento(pesquisa ? { ...PEDIDO_DA_SUGESTAO, tools: [pesquisa] } : PEDIDO_DA_SUGESTAO, documento),
-    { rota: 'sugerir', prazoMs: pesquisa || documento ? 90000 : 45000, ferramentas: documento && documento.executores });
+  // AS FOTOS E OS PDFs DO CLIENTE (26/11), como à noite: abertos antes de
+  // montar o pedido, e a linha de cada um na conversa diz qual "Arquivo N" é.
+  const arquivos = await abrirArquivosDoCliente(mensagens);
+  logDosArquivos('copiloto', arquivos);
+  const sistemaDaSugestao = [sistemaDoCopiloto(manual, rapidas, licoes, regras), notasDoCopiloto(aprendido)];
+  const montar = () => pedidoDoCopiloto({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, exemplos, caso: grupo ? null : caso, ident });
+  const opcoesDaSugestao = comAFerramentaDoDocumento(pesquisa ? { ...PEDIDO_DA_SUGESTAO, tools: [pesquisa] } : PEDIDO_DA_SUGESTAO, documento);
+  let r = await pedirAoClaude(sistemaDaSugestao, pedidoComArquivos(montar(), arquivos.abertos), opcoesDaSugestao,
+    { rota: 'sugerir', prazoMs: pesquisa || documento || arquivos.abertos.length ? 90000 : 45000, ferramentas: documento && documento.executores });
+  if (r.status === 400 && arquivos.abertos.length) {
+    // A ANTHROPIC RECUSOU OS ARQUIVOS: a sugestão sai sem eles.
+    console.warn('copiloto: a Anthropic recusou os arquivos (400) — sugiro sem eles.');
+    esquecerArquivos(arquivos);
+    r = await pedirAoClaude(sistemaDaSugestao, montar(), opcoesDaSugestao,
+      { rota: 'sugerir', prazoMs: pesquisa || documento ? 90000 : 45000, ferramentas: documento && documento.executores });
+  }
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
@@ -10820,7 +10834,8 @@ async function sugerirResposta(jwt, conversaId) {
     + `${uso.input_tokens || 0} tokens de entrada (+${uso.cache_read_input_tokens || 0} do cache), `
     + `${uso.output_tokens || 0} de saída`
     + `${pesquisasFeitas(r.corpo) ? `; ${pesquisasFeitas(r.corpo)} pesquisa(s) na internet` : ''}`
-    + `${documento && documento.lidos.length ? '; abriu o documento de um andamento' : ''}.`);
+    + `${documento && documento.lidos.length ? '; abriu o documento de um andamento' : ''}`
+    + `${arquivos.abertos.length ? `; abriu ${arquivos.abertos.length} arquivo(s) do cliente` : ''}.`);
   const fontes = fontesDaPesquisa(r.corpo);
   return { status: 200, corpo: { ok: true, sugestao, pesquisou: pesquisasFeitas(r.corpo) > 0, fontes } };
 }
@@ -11042,11 +11057,20 @@ async function ajustarSugestao(jwt, usuario, conversaId, mensagemDeAgora, pedido
   ]);
   if (lido.falha) return lido.falha;
   const { mensagens, manual, rapidas, departamento, licoes, aprendido, grupo, exemplos } = lido;
-  const r = await pedirAoClaude([sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)],
-    pedidoDoAjuste({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos,
-      caso: grupo ? null : caso }),
-    { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } },
-    { rota: 'ajustar' });
+  // AS FOTOS E OS PDFs DO CLIENTE (26/11), como na sugestão.
+  const arquivos = await abrirArquivosDoCliente(mensagens);
+  logDosArquivos('copiloto', arquivos);
+  const sistemaDoAjuste = [sistemaDoCopiloto(manual, rapidas, licoes), notasDoCopiloto(aprendido)];
+  const montar = () => pedidoDoAjuste({ mensagens, marcos: lido.marcos, departamento: departamento.nome, grupo, mensagemDeAgora, pedido, exemplos,
+    caso: grupo ? null : caso });
+  const opcoesDoAjuste = { ...PEDIDO_DA_SUGESTAO, output_config: { ...PEDIDO_DA_SUGESTAO.output_config, format: formatoDoAjuste() } };
+  let r = await pedirAoClaude(sistemaDoAjuste, pedidoComArquivos(montar(), arquivos.abertos), opcoesDoAjuste,
+    { rota: 'ajustar', ...(arquivos.abertos.length ? { prazoMs: 90000 } : {}) });
+  if (r.status === 400 && arquivos.abertos.length) {
+    console.warn('copiloto: a Anthropic recusou os arquivos (400) — mudo a mensagem sem eles.');
+    esquecerArquivos(arquivos);
+    r = await pedirAoClaude(sistemaDoAjuste, montar(), opcoesDoAjuste, { rota: 'ajustar' });
+  }
   if (!r.ok) {
     console.error(`copiloto: a Anthropic respondeu ${r.status}`,
       JSON.stringify((r.corpo && r.corpo.error) || {}).slice(0, 300));
