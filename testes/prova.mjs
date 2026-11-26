@@ -30367,5 +30367,421 @@ console.log("\n149. O caso mais completo: a intimação inteira, o último andam
   }
 }
 
+// ============================================================
+//  151. AS MENSAGENS DA EQUIPE, DIA A DIA — a porta (26/11)
+//
+//  O Vantoro marca as tentativas de contato dos subsídios com os DIAS em que
+//  alguém da equipe escreveu a cada cliente. A porta LÊ conversas de todos os
+//  telefones, e por isso tem a tranca de /vantoro/atendimento (seção 69):
+//    - a assinatura do corpo, e o pedido que vence em 5 minutos;
+//    - `desde` obrigatório e escrito certo; mais de 400 dias atrás é trazido
+//      para dentro da régua, e a resposta diz a data que valeu;
+//    - `limite` dentro da régua (1 a 20000), e `completo` repassado;
+//    - sem o 074, 503 com o número do script.
+// ============================================================
+{
+  console.log("\n151. As mensagens da equipe, dia a dia, para o Vantoro: a porta");
+  const SEG = "segredo-do-vantoro";
+  const pedir = (porta, corpo, { segredo = SEG, assinatura } = {}) => {
+    const bytes = Buffer.from(JSON.stringify(corpo), "utf8");
+    const assinada = assinatura !== undefined ? assinatura
+      : crypto.createHmac("sha256", segredo).update(bytes).digest("hex");
+    return fetch(`http://127.0.0.1:${porta}/vantoro/mensagens-da-equipe`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Vantoro-Assinatura": assinada }, body: bytes,
+    });
+  };
+  // O DIA DE BRASÍLIA, com a mesma conta da ponte, e N dias antes dele.
+  const hojeSP = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo",
+    year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const menos = (dia, n) => new Date(Date.parse(`${dia}T00:00:00Z`) - n * 86400e3).toISOString().slice(0, 10);
+  const LINHA = { conversa_id: "cv-1", linha_numero: "SAC", contato_numero: "5500000000001", vantoro_cliente_id: "42",
+                  dia: "2026-11-20", primeira_em: "2026-11-20T13:00:00+00:00", quem: "Ana", pelo_celular: false };
+  let completo = true;
+  const pedidos = [];
+  const t = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEG }, {
+    rpcs: { zorvin_mensagens_da_equipe: (corpo) => {
+      pedidos.push(corpo);
+      return { corpo: { gerado_em: "2026-11-26T15:00:00Z", desde: corpo.p_desde, completo, mensagens: [LINHA] } };
+    } },
+  });
+  try {
+    const agora = () => new Date().toISOString();
+    const DESDE = menos(hojeSP(), 30);
+
+    // ---- 151a. o pedido certo ----
+    const r = await pedir(t.porta, { pedido_em: agora(), desde: DESDE });
+    const j = await r.json().catch(() => ({}));
+    ok("151a com a assinatura do Vantoro, a porta devolve as mensagens da equipe", r.status === 200 && j.ok === true
+       && j.mensagens?.length === 1 && j.mensagens[0].quem === "Ana" && j.mensagens[0].dia === "2026-11-20", JSON.stringify(j));
+    ok("e diz de quando é, desde quando, e que veio tudo", j.gerado_em === "2026-11-26T15:00:00Z" && j.desde === DESDE
+       && j.completo === true, JSON.stringify(j));
+    ok("a resposta tem as cinco chaves, e só elas", JSON.stringify(Object.keys(j).sort())
+       === JSON.stringify(["completo", "desde", "gerado_em", "mensagens", "ok"]), JSON.stringify(Object.keys(j)));
+    ok("o banco recebe a data pedida e, sem limite, 20000",
+       pedidos.length === 1 && pedidos[0].p_desde === DESDE && pedidos[0].p_limite === 20000, JSON.stringify(pedidos));
+
+    // ---- 151b. a régua: 400 dias e o limite ----
+    const longe = await pedir(t.porta, { pedido_em: agora(), desde: menos(hojeSP(), 500), limite: 999999 });
+    const jl = await longe.json().catch(() => ({}));
+    ok("151b desde 500 dias atrás vira 400, e a resposta diz a data que valeu",
+       longe.status === 200 && pedidos[1]?.p_desde === menos(hojeSP(), 400) && jl.desde === menos(hojeSP(), 400),
+       JSON.stringify({ pedido: pedidos[1], desde: jl.desde }));
+    ok("e o limite acima do teto vira 20000", pedidos[1]?.p_limite === 20000, JSON.stringify(pedidos[1]));
+    await pedir(t.porta, { pedido_em: agora(), desde: menos(hojeSP(), 400), limite: -5 });
+    ok("exatamente 400 dias passa como veio, e o limite negativo vira 1",
+       pedidos[2]?.p_desde === menos(hojeSP(), 400) && pedidos[2]?.p_limite === 1, JSON.stringify(pedidos[2]));
+    completo = false;
+    const cortada = await (await pedir(t.porta, { pedido_em: agora(), desde: DESDE, limite: 1 })).json().catch(() => ({}));
+    ok("quando o banco diz que cortou, a porta repassa `completo: false`", cortada.completo === false, JSON.stringify(cortada));
+    completo = true;
+
+    // ---- 151c. a data escrita errada é recusada, e não adivinhada ----
+    const antes = pedidos.length;
+    const datas = [["sem desde", undefined], ["no formato de Brasília", "11/03/2026"], ["um dia que não existe", "2026-02-30"],
+                   ["com hora junto", "2026-11-20T10:00:00Z"]];
+    ok("são quatro as datas erradas conferidas", datas.length === 4, String(datas.length));
+    for (const [nome, desde] of datas) {
+      const x = await pedir(t.porta, { pedido_em: agora(), desde });
+      const jx = await x.json().catch(() => ({}));
+      ok(`151c ${nome}: 400, e a frase diz o formato`, x.status === 400 && jx.ok === false && /AAAA-MM-DD/.test(jx.erro || ""),
+         `${x.status} ${JSON.stringify(jx)}`);
+    }
+    ok("e nenhuma chegou ao banco", pedidos.length === antes, String(pedidos.length - antes));
+
+    // ---- 151d. quem não tem a assinatura ----
+    const casos = [
+      ["sem assinatura", () => fetch(`http://127.0.0.1:${t.porta}/vantoro/mensagens-da-equipe`, {
+         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pedido_em: agora(), desde: DESDE }) })],
+      ["com o segredo errado", () => pedir(t.porta, { pedido_em: agora(), desde: DESDE }, { segredo: "outro" })],
+      ["com a assinatura de outro corpo", () => pedir(t.porta, { pedido_em: agora(), desde: DESDE },
+         { assinatura: crypto.createHmac("sha256", SEG).update("{}").digest("hex") })],
+    ];
+    ok("são três os jeitos errados conferidos", casos.length === 3, String(casos.length));
+    for (const [nome, fazer] of casos) {
+      const x = await fazer();
+      const corpo = await x.text();
+      ok(`151d ${nome}: 401, e nada das mensagens`, x.status === 401 && !/5500000000001/.test(corpo), `${x.status} ${corpo}`);
+    }
+    ok("e nenhum deles chegou ao banco", pedidos.length === antes, String(pedidos.length - antes));
+
+    // ---- 151e. o pedido guardado não abre a lista depois ----
+    for (const [nome, quando] of [["de seis minutos atrás", -6], ["seis minutos à frente", 6]]) {
+      const x = await pedir(t.porta, { pedido_em: new Date(Date.now() + quando * 60e3).toISOString(), desde: DESDE });
+      ok(`151e um pedido assinado ${nome} é recusado`, x.status === 401, String(x.status));
+    }
+    const s = await pedir(t.porta, { desde: DESDE });
+    ok("e um sem data", s.status === 401, String(s.status));
+    ok("o log diz que foi a data, para quem procurar",
+       /Pedido das mensagens da equipe recusado: pedido vencido ou sem data/.test(t.registro.join("")), t.registro.join("").slice(-300));
+    ok("nenhum deles chegou ao banco", pedidos.length === antes, String(pedidos.length - antes));
+  } finally {
+    await t.parar();
+  }
+
+  // ---- 151f. sem o segredo na ponte, a porta não abre para ninguém ----
+  {
+    const semSegredo = await subirTudo({ VANTORO_WEBHOOK_SECRET: "" }, {
+      rpcs: { zorvin_mensagens_da_equipe: () => ({ corpo: { gerado_em: "x", completo: true, mensagens: [LINHA] } }) },
+    });
+    const x = await pedir(semSegredo.porta, { pedido_em: new Date().toISOString(), desde: "2026-11-01" }, { segredo: "" });
+    ok("151f sem VANTORO_WEBHOOK_SECRET, a porta recusa até a assinatura com segredo vazio", x.status === 401, String(x.status));
+    ok("e o log diz qual variável preencher", /VANTORO_WEBHOOK_SECRET não está preenchida/.test(semSegredo.registro.join("")),
+       semSegredo.registro.join("").slice(-300));
+    await semSegredo.parar();
+  }
+
+  // ---- 151g. o banco sem o script 074, e o banco que tosse ----
+  {
+    const sem074 = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEG }, {
+      rpcs: { zorvin_mensagens_da_equipe: () => ({ status: 404, corpo: { code: "PGRST202",
+        message: "Could not find the function public.zorvin_mensagens_da_equipe(p_desde, p_limite) in the schema cache" } }) },
+    });
+    const x = await pedir(sem074.porta, { pedido_em: new Date().toISOString(), desde: menos(hojeSP(), 7) });
+    const jx = await x.json().catch(() => ({}));
+    ok("151g sem o script 074, a porta diz qual script falta (503)", x.status === 503 && /script 074/.test(jx.erro || ""), JSON.stringify(jx));
+    await sem074.parar();
+
+    const tosse = await subirTudo({ VANTORO_WEBHOOK_SECRET: SEG }, {
+      rpcs: { zorvin_mensagens_da_equipe: () => ({ status: 500, corpo: { code: "XX000", message: "o banco tossiu" } }) },
+    });
+    const y = await pedir(tosse.porta, { pedido_em: new Date().toISOString(), desde: menos(hojeSP(), 7) });
+    const jy = await y.json().catch(() => ({}));
+    ok("com o banco tossindo, 503 e uma frase que não culpa o script", y.status === 503 && !/074/.test(jy.erro || "")
+       && /não respondeu/.test(jy.erro || ""), JSON.stringify(jy));
+    ok("e o motivo do banco fica no log", /o banco tossiu/.test(tosse.registro.join("")), tosse.registro.join("").slice(-300));
+    await tosse.parar();
+  }
+}
+
+// ============================================================
+//  152. AS MENSAGENS DA EQUIPE (074), num Postgres de verdade (26/11)
+//
+//  A função contra o banco de verdade, com o 021 (as respostas fora do
+//  horário), o 037 (`automatica`) e o 059 (`pelo_quazar`) aplicados pelos
+//  próprios arquivos. A seção guarda:
+//    - uma linha por conversa e por dia, a PRIMEIRA mensagem de gente, com o
+//      dia de Brasília (23h30 de Brasília já é o dia seguinte em UTC);
+//    - entram o painel e o celular, a conversa finalizada, a arquivada e a do
+//      telefone desativado; ficam de fora o aviso automático, o Quazar, a
+//      mensagem sem autor, a apagada, a resposta fora do horário que veio
+//      numa importação, a origem que não é 'advogado', o cliente e o grupo;
+//    - `quem` e `pelo_celular` como no resumo; o corte por `p_desde`;
+//    - o limite corta o fim e diz que cortou;
+//    - só a ponte chama; rodar de novo não estraga; num banco limpo e sem o
+//      059, a conferência diz o que fazer.
+// ============================================================
+{
+  console.log("\n152. As mensagens da equipe (074), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 074 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S = Object.fromEntries([
+      "004-a-espera-comeca-na-primeira.sql", "005-ja-tratei.sql", "006-a-espera-nao-comeca-no-rabicho.sql",
+      "008-o-responsavel-pela-conversa.sql", "020-a-auditoria-do-banco.sql", "021-a-resposta-fora-do-horario.sql",
+      "028-aguardando-em-aberto-e-finalizados.sql", "037-o-aviso-automatico-nao-e-atendimento.sql",
+      "055-o-quazar-a-noite-em-ensaio.sql", "059-o-quazar-a-noite-valendo.sql",
+      "074-as-mensagens-da-equipe-para-o-vantoro.sql",
+    ].map((a) => [a.slice(0, 3), ler(a)]));
+    const ANTES = ["004", "005", "006", "008", "020", "021", "028", "037", "055", "059"];
+    // O ZORVIN MÍNIMO da seção 138, com `apagada` (que nasceu à mão, em agosto,
+    // e não está em nenhum script desta pasta).
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'))::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table departamentos (id bigint generated always as identity primary key, nome text not null, ordem int not null default 0, slug text);
+create table usuarios (id uuid primary key, login text not null default '', nome text not null default '', admin boolean not null default false, ativo boolean not null default true);
+create table advogados (id uuid primary key default gen_random_uuid(), nome text, numero text, token text, ativo boolean default true, departamento_id bigint references departamentos(id));
+create table permissoes (id bigint generated always as identity primary key, usuario_id uuid not null references usuarios(id) on delete cascade,
+  departamento_id bigint references departamentos(id) on delete cascade, telefone_id uuid references advogados(id) on delete cascade);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text, vantoro_cliente_id bigint);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id), ultima_atividade timestamptz default now(), nao_lidas int default 0,
+  arquivada boolean not null default false, unique (advogado_id, contato_id));
+create table mensagens (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id) on delete cascade,
+  origem text, tipo text not null default 'texto', texto text, id_uazapi text, criado_em timestamptz not null default now(),
+  enviado_por text, enviado_por_id uuid, apagada boolean default false, unique (conversa_id, id_uazapi));
+create table notas (id uuid primary key default gen_random_uuid(), conversa_id uuid not null references conversas(id) on delete cascade,
+  texto text not null, autor text, autor_id uuid, criado_em timestamptz not null default now(), apagada_em timestamptz);
+create table fila_envio (id uuid primary key default gen_random_uuid(), conversa_id uuid references conversas(id),
+  texto text, status text not null default 'pendente', criado_em timestamptz not null default now());
+create or replace function zorvin_admin() returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select coalesce((select u.admin and u.ativo from usuarios u where u.id = auth.uid()), false) $f$;
+create or replace function pode_ver_conversa(p_telefone_id uuid) returns boolean language sql stable security definer set search_path = public, auth as $f$
+  select zorvin_admin() or exists (select 1 from permissoes p join advogados a on a.id = p_telefone_id
+     where p.usuario_id = auth.uid() and (p.departamento_id is null or p.departamento_id = a.departamento_id)
+       and (p.telefone_id is null or p.telefone_id = p_telefone_id)) $f$;
+alter table conversas enable row level security;
+create policy conversas_ver on conversas for select to authenticated using (pode_ver_conversa(advogado_id));
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)) || /rode o script/i.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    const U = { ana: "00000000-0000-0000-0000-00000000000a", bia: "00000000-0000-0000-0000-00000000000b" };
+    // OS DIAS SÃO OS DE BRASÍLIA, contados de hoje: a função corta por data.
+    const hojeSP = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo",
+      year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    const dia = (n) => new Date(Date.parse(`${hojeSP}T00:00:00Z`) - n * 86400e3).toISOString().slice(0, 10);
+    // A HORA DE BRASÍLIA, escrita com o fuso: "23:30" de Brasília é 02:30 do
+    // dia seguinte em UTC, e é aí que um corte pelo dia errado aparece.
+    const em = (n, hora) => `${dia(n)}T${hora}:00-03:00`;
+
+    async function zorvin(scripts = ANTES) {
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query("insert into departamentos (nome, ordem, slug) values ('Sucesso do Cliente', 1, 'sdc')");
+      for (const k of scripts) await c.query(S[k]);
+      return c;
+    }
+    try {
+      // ---- 152a. num banco limpo, e sem o 059 ----
+      {
+        const limpo = await bancoNovo();
+        await limpo.query(ESQUEMA.split("create table departamentos")[0]);
+        const r0 = await guardado(() => aplicar(limpo, S["074"]));
+        ok("152a num banco sem o Zorvin, o 074 aplica e não acusa defeito", Array.isArray(r0) && r0.length > 0 && !defeito(r0),
+           JSON.stringify(r0));
+        const sem059 = await zorvin(["004", "005", "006", "008", "020", "021", "028", "037"]);
+        const r1 = await guardado(() => aplicar(sem059, S["074"]));
+        ok("e sem o 059, a conferência diz qual script rodar", /rode o script 059 antes/.test(String(item(r1, /o que a função lê/)))
+           && defeito(r1), JSON.stringify(r1));
+      }
+
+      const c = await zorvin();
+      const conf = await guardado(() => aplicar(c, S["074"]));
+      ok("152b o 074 aplica, e a conferência não acusa nada", Array.isArray(conf) && conf.length > 0 && !defeito(conf), JSON.stringify(conf));
+      ok("a conferência diz que a função responde", item(conf, /a função responde/) === "sim", JSON.stringify(conf));
+
+      await c.query(`insert into usuarios (id, login, nome) values ('${U.ana}', 'ana', 'Ana Nome Antigo'), ('${U.bia}', 'bia', 'Bia')`);
+      const tel = async (nome, numero, ativo = true) => (await c.query(
+        "insert into advogados (nome, numero, departamento_id, ativo) values ($1, $2, 1, $3) returning id", [nome, numero, ativo])).rows[0].id;
+      const SAC = await tel("SAC", "5500000000900"), VELHO = await tel("Desligado", "5500000000901", false);
+      const conversa = async (numero, { linha = SAC, cliente = null } = {}) => {
+        const ct = (await c.query("insert into contatos (numero, nome, vantoro_cliente_id) values ($1, 'Cliente', $2) returning id",
+                                  [numero, cliente])).rows[0].id;
+        return (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [linha, ct])).rows[0].id;
+      };
+      const msg = async (cv, origem, quando, extra = {}) => (await c.query(
+        `insert into mensagens (conversa_id, origem, criado_em, texto, enviado_por, enviado_por_id, id_uazapi, automatica, pelo_quazar, apagada)
+         values ($1, $2, $3, 'x', $4, $5, $6, $7, $8, $9) returning id`,
+        [cv, origem, quando, extra.por ?? null, extra.porId ?? null, extra.idUazapi ?? `id-${crypto.randomBytes(5).toString("hex")}`,
+         extra.automatica ?? false, extra.quazar ?? false, extra.apagada ?? false])).rows[0].id;
+      const ANA = { por: "Ana Nome Antigo", porId: U.ana }, BIA = { por: "Bia", porId: U.bia }, CEL = { por: "WhatsApp" };
+
+      // A cena (números de mentira):
+      //   A  cliente 42: dia -3 o cliente escreve, a Ana responde às 10h e a Bia às 15h;
+      //      dia -2 o aviso automático às 8h (e um com rótulo às 8h30) e o celular às
+      //      23h30 (já é o dia -1 em UTC);
+      //      dia -1 só o Quazar e o cliente; dia -10 a Ana (fica de fora do corte de 5 dias)
+      //   B  dia -2 tudo o que NÃO conta (sem autor, apagada, resposta fora do horário
+      //      importada, origem 'sistema'); dia -1 a Bia às 14h
+      //   F  finalizada e arquivada, a Ana no dia -1 às 9h — conta
+      //   D  telefone desativado hoje, o celular no dia -4 — conta
+      //   G  grupo, a Ana no dia -1 — fica de fora
+      const A = await conversa("5500000000001", { cliente: 42 });
+      const B = await conversa("5500000000002");
+      const F = await conversa("5500000000003");
+      const D = await conversa("5500000000004", { linha: VELHO });
+      const G = await conversa("grupo:120363000000000000@g.us");
+      await msg(A, "contato", em(3, "09:00"));
+      await msg(A, "advogado", em(3, "10:00"), ANA);
+      await msg(A, "advogado", em(3, "15:00"), BIA);
+      await msg(A, "advogado", em(2, "08:00"), { automatica: true });
+      // MARCADA COMO AUTOMÁTICA, mesmo com um rótulo de autor: não conta.
+      await msg(A, "advogado", em(2, "08:30"), { por: "Vantoro", automatica: true });
+      await msg(A, "advogado", em(2, "23:30"), CEL);
+      await msg(A, "advogado", em(1, "09:00"), { por: "Quazar", automatica: true, quazar: true });
+      await msg(A, "advogado", em(1, "09:30"), { por: "Quazar", quazar: true });
+      await msg(A, "contato", em(1, "10:00"));
+      await msg(A, "advogado", em(10, "10:00"), ANA);
+      await msg(B, "advogado", em(2, "10:00"));
+      await msg(B, "advogado", em(2, "11:00"), { ...BIA, apagada: true });
+      await c.query(`insert into zorvin_respostas_automaticas (conversa_id, ate, texto, status, id_uazapi)
+                     values ($1, now() + interval '1 day', 'Estamos fechados', 'enviada', 'id-fora-do-horario')`, [B]);
+      await msg(B, "advogado", em(2, "12:00"), { ...CEL, idUazapi: "id-fora-do-horario" });
+      await msg(B, "sistema", em(2, "13:00"), BIA);
+      await msg(B, "advogado", em(1, "14:00"), BIA);
+      await msg(F, "advogado", em(1, "09:00"), ANA);
+      await c.query("update conversas set situacao = 'finalizado', arquivada = true where id = $1", [F]);
+      await msg(D, "advogado", em(4, "16:00"), CEL);
+      await msg(G, "advogado", em(1, "11:00"), ANA);
+      // A Ana mudou de nome DEPOIS: vale o nome de hoje, como no resumo.
+      await c.query("update usuarios set nome = 'Ana Souza' where id = $1", [U.ana]);
+
+      const chamar = async (desde, limite = 20000) =>
+        (await c.query("select public.zorvin_mensagens_da_equipe(p_desde => $1::date, p_limite => $2) r", [desde, limite])).rows[0].r;
+      const r = await chamar(dia(5));
+      const linhas = r?.mensagens || [];
+      const resumo = linhas.map((l) => `${l.contato_numero.slice(-1)}@${l.dia}`);
+      ok("152c a resposta diz de quando é, desde quando, e que veio tudo", typeof r?.gerado_em === "string"
+         && r?.desde === dia(5) && r?.completo === true, JSON.stringify({ ...r, mensagens: undefined }));
+      ok("uma linha por conversa e por dia, na ordem do tempo, e só as que contam",
+         JSON.stringify(resumo) === JSON.stringify([`4@${dia(4)}`, `1@${dia(3)}`, `1@${dia(2)}`, `3@${dia(1)}`, `2@${dia(1)}`]),
+         JSON.stringify(resumo));
+      ok("cada linha tem as oito chaves, e só elas", linhas.every((l) => JSON.stringify(Object.keys(l).sort()) === JSON.stringify(
+         ["contato_numero", "conversa_id", "dia", "linha_numero", "pelo_celular", "primeira_em", "quem", "vantoro_cliente_id"])),
+         JSON.stringify(linhas[0]));
+      const de = (cv, d) => linhas.find((l) => l.conversa_id === cv && l.dia === d) || {};
+      ok("a primeira do dia, e não a última: a Ana às 10h, pelo nome de HOJE, e não a Bia às 15h",
+         Date.parse(de(A, dia(3)).primeira_em) === Date.parse(em(3, "10:00")) && de(A, dia(3)).quem === "Ana Souza"
+           && de(A, dia(3)).pelo_celular === false, JSON.stringify(de(A, dia(3))));
+      ok("o elo com a ficha do Vantoro vem como texto, e a linha pelo número",
+         de(A, dia(3)).vantoro_cliente_id === "42" && de(A, dia(3)).linha_numero === "5500000000900"
+           && de(B, dia(1)).vantoro_cliente_id === null, JSON.stringify([de(A, dia(3)), de(B, dia(1))]));
+      ok("o aviso automático das 8h (e o das 8h30, com rótulo) não conta: a primeira do dia -2 é a do celular, às 23h30",
+         Date.parse(de(A, dia(2)).primeira_em) === Date.parse(em(2, "23:30")), JSON.stringify(de(A, dia(2))));
+      ok("e o celular diz que foi o celular, com o rótulo do resumo", de(A, dia(2)).pelo_celular === true
+         && de(A, dia(2)).quem === "WhatsApp", JSON.stringify(de(A, dia(2))));
+      ok("23h30 de Brasília fica no dia de Brasília, e não no dia seguinte de UTC", !linhas.some((l) => l.conversa_id === A && l.dia === dia(1)),
+         JSON.stringify(resumo));
+      ok("o Quazar não conta, com as duas marcas ou só com `pelo_quazar`", !de(A, dia(1)).dia, JSON.stringify(resumo));
+      ok("o que não é gente fica de fora: sem autor, apagada, fora do horário importada e origem 'sistema'",
+         !de(B, dia(2)).dia, JSON.stringify(resumo));
+      ok("e no dia seguinte a Bia conta", de(B, dia(1)).quem === "Bia", JSON.stringify(de(B, dia(1))));
+      ok("a conversa finalizada e arquivada conta: a tentativa já tinha acontecido", de(F, dia(1)).quem === "Ana Souza",
+         JSON.stringify(de(F, dia(1))));
+      ok("e a do telefone desativado hoje também", de(D, dia(4)).pelo_celular === true, JSON.stringify(de(D, dia(4))));
+      ok("o grupo fica de fora", !linhas.some((l) => l.conversa_id === G), JSON.stringify(resumo));
+      ok("a mensagem de antes do corte fica de fora", !linhas.some((l) => l.dia === dia(10)), JSON.stringify(resumo));
+      const longe = (await chamar(dia(10)))?.mensagens || [];
+      ok("e com o corte mais para trás, ela entra", longe.length === 6 && longe[0].dia === dia(10) && longe[0].quem === "Ana Souza",
+         JSON.stringify(longe.map((l) => l.dia)));
+      // O CORTE É À MEIA-NOITE DE BRASÍLIA: desde o dia -2, a do celular às 23h30 entra e a do dia -3 não.
+      const dois = (await chamar(dia(2)))?.mensagens || [];
+      ok("o corte é à meia-noite de Brasília", dois.length === 3 && dois[0].dia === dia(2), JSON.stringify(dois.map((l) => l.dia)));
+
+      // ---- 152d. o limite corta o fim, e diz ----
+      const duas = await chamar(dia(5), 2);
+      ok("152d com limite 2, vêm as duas mais antigas, e `completo` diz que cortou",
+         duas?.mensagens?.length === 2 && duas.mensagens[0].conversa_id === D && duas.mensagens[1].dia === dia(3)
+           && duas.completo === false, JSON.stringify(duas));
+      const exatas = await chamar(dia(5), 5);
+      ok("com o limite igual ao total, vem tudo e `completo` é verdadeiro", exatas?.mensagens?.length === 5 && exatas.completo === true,
+         JSON.stringify({ ...exatas, mensagens: exatas?.mensagens?.length }));
+      const vazio = await chamar(dia(-1));
+      ok("sem nada no período, a lista vem vazia (e não nula)", Array.isArray(vazio?.mensagens) && vazio.mensagens.length === 0
+         && vazio.completo === true, JSON.stringify(vazio));
+
+      // ---- 152e. quem alcança a função ----
+      const priv = (await c.query(`select has_function_privilege('anon', 'zorvin_mensagens_da_equipe(date, integer)', 'execute') a,
+                                          has_function_privilege('authenticated', 'zorvin_mensagens_da_equipe(date, integer)', 'execute') b,
+                                          has_function_privilege('service_role', 'zorvin_mensagens_da_equipe(date, integer)', 'execute') s`)).rows[0];
+      ok("152e só a ponte chama a função: nem quem não entrou, nem quem entrou no painel",
+         priv && priv.a === false && priv.b === false && priv.s === true, JSON.stringify(priv));
+      const comoAna = await guardado(async () => {
+        await c.query("select set_config('request.jwt.claim.sub', $1, false)", [U.ana]);
+        await c.query("set role authenticated");
+        try { return (await c.query("select public.zorvin_mensagens_da_equipe(current_date - 5, 100)")).rows; }
+        finally { await c.query("reset role"); }
+      });
+      ok("e quem entrou no painel, chamando direto, recebe recusa", comoAna?.codigo === "42501", JSON.stringify(comoAna));
+      const naoDefiner = (await c.query(`select prosecdef from pg_proc where proname = 'zorvin_mensagens_da_equipe'`)).rows[0];
+      ok("e ela não roda como dona do banco (como a do 030)", naoDefiner?.prosecdef === false, JSON.stringify(naoDefiner));
+
+      // ---- 152f. rodar de novo ----
+      const deNovo = await guardado(() => aplicar(c, S["074"]));
+      ok("152f rodar de novo não estraga nada", Array.isArray(deNovo) && !defeito(deNovo)
+         && (await c.query("select count(*)::int n from pg_proc where proname = 'zorvin_mensagens_da_equipe'")).rows[0]?.n === 1
+         && ((await chamar(dia(5)))?.mensagens || []).length === 5, JSON.stringify(deNovo));
+      ok("e a conferência conta o que viu nos últimos 7 dias", /^conversa-dia 5 · pelo celular 2$/.test(String(item(deNovo, /últimos 7 dias/))),
+         JSON.stringify(deNovo));
+    } catch (e) {
+      ok("a seção 152 rodou até o fim", false, e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end();
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);
