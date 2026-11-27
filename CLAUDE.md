@@ -5092,6 +5092,27 @@ existentes e as futuras que forem criadas."*
 
 Prova: seção 159, no banco da 158 (o 075 e o 077 de verdade).
 
+#### As siglas e os nomes nas etiquetas (script 079, 27/11)
+
+O Rodrigo, depois do 078: *"Podemos sim abrir exceções para siglas: CCR,
+SAC."* E: *"max" vira "Max" por ser um nome próprio.*
+
+- **`zorvin_etiqueta_palavras`**: cada palavra e como ela se escreve. Nasce
+  com CCR, SAC e Max, na rodada que cria a tabela (regra 5): tirada depois,
+  rodar de novo não a traz. Só a ponte e o editor alcançam (RLS sem política);
+  trocar é pelo conector, e depois `update tags set nome = nome` refaz os nomes;
+- **`zorvin_nome_da_etiqueta`** faz a regra do 078 e troca cada palavra
+  INTEIRA da lista (`\m…\M`, sem olhar maiúscula): "subsídio ccr" vira
+  "Subsídio CCR", e "Maxwell" não muda. Ela passou a ler a tabela: deixou de
+  ser `immutable` e roda com o poder do dono, porque o gatilho dispara no
+  papel de quem grava pelo painel. **A versão de referência é a do 079**;
+- **"Falar com dr. max"** foi renomeada à mão, pelo conector, para "Falar com
+  Max" (dado do escritório, e não regra).
+
+Prova: seção 160. **3 sabotagens e 3 pegas**: sem o poder do dono (pelo
+painel, a sigla sai minúscula); sem a palavra inteira ("Maxwell CCRed"); e a
+lista plantada em toda rodada.
+
 ### Só quem espera resposta fica, e a equipe é avisada (script 068, 25/11)
 
 Pedido do Rodrigo, no mesmo dia do 066: *"Para as conversas em que o cliente
