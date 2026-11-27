@@ -31919,6 +31919,41 @@ create policy ct_tudo on conversa_tags for all to authenticated using (true) wit
       const de2 = await guardado(() => aplicar(c, S077));
       ok("158f rodar de novo não acusa defeito", lista(de2).length > 0 && !defeito(de2), JSON.stringify(de2));
       ok("e as etiquetas do repasse continuam", item(de2, /repasse hoje/) === "2", JSON.stringify(de2));
+
+      // ============================================================
+      //  159. O NOME DAS ETIQUETAS SÓ COM A PRIMEIRA MAIÚSCULA (078), no mesmo
+      //  banco, com o 075 e o 077 de verdade (27/11)
+      // ============================================================
+      console.log("\n159. O nome das etiquetas só com a primeira maiúscula (078)");
+      const S078 = ler("078-o-nome-das-etiquetas-so-com-a-primeira-maiuscula.sql");
+      {
+        const v = await bancoNovo();
+        const cv = await guardado(() => aplicar(v, S078));
+        ok("159a num banco sem a tabela, não faz nada", item(cv, /sem a tabela/) === "nada a fazer aqui", JSON.stringify(cv));
+      }
+      await c.query("insert into tags (nome) values ('SAC'), ('  Acordo Bom '), ('Falar com Dr. Max'), ('Urgente')");
+      await troca([{ ...L1[0], subsidios: ["SUBSÍDIO EMENDA"] }, L1[1], L1[2]], true);
+      const i78 = await guardado(() => aplicar(c, S078));
+      ok("159b a instalação não acusa defeito, e o gatilho existe", lista(i78).length > 0 && !defeito(i78)
+         && item(i78, /gatilho existe/) === "true" && item(i78, /fora da regra/) === "0", JSON.stringify(i78));
+      const nomes = (await c.query("select nome from tags order by nome")).rows.map((x) => x.nome);
+      ok("as de antes viram só a primeira maiúscula, com o acento",
+         ["Sac", "Acordo bom", "Falar com dr. max", "Subsídio emenda", "Urgente", "Blindagem parcial"].every((n) => nomes.includes(n))
+         && !nomes.some((n) => n !== n.charAt(0).toUpperCase() + n.slice(1).toLowerCase()), JSON.stringify(nomes));
+      ok("e a conferência diz quantas converteu", Number(item(i78, /convertidas/)) >= 4, JSON.stringify(i78));
+      const versao = async (nome) => (await c.query("select xmin::text x from tags where nome = $1", [nome])).rows[0]?.x;
+      const antes = await versao("Subsídio emenda");
+      await troca([{ ...L1[0], subsidios: ["SUBSÍDIO EMENDA", "SUBSÍDIO CCR"] }, L1[1], L1[2]], true);
+      ok("159c a rodada do Vantoro cria a etiqueta nova já no padrão", (await por(K1)).includes("Subsídio ccr"), JSON.stringify(await por(K1)));
+      ok("e não regrava a que já está no padrão", antes && (await versao("Subsídio emenda")) === antes, `${antes} → ${await versao("Subsídio emenda")}`);
+      await c.query("insert into tags (nome) values ('TENTAR DE NOVO')");
+      ok("159d a etiqueta nova de quem grava também", !!(await versao("Tentar de novo")));
+      await c.query("begin; set local role authenticated; select set_config('request.jwt.claim.sub', gen_random_uuid()::text, true)");
+      const r = await guardado(() => c.query("update tags set nome = 'URGENTE' where nome = 'Urgente' returning id"));
+      await c.query("commit");
+      ok("pelo painel, a gravação com o mesmo nome continua valendo uma linha", r.rows?.length === 1, JSON.stringify(r.rows || r));
+      const de3 = await guardado(() => aplicar(c, S078));
+      ok("159e rodar de novo não regrava ninguém", item(de3, /convertidas/) === "0" && !defeito(de3), JSON.stringify(de3));
     } catch (e) {
       ok("a seção 158 rodou até o fim", false, e.stack || e.message);
     } finally {
