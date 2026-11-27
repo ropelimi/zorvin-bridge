@@ -8966,6 +8966,14 @@ app.post('/etiqueta/contato', rotaVantoro(async (req) => {
   if (!contatoId || !tagId) {
     return { status: 400, corpo: { ok: false, erro: 'Informe contato_id e tag_id.' } };
   }
+  // A ETIQUETA AUTOMÁTICA NÃO SE MEXE AQUI (script 075): quem a põe e a tira é
+  // o Vantoro (a blindagem e o subsídio). A ponte grava com a chave de serviço, que passa
+  // pela trava do banco; por isso a recusa é desta rota.
+  const { data: aTag, error: erroTag } = await supabase.from('tags').select('*').eq('id', tagId).limit(1);
+  if (erroTag) return { status: 502, corpo: { ok: false, erro: 'Não consegui conferir a etiqueta.' } };
+  if ((aTag || [])[0] && aTag[0].automatica) {
+    return { status: 409, corpo: { ok: false, erro: `A etiqueta “${aTag[0].nome}” vem do Vantoro: o Zorvin a põe e a tira sozinho. Use-a só para filtrar.` } };
+  }
   // A ETIQUETA SEGUE O CONTATO por todos os telefones, de propósito — mas só
   // quem enxerga ALGUMA conversa dele pode mexer nela.
   const alcanca = await alcancaConversa(req, 'contato_id', contatoId);
@@ -14632,6 +14640,107 @@ async function atualizarQuemPedeAtencao({ agora = new Date() } = {}) {
 
 setTimeout(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_PRIMEIRA_MS).unref();
 setInterval(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_INTERVALO_MS).unref();
+
+// ============================================================
+//  AS ETIQUETAS QUE VÊM DO VANTORO: A BLINDAGEM E O SUBSÍDIO (script 075, 27/11)
+//
+//  O Rodrigo: as etiquetas "Blindagem completa", "Blindagem parcial" e
+//  "Blindagem pendente", e uma por tipo de tarefa de subsídio aberta
+//  ("SUBSÍDIO EMENDA", "SUBSÍDIO CCR"...), que a equipe só usa para filtrar,
+//  mantidas pelo Vantoro: "As etiquetas devem ser atualizadas com base na
+//  atualização do Vantoro, que poderá incluir ou excluir."
+//
+//  A ponte pergunta a lista (`GET /clientes/etiquetas`: de cada cliente, a
+//  blindagem, os tipos de subsídio abertos e os telefones) e chama
+//  `zorvin_etiquetas_do_vantoro`, que troca as etiquetas das conversas de uma
+//  vez. Quem decide qual conversa recebe qual etiqueta é o banco (075).
+//
+//  - De 30 em 30 minutos, a primeira um minuto depois de subir. A idade vem do
+//    banco: numa publicação, a outra ponte pode ter trocado há pouco.
+//  - A FALHA NÃO APAGA NADA: as etiquetas de antes ficam. A lista que encolhe
+//    pela metade de uma vez é recusada pelo banco.
+//  - O Vantoro de antes (404) é dito uma vez por hora; em pausa (429), espera.
+//  - SEM O 075, a tabela ou a função que falta para a rodada até a ponte
+//    reiniciar.
+//  - SEM VANTORO, não faz nada: não há o que dizer.
+//  - NO LOG, SÓ NÚMEROS (e o nome das etiquetas), e só quando algo mudou.
+// ============================================================
+const ETIQUETAS_INTERVALO_MS = Number(process.env.ETIQUETAS_INTERVALO_MS) || 30 * 60 * 1000;
+const ETIQUETAS_PRIMEIRA_MS = Number(process.env.ETIQUETAS_PRIMEIRA_MS) || 60 * 1000;
+let etiquetasRodando = false;
+let etiquetasSemOScript = false;
+let etiquetasUltimaFalha = { texto: '', em: 0 };
+
+function avisarFalhaDasEtiquetas(texto) {
+  const agora = Date.now();
+  if (texto === etiquetasUltimaFalha.texto && agora - etiquetasUltimaFalha.em < 60 * 60 * 1000) return;
+  etiquetasUltimaFalha = { texto, em: agora };
+  console.warn(`etiquetas do Vantoro: ${texto}`);
+}
+
+async function etiquetarPeloVantoro({ agora = new Date() } = {}) {
+  if (desligando || etiquetasRodando || etiquetasSemOScript || !VANTORO_URL || !VANTORO_TOKEN) return;
+  etiquetasRodando = true;
+  try {
+    const { data: marcas, error: erroMarca } = await supabase.from('zorvin_etiquetas_marca').select('trocada_em').limit(1);
+    if (erroMarca) {
+      if (semATabela(erroMarca)) {
+        etiquetasSemOScript = true;
+        console.warn('etiquetas do Vantoro: a tabela "zorvin_etiquetas_marca" não existe — rode '
+          + 'sql/automaticos/075-as-etiquetas-do-vantoro.sql. Fica parado até a ponte reiniciar.');
+      } else {
+        avisarFalhaDasEtiquetas(`não consegui ler quando a lista foi trocada (${erroMarca.code || 'sem código'}): ${erroMarca.message}`);
+      }
+      return;
+    }
+    const trocadaEm = (marcas || [])[0] ? Date.parse(marcas[0].trocada_em) : 0;
+    if (trocadaEm && agora.getTime() - trocadaEm < ETIQUETAS_INTERVALO_MS - 60 * 1000) return;
+    if (vantoroEmPausa()) return;
+
+    const { status, corpo } = await chamarVantoro('/clientes/etiquetas');
+    if (status === 404) {
+      avisarFalhaDasEtiquetas('o Vantoro ainda não tem a lista (/clientes/etiquetas respondeu 404). As etiquetas ficam como estão.');
+      return;
+    }
+    if (status !== 200 || !corpo || corpo.ok !== true || !Array.isArray(corpo.clientes)) {
+      avisarFalhaDasEtiquetas(`o Vantoro não mandou a lista (${status}): ${(corpo && corpo.erro) || 'resposta sem a lista'}. `
+        + 'As etiquetas de antes continuam.');
+      return;
+    }
+    const { data, error } = await supabase.rpc('zorvin_etiquetas_do_vantoro', { p_clientes: corpo.clientes });
+    if (error) {
+      if (semAFuncao(error)) {
+        etiquetasSemOScript = true;
+        console.warn('etiquetas do Vantoro: a função "zorvin_etiquetas_do_vantoro" não existe — rode '
+          + 'sql/automaticos/075-as-etiquetas-do-vantoro.sql. Fica parado até a ponte reiniciar.');
+      } else {
+        avisarFalhaDasEtiquetas(`o banco recusou trocar as etiquetas (${error.code || 'sem código'}): ${error.message}`);
+      }
+      return;
+    }
+    const r = data || {};
+    if (r.trocada === false) {
+      avisarFalhaDasEtiquetas(`a lista nova foi recusada: ${r.motivo} (antes ${r.antes}, agora ${r.novos}).`);
+      return;
+    }
+    const n = (x) => Math.max(0, Number(x) || 0);
+    if (n(r.postas) || n(r.tiradas) || n(r.etiquetas_criadas) || n(r.etiquetas_que_sumiram)) {
+      const porEtiqueta = Object.entries(r.por_etiqueta || {}).sort((x, y) => x[0].localeCompare(y[0], 'pt-BR'))
+        .map(([nome, q]) => `${String(nome).slice(0, 60)}: ${n(q)}`).join(', ');
+      console.log(`etiquetas do Vantoro: ${n(r.clientes)} cliente(s) em ${n(r.conversas)} conversa(s); `
+        + `${n(r.postas)} posta(s), ${n(r.tiradas)} tirada(s), ${n(r.etiquetas_criadas)} etiqueta(s) nova(s), `
+        + `${n(r.etiquetas_que_sumiram)} que sumiram${porEtiqueta ? ` (${porEtiqueta})` : ''}.`);
+    }
+    etiquetasUltimaFalha = { texto: '', em: 0 };
+  } catch (e) {
+    avisarFalhaDasEtiquetas(`não consegui trocar as etiquetas: ${(e && e.name === 'AbortError') ? 'o Vantoro demorou demais' : ((e && e.message) || e)}`);
+  } finally {
+    etiquetasRodando = false;
+  }
+}
+
+setTimeout(() => { etiquetarPeloVantoro().catch(() => {}); }, ETIQUETAS_PRIMEIRA_MS).unref();
+setInterval(() => { etiquetarPeloVantoro().catch(() => {}); }, ETIQUETAS_INTERVALO_MS).unref();
 
 // ============================================================
 //  O QUAZAR AVISA A EQUIPE DE QUEM PEDE ATENÇÃO (script 068, 25/11)
