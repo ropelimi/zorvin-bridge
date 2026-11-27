@@ -14646,6 +14646,7 @@ setInterval(() => { atualizarQuemPedeAtencao().catch(() => {}); }, ATENCAO_INTER
 
 // ============================================================
 //  AS ETIQUETAS QUE VÊM DO VANTORO: A BLINDAGEM E O SUBSÍDIO (script 075, 27/11)
+//  E O REPASSE (script 077, 27/11): "Repasse em aberto" e "Repasse pago".
 //
 //  O Rodrigo: as etiquetas "Blindagem completa", "Blindagem parcial" e
 //  "Blindagem pendente", e uma por tipo de tarefa de subsídio aberta
@@ -14710,7 +14711,15 @@ async function etiquetarPeloVantoro({ agora = new Date() } = {}) {
         + 'As etiquetas de antes continuam.');
       return;
     }
-    const { data, error } = await supabase.rpc('zorvin_etiquetas_do_vantoro', { p_clientes: corpo.clientes });
+    // O REPASSE (077): só o `true` do Vantoro faz valer o repasse da lista; falso
+    // (o Andon fora) ou sem a chave (um Vantoro de antes), o banco mantém as
+    // etiquetas do repasse que já estão nas conversas.
+    const repasseOk = corpo.repasse_ok === true ? true : (corpo.repasse_ok === false ? false : null);
+    let { data, error } = await supabase.rpc('zorvin_etiquetas_do_vantoro', { p_clientes: corpo.clientes, p_repasse_ok: repasseOk });
+    if (error && error.code === 'PGRST202') {
+      // Um banco sem o 077: a troca de um argumento, como antes.
+      ({ data, error } = await supabase.rpc('zorvin_etiquetas_do_vantoro', { p_clientes: corpo.clientes }));
+    }
     if (error) {
       if (semAFuncao(error)) {
         etiquetasSemOScript = true;

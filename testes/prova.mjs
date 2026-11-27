@@ -31654,6 +31654,35 @@ create policy ct_tudo on conversa_tags for all to authenticated using (true) wit
        t2.registro.join("").slice(-400));
     await t2.parar();
   }
+  // ---- 156f. o repasse (077) ----
+  {
+    const b = banco();
+    const t = await subirTudo(rapido, { tabelas: b.tabelas, rpcs: b.rpcs,
+      vantoro: { etiquetas: () => ({ status: 200, corpo: { ok: true, clientes: LISTA, repasse_ok: true } }) } });
+    await esperaAte(() => b.trocas.length >= 1);
+    ok("156f com o Andon, a ponte diz ao banco que o repasse vale", b.trocas.length === 1 && b.trocas[0].p_repasse_ok === true, JSON.stringify(b.trocas));
+    await t.parar();
+    const b2 = banco();
+    const t2 = await subirTudo(rapido, { tabelas: b2.tabelas, rpcs: b2.rpcs,
+      vantoro: { etiquetas: () => ({ status: 200, corpo: { ok: true, clientes: LISTA, repasse_ok: false } }) } });
+    await esperaAte(() => b2.trocas.length >= 1);
+    ok("sem o Andon, diz que não vale", b2.trocas[0] && b2.trocas[0].p_repasse_ok === false, JSON.stringify(b2.trocas));
+    await t2.parar();
+    const b3 = banco();
+    const t3 = await subirTudo(rapido, { tabelas: b3.tabelas, rpcs: b3.rpcs, vantoro: { etiquetas: LISTA } });
+    await esperaAte(() => b3.trocas.length >= 1);
+    ok("e com o Vantoro de antes (sem a chave), manda nulo", b3.trocas[0] && b3.trocas[0].p_repasse_ok === null, JSON.stringify(b3.trocas));
+    await t3.parar();
+    const b4 = banco();
+    const umArg = b4.rpcs.zorvin_etiquetas_do_vantoro;
+    b4.rpcs.zorvin_etiquetas_do_vantoro = (json, dados) => ("p_repasse_ok" in json
+      ? { status: 404, corpo: { code: "PGRST202", message: "Could not find the function public.zorvin_etiquetas_do_vantoro(p_clientes, p_repasse_ok)" } }
+      : umArg(json, dados));
+    const t4 = await subirTudo(rapido, { tabelas: b4.tabelas, rpcs: b4.rpcs, vantoro: { etiquetas: LISTA } });
+    await esperaAte(() => b4.trocas.length >= 1);
+    ok("num banco sem o 077, a troca de um argumento, como antes", b4.trocas.length === 1 && !("p_repasse_ok" in b4.trocas[0]), JSON.stringify(b4.trocas));
+    await t4.parar();
+  }
   // ---- 156e. a rota recusa a etiqueta automática ----
   {
     const t = await subirTudo({}, { tabelas: {
@@ -31746,6 +31775,152 @@ create policy ct_tudo on conversa_tags for all to authenticated using (true) wit
       ok("157e sem o vantoro_nome, o gatilho funciona com a outra", e === "LIA,RUI", e);
     } catch (e) {
       ok("a seção 157 rodou até o fim", false, e.stack || e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end().catch(() => {});
+    }
+  }
+}
+
+// ============================================================
+//  158. AS ETIQUETAS DO REPASSE (077), num Postgres de verdade (27/11)
+//
+//  O repasse de cada cliente (a "despesa em aberto" do Andon) vira as
+//  etiquetas automáticas "Repasse em aberto" e "Repasse pago". A seção guarda:
+//    - sem o 075, o 077 não faz nada e diz;
+//    - a troca de um argumento sai, e a de dois fica só para a ponte;
+//    - com o Andon respondendo, o repasse vale, e a etiqueta muda com ele;
+//    - sem o Andon (falso ou nulo), as etiquetas do repasse ficam, e nenhuma
+//      entra; a blindagem continua sendo trocada;
+//    - o repasse não conta na régua da lista que encolhe;
+//    - rodar de novo não acusa defeito.
+// ============================================================
+{
+  console.log("\n158. As etiquetas do repasse (077), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 077 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const ler = (arq) => fs.readFileSync(new URL(`../sql/automaticos/${arq}`, import.meta.url), "utf8");
+    const S075 = ler("075-as-etiquetas-do-vantoro.sql");
+    const S077 = ler("077-as-etiquetas-do-repasse.sql");
+    const CHAVE = ler("066-quem-pede-atencao-nao-e-finalizado.sql")
+      .match(/create or replace function public\.zorvin_chave_do_telefone[\s\S]*?\n\$f\$/)[0] + ";";
+    const ESQUEMA = `
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
+end $$;
+alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+create schema if not exists auth;
+create or replace function auth.uid() returns uuid language sql stable as $f$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $f$;
+grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.uid() to anon, authenticated, service_role;
+grant usage on schema public to anon, authenticated, service_role;
+create table advogados (id uuid primary key default gen_random_uuid(), nome text);
+create table contatos (id uuid primary key default gen_random_uuid(), numero text unique not null, nome text, vantoro_cliente_id bigint);
+create table conversas (id uuid primary key default gen_random_uuid(), advogado_id uuid references advogados(id),
+  contato_id uuid references contatos(id) on delete cascade);
+create table tags (id uuid primary key default gen_random_uuid(), nome text not null, cor text default '#42a5f5', criado_em timestamptz default now());
+create table conversa_tags (conversa_id uuid references conversas(id) on delete cascade, tag_id uuid references tags(id) on delete cascade,
+  primary key (conversa_id, tag_id));
+alter table tags enable row level security;
+alter table conversa_tags enable row level security;
+create policy tags_tudo on tags for all to authenticated using (true) with check (true);
+create policy ct_tudo on conversa_tags for all to authenticated using (true) with check (true);
+`;
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const aplicar = async (cl, sql) => { const r = await cl.query(sql); return (Array.isArray(r) ? r[r.length - 1] : r).rows; };
+    const guardado = async (fn) => { try { return await fn(); } catch (e) { return { erro: e.message, codigo: e.code }; } };
+    const lista = (l) => (Array.isArray(l) ? l : []);
+    const defeito = (l) => lista(l).some((x) => x.resposta === "false" || /^NÃO/.test(String(x.resposta)));
+    const item = (l, re) => (lista(l).find((x) => re.test(x.item)) || {}).resposta;
+    try {
+      // ---- 158a. sem o 075 ----
+      {
+        const c = await bancoNovo();
+        await c.query(ESQUEMA);
+        const r = await guardado(() => aplicar(c, S077));
+        ok("158a sem o 075, o 077 não faz nada e diz", lista(r).some((x) => /falta o 075/.test(x.item)), JSON.stringify(r));
+      }
+
+      const c = await bancoNovo();
+      await c.query(ESQUEMA);
+      await c.query(CHAVE);
+      await guardado(() => aplicar(c, S075));
+      const tel = (await c.query("insert into advogados (nome) values ('SAC') returning id")).rows[0].id;
+      const contato = async (numero, vinculo = null) => {
+        const ct = (await c.query("insert into contatos (numero, nome, vantoro_cliente_id) values ($1, 'Cliente', $2) returning id", [numero, vinculo])).rows[0].id;
+        return (await c.query("insert into conversas (advogado_id, contato_id) values ($1, $2) returning id", [tel, ct])).rows[0].id;
+      };
+      const por = async (conv) => (await c.query(
+        "select t.nome from conversa_tags x join tags t on t.id = x.tag_id where x.conversa_id = $1 order by t.nome", [conv])).rows.map((x) => x.nome);
+      const K1 = await contato("5571988881111", 201);
+      const K2 = await contato("557188882222");
+      const K3 = await contato("5571977773333", 203);
+
+      // ---- 158b. a instalação ----
+      const inst = await guardado(() => aplicar(c, S077));
+      ok("158b a instalação não acusa defeito", lista(inst).length > 0 && !defeito(inst), JSON.stringify(inst));
+      ok("e a troca de um argumento saiu", !!(await guardado(() => c.query("select zorvin_etiquetas_do_vantoro('[]'::jsonb, null)"))).rows
+         && (await c.query("select to_regprocedure('public.zorvin_etiquetas_do_vantoro(jsonb)') r")).rows[0].r === null);
+      ok("e quem entrou não chama a troca", !(await c.query(
+        "select has_function_privilege('authenticated', 'public.zorvin_etiquetas_do_vantoro(jsonb, boolean)', 'execute') p")).rows[0].p);
+
+      // ---- 158c. com o Andon ----
+      const troca = async (l, okRep) => (await c.query("select zorvin_etiquetas_do_vantoro($1::jsonb, $2) r", [JSON.stringify(l), okRep])).rows[0].r;
+      const L1 = [
+        { id: 201, blindagem: "parcial", subsidios: [], repasse: "aberto", telefones: ["71988881111"] },
+        { id: 202, blindagem: null, subsidios: [], repasse: "pago", telefones: ["(71) 98888-2222"] },
+        { id: 203, blindagem: "completa", subsidios: [], repasse: null, telefones: ["71977773333"] },
+      ];
+      const r1 = await troca(L1, true);
+      ok("158c com o Andon, a troca diz que o repasse valeu", r1.trocada === true && r1.repasse_ok === true, JSON.stringify(r1));
+      ok("o repasse em aberto vira etiqueta", JSON.stringify(await por(K1)) === JSON.stringify(["Blindagem parcial", "Repasse em aberto"]), JSON.stringify(await por(K1)));
+      ok("o repasse pago também, pelo telefone", JSON.stringify(await por(K2)) === JSON.stringify(["Repasse pago"]), JSON.stringify(await por(K2)));
+      ok("sem repasse, nenhuma", JSON.stringify(await por(K3)) === JSON.stringify(["Blindagem completa"]), JSON.stringify(await por(K3)));
+      const reps = (await c.query("select nome, automatica from tags where automatica like 'repasse:%' order by nome")).rows;
+      ok("as duas etiquetas do repasse são automáticas", JSON.stringify(reps) === JSON.stringify(
+        [{ nome: "Repasse em aberto", automatica: "repasse:aberto" }, { nome: "Repasse pago", automatica: "repasse:pago" }]), JSON.stringify(reps));
+      ok("o repasse não conta na régua da lista que encolhe", r1.clientes === 2, JSON.stringify(r1));
+
+      // ---- 158d. o repasse muda ----
+      const L2 = [{ ...L1[0], repasse: "pago" }, { ...L1[1], repasse: null }, L1[2]];
+      await troca(L2, true);
+      ok("158d o repasse pago troca a etiqueta", JSON.stringify(await por(K1)) === JSON.stringify(["Blindagem parcial", "Repasse pago"]), JSON.stringify(await por(K1)));
+      ok("e quem não tem mais repasse a perde", (await por(K2)).length === 0, JSON.stringify(await por(K2)));
+
+      // ---- 158e. sem o Andon ----
+      const L3 = [{ ...L1[0], blindagem: "completa", repasse: null }, L1[2]];
+      const r3 = await troca(L3, false);
+      ok("158e sem o Andon, a troca diz", r3.trocada === true && r3.repasse_ok === false, JSON.stringify(r3));
+      ok("e o repasse de antes fica, com a blindagem trocada", JSON.stringify(await por(K1)) === JSON.stringify(["Blindagem completa", "Repasse pago"]), JSON.stringify(await por(K1)));
+      await troca([{ ...L1[0], repasse: "aberto" }, { ...L1[1], repasse: "aberto" }, L1[2]], null);
+      ok("e com o Vantoro de antes (nulo), nenhum repasse entra", (await por(K2)).length === 0
+         && JSON.stringify(await por(K1)) === JSON.stringify(["Blindagem parcial", "Repasse pago"]), JSON.stringify([await por(K1), await por(K2)]));
+
+      // ---- 158f. rodar de novo ----
+      const de2 = await guardado(() => aplicar(c, S077));
+      ok("158f rodar de novo não acusa defeito", lista(de2).length > 0 && !defeito(de2), JSON.stringify(de2));
+      ok("e as etiquetas do repasse continuam", item(de2, /repasse hoje/) === "2", JSON.stringify(de2));
+    } catch (e) {
+      ok("a seção 158 rodou até o fim", false, e.stack || e.message);
     } finally {
       for (const cl of clientes) await cl.end().catch(() => {});
       for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
