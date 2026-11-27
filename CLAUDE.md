@@ -5066,6 +5066,32 @@ Provas: seção 158 (o 077 num Postgres de verdade, 17 conferências) e a 156f
 (a ponte). **2 sabotagens e 2 pegas**: sem a guarda que mantém as do
 repasse; o repasse contando na lista que encolhe.
 
+
+#### O nome das etiquetas só com a primeira maiúscula (script 078, 27/11)
+
+Pedido do Rodrigo: *"Quero que todas as etiquetas sigam um padrão onde apenas
+a primeira letra é maiúscula e as demais são minúsculas. Faça isso em todas as
+existentes e as futuras que forem criadas."*
+
+- **Um gatilho em `tags`** (`zorvin_etiqueta_nome_padrao`, antes de gravar)
+  passa o nome por `zorvin_nome_da_etiqueta`: sem os espaços das pontas, a
+  primeira letra maiúscula e o resto minúsculo ("SUBSÍDIO EMENDA" vira
+  "Subsídio emenda"). Vale para quem grava: o painel, a ponte, o conector, as
+  manuais e as automáticas;
+- **converte as de antes** (medido em 27/11: as de subsídio e umas manuais,
+  como "SAC", "C.P." e "COMP. NO TRIBUNAL"), só as que estão fora da regra;
+- **a rodada do Vantoro não regrava nada a cada 30 minutos**: o 075/077 grava o
+  nome do Vantoro sempre que ele difere do guardado, e com o gatilho sempre
+  difere. Para quem não entrou pelo painel (a ponte), a gravação que não muda
+  nada fica sem efeito (`return null`). Pelo painel, não: ali a gravação sem
+  efeito diria "o banco não deixou";
+- **a ordem dos gatilhos**: o nome vem antes da trava do 075 ("nome" <
+  "trava"), e a gravação sem efeito não passa por ela;
+- **siglas e nomes de pessoa também ficam minúsculos** ("Subsídio ccr",
+  "Falar com dr. max"), e é o pedido ao pé da letra; dito ao Rodrigo.
+
+Prova: seção 159, no banco da 158 (o 075 e o 077 de verdade).
+
 ### Só quem espera resposta fica, e a equipe é avisada (script 068, 25/11)
 
 Pedido do Rodrigo, no mesmo dia do 066: *"Para as conversas em que o cliente
