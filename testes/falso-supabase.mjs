@@ -725,7 +725,10 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
                                     // QUEM PEDE ATENÇÃO (25/11): a lista de `GET /clientes/atencao`.
                                     // Sem ela, o Vantoro de ANTES da rota: o 404 de página do Django.
                                     // Uma função responde por si: `() => ({ status, corpo })`.
-                                    atencao = null } = {}) {
+                                    atencao = null,
+                                    // AS ETIQUETAS (27/11): a lista de `GET /clientes/etiquetas`,
+                                    // com a mesma régua de `atencao`.
+                                    etiquetas = null } = {}) {
   // `dormeAsPrimeiras` imita a Render hibernando: as N primeiras chamadas
   // levam uma página de erro NA HORA, e a partir daí o serviço está de pé.
   let aindaDormindo = dormeAsPrimeiras;
@@ -782,6 +785,15 @@ export function subirFalsoVantoro({ usuarios = [], porta = 0, demora = 0, naoJso
     if (avisosQueNaoExistem.some((id) => url.pathname.endsWith(`/avisos/${id}/resposta`))) {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ ok: false, erro: "Aviso não encontrado." }));
+    }
+    if (url.pathname === "/clientes/etiquetas") {
+      if (etiquetas === null) {
+        res.writeHead(404, { "Content-Type": "text/html" });
+        return res.end("<!doctype html><html><head><title>Not Found</title></head><body><h1>Not Found</h1></body></html>");
+      }
+      const r = typeof etiquetas === "function" ? etiquetas() : { status: 200, corpo: { ok: true, clientes: etiquetas } };
+      res.writeHead(r.status || 200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(r.corpo));
     }
     if (url.pathname === "/clientes/atencao") {
       if (atencao === null) {
