@@ -31954,6 +31954,42 @@ create policy ct_tudo on conversa_tags for all to authenticated using (true) wit
       ok("pelo painel, a gravação com o mesmo nome continua valendo uma linha", r.rows?.length === 1, JSON.stringify(r.rows || r));
       const de3 = await guardado(() => aplicar(c, S078));
       ok("159e rodar de novo não regrava ninguém", item(de3, /convertidas/) === "0" && !defeito(de3), JSON.stringify(de3));
+
+      // ============================================================
+      //  160. AS SIGLAS E OS NOMES NAS ETIQUETAS (079), no mesmo banco (27/11)
+      // ============================================================
+      console.log("\n160. As siglas e os nomes nas etiquetas (079)");
+      const S079 = ler("079-as-siglas-e-os-nomes-nas-etiquetas.sql");
+      {
+        const v = await bancoNovo();
+        const cv = await guardado(() => aplicar(v, S079));
+        ok("160a num banco sem o 078, não faz nada", item(cv, /sem as etiquetas/) === "nada a fazer aqui", JSON.stringify(cv));
+      }
+      await c.query("insert into tags (nome) values ('Maxwell ccred')");
+      const i79 = await guardado(() => aplicar(c, S079));
+      ok("160b a instalação não acusa defeito", lista(i79).length > 0 && !defeito(i79)
+         && item(i79, /fora da regra/) === "0" && item(i79, /exceções/) === "CCR, Max, SAC", JSON.stringify(i79));
+      const n79 = (await c.query("select nome from tags order by nome")).rows.map((x) => x.nome);
+      ok("as siglas e o nome voltam: SAC, Subsídio CCR, Falar com dr. Max",
+         ["SAC", "Subsídio CCR", "Falar com dr. Max", "Subsídio emenda", "Acordo bom"].every((n) => n79.includes(n)), JSON.stringify(n79));
+      ok("e só a palavra inteira (Maxwell ccred não muda)", n79.includes("Maxwell ccred"), JSON.stringify(n79));
+      ok("e a conferência diz quantas refez", Number(item(i79, /refeitas/)) >= 3, JSON.stringify(i79));
+      const antes79 = await versao("Subsídio CCR");
+      await troca([{ ...L1[0], subsidios: ["SUBSÍDIO EMENDA", "SUBSÍDIO CCR"] }, L1[1], L1[2]], true);
+      ok("160c a rodada do Vantoro não regrava a que já está certa", antes79 && (await versao("Subsídio CCR")) === antes79,
+         `${antes79} → ${await versao("Subsídio CCR")}`);
+      await c.query("begin; set local role authenticated; select set_config('request.jwt.claim.sub', gen_random_uuid()::text, true)");
+      const r79 = await guardado(() => c.query("insert into tags (nome) values ('falar com MAX no sac') returning nome"));
+      await c.query("commit");
+      ok("160d pelo painel, a etiqueta nova também leva as exceções", r79.rows?.[0]?.nome === "Falar com Max no SAC", JSON.stringify(r79.rows || r79));
+      await c.query("begin; set local role authenticated");
+      const l79 = await guardado(() => c.query("select * from zorvin_etiqueta_palavras"));
+      await c.query("rollback");
+      ok("e quem entrou não lê a lista das exceções", !l79.rows && /permission denied/.test(String(l79.erro || "")), JSON.stringify(l79.rows || l79.erro));
+      await c.query("delete from zorvin_etiqueta_palavras where palavra = 'max'");
+      const de79 = await guardado(() => aplicar(c, S079));
+      ok("160e rodar de novo não traz de volta a exceção tirada", lista(de79).length > 0 && !defeito(de79)
+         && item(de79, /exceções/) === "CCR, SAC" && (await c.query("select 1 from tags where nome = 'Falar com dr. max'")).rows.length === 1, JSON.stringify(de79));
     } catch (e) {
       ok("a seção 158 rodou até o fim", false, e.stack || e.message);
     } finally {
