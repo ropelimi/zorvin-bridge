@@ -5041,6 +5041,31 @@ Provas: seção 155 (o 075 num Postgres de verdade, 35 conferências) e seção 
 telefone; sem a trava; sem a semente; sem aproveitar a da equipe; o vínculo
 cedendo ao telefone; sem apagar o tipo que some; a rota sem a recusa.
 
+#### O repasse (script 077, 27/11)
+
+Pedido do Rodrigo: *"para todos os clientes que possuem repasse, precisa ter
+etiqueta automática também. As etiquetas podem ser algo como "Repasse pago" e
+"Repasse em aberto""*. O repasse é a DESPESA EM ABERTO da aba Andon do
+Vantoro.
+
+- **O Vantoro (PR #598) manda `repasse` em cada cliente** da lista das
+  etiquetas (`"aberto"`, `"pago"` ou nulo; em aberto vence pago) e
+  `repasse_ok`, que diz se o Andon respondeu;
+- **`zorvin_etiquetas_do_vantoro(p_clientes, p_repasse_ok)`** (a versão de
+  referência, regra 5) põe "Repasse em aberto" (laranja) e "Repasse pago"
+  (verde-azulado), automáticas e travadas como as outras;
+- **o Andon que não respondeu não apaga nada**: com `p_repasse_ok` diferente
+  de verdadeiro, as etiquetas do repasse ficam como estavam (nem põe, nem
+  tira), e as da blindagem e do subsídio seguem;
+- **o repasse não entra na conta da lista que encolhe**: o Andon fora do ar
+  não pode fazer a lista parecer encolher;
+- **a ponte manda `p_repasse_ok`** (`true`, `false`, ou nulo com o Vantoro de
+  antes) e, num banco sem o 077 (PGRST202), chama de novo só com os clientes.
+
+Provas: seção 158 (o 077 num Postgres de verdade, 17 conferências) e a 156f
+(a ponte). **2 sabotagens e 2 pegas**: sem a guarda que mantém as do
+repasse; o repasse contando na lista que encolhe.
+
 ### Só quem espera resposta fica, e a equipe é avisada (script 068, 25/11)
 
 Pedido do Rodrigo, no mesmo dia do 066: *"Para as conversas em que o cliente
