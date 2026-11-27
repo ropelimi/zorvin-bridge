@@ -7127,7 +7127,10 @@ app.post('/vantoro/cliente-mudou', async (req, res) => {
         + 'A ficha do painel refaz o vínculo na próxima abertura.');
       continue;
     }
-    if (nome && c.vantoro_nome !== nome) {
+    // O banco grava o nome do cliente em maiúsculas (script 076): comparar
+    // como ele guarda, senão um Vantoro de antes das maiúsculas regravaria
+    // o mesmo nome a cada rodada.
+    if (nome && (c.vantoro_nome || '').toUpperCase() !== nome.trim().toUpperCase()) {
       const { error: e2 } = await supabase.from('contatos')
         .update({ vantoro_nome: nome }).eq('id', c.id);
       if (e2) { console.warn(`Não consegui renomear o contato ${c.id}: ${e2.message}`); continue; }

@@ -31677,5 +31677,82 @@ create policy ct_tudo on conversa_tags for all to authenticated using (true) wit
   }
 }
 
+// ============================================================
+//  157. O NOME DO CLIENTE EM MAIÚSCULAS (076), num Postgres de verdade (27/11)
+// ============================================================
+{
+  console.log("\n157. O nome do cliente em maiúsculas (076), num Postgres de verdade");
+  const BANCO_BASE = String(process.env.PROVA_DATABASE_URL || "").trim();
+  if (!BANCO_BASE && process.env.CI) {
+    ok("há um Postgres para provar o 076 (obrigatório na integração contínua)", false, "PROVA_DATABASE_URL não foi definida");
+  } else if (!BANCO_BASE) {
+    console.log("  (pulada: sem PROVA_DATABASE_URL. Na integração contínua isto seria FALHA.)");
+  } else {
+    const pg = await import("pg");
+    const fs = await import("node:fs");
+    const S076 = fs.readFileSync(new URL("../sql/automaticos/076-o-nome-do-cliente-em-maiusculas.sql", import.meta.url), "utf8");
+    const raiz = new pg.Client({ connectionString: BANCO_BASE, ssl: false }); await raiz.connect();
+    const bancos = [], clientes = [];
+    async function bancoNovo() {
+      const nome = `prova_${crypto.randomBytes(5).toString("hex")}`;
+      await raiz.query(`create database ${nome}`); bancos.push(nome);
+      const u = new URL(BANCO_BASE); u.pathname = `/${nome}`; u.searchParams.set("sslmode", "disable");
+      const cl = new pg.Client({ connectionString: u.toString(), ssl: false }); await cl.connect(); clientes.push(cl);
+      return cl;
+    }
+    const conferencia = async (c) => {
+      const r = await c.query(S076);
+      const ultimo = Array.isArray(r) ? r[r.length - 1] : r;
+      return Object.fromEntries(ultimo.rows.map((x) => [x.item, x.resposta]));
+    };
+    try {
+      // ---- 157a. banco limpo ----
+      const vazio = await bancoNovo();
+      const cv = await conferencia(vazio);
+      ok("157a num banco limpo, não faz nada", cv["sem as tabelas do Zorvin"] === "nada a fazer aqui", JSON.stringify(cv));
+
+      // ---- 157b. converte os de antes, e só os dois nomes do cliente ----
+      const c = await bancoNovo();
+      await c.query(`create table contatos (id serial primary key, numero text unique, nome text, nome_zorvin text, vantoro_nome text);
+        insert into contatos (numero, nome, nome_zorvin, vantoro_nome) values
+          ('1', 'Deus', 'maria das graças', null), ('2', 'Zé', null, ' João Ávila '), ('3', 'Ana', 'JÁ CERTO', 'JÁ CERTO');`);
+      const c1 = await conferencia(c);
+      const linhas = (await c.query("select nome, nome_zorvin, vantoro_nome from contatos order by id")).rows;
+      ok("157b o nome dado pela equipe vira maiúsculas, com o acento", linhas[0].nome_zorvin === "MARIA DAS GRAÇAS", JSON.stringify(linhas));
+      ok("e o do cadastro também, sem os espaços das pontas", linhas[1].vantoro_nome === "JOÃO ÁVILA", JSON.stringify(linhas));
+      ok("o nome do WhatsApp não muda", linhas.map((l) => l.nome).join(",") === "Deus,Zé,Ana", JSON.stringify(linhas));
+      ok("e a conferência diz quantos converteu, e zero de fora",
+         c1["nomes dados pela equipe convertidos nesta rodada"] === "1" && c1["nomes do cadastro convertidos nesta rodada"] === "1"
+         && c1["o gatilho existe"] === "true" && c1["nomes da equipe fora das maiúsculas (tem de ser 0)"] === "0", JSON.stringify(c1));
+
+      // ---- 157c. o que se grava depois ----
+      await c.query("update contatos set nome_zorvin = 'ana paula   ' where numero = '3'");
+      await c.query("insert into contatos (numero, nome, vantoro_nome, nome_zorvin) values ('4', 'eu', 'beatriz', '   ')");
+      const d = (await c.query("select numero, nome, nome_zorvin, vantoro_nome from contatos where numero in ('3','4') order by numero")).rows;
+      ok("157c renomear pela tela grava em maiúsculas", d[0].nome_zorvin === "ANA PAULA", JSON.stringify(d));
+      ok("e o contato novo também; o vazio vira nulo", d[1].vantoro_nome === "BEATRIZ" && d[1].nome_zorvin === null && d[1].nome === "eu", JSON.stringify(d));
+
+      // ---- 157d. rodar de novo ----
+      const c2 = await conferencia(c);
+      ok("157d rodar de novo não regrava ninguém", c2["nomes dados pela equipe convertidos nesta rodada"] === "0"
+         && c2["nomes do cadastro convertidos nesta rodada"] === "0", JSON.stringify(c2));
+
+      // ---- 157e. uma base com só uma das colunas ----
+      const s = await bancoNovo();
+      await s.query("create table contatos (id serial primary key, numero text, nome text, nome_zorvin text); insert into contatos (numero, nome_zorvin) values ('1', 'lia')");
+      await conferencia(s);
+      await s.query("insert into contatos (numero, nome_zorvin) values ('2', 'rui')");
+      const e = (await s.query("select nome_zorvin from contatos order by id")).rows.map((x) => x.nome_zorvin).join(",");
+      ok("157e sem o vantoro_nome, o gatilho funciona com a outra", e === "LIA,RUI", e);
+    } catch (e) {
+      ok("a seção 157 rodou até o fim", false, e.stack || e.message);
+    } finally {
+      for (const cl of clientes) await cl.end().catch(() => {});
+      for (const b of bancos) await raiz.query(`drop database if exists ${b} with (force)`).catch(() => {});
+      await raiz.end().catch(() => {});
+    }
+  }
+}
+
 console.log(`\n${feitas - falhas}/${feitas} conferências passaram`);
 process.exit(falhas ? 1 : 0);

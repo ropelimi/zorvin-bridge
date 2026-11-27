@@ -339,6 +339,31 @@ porta, e a ponte responde com a função `zorvin_controle_atendimento` (script
   avisa na tela. A porta não mudou: ela já repassa cada conversa como vem.
   Prova: seção 74.
 
+## O nome do cliente em maiúsculas (script 076, 27/11)
+
+Pedido do Rodrigo: *"Nome do cliente sempre deve ser com todas as letras
+maiúsculas, isso deve ser padrão dentro do Zorvin e Vantoro. Mesmo se algum
+usuário salvar com letras minúsculas, os sistemas devem alterar para
+maiúsculas."* No Vantoro, `Cliente.save()` grava em maiúsculas (migração 0156).
+
+`sql/automaticos/076-o-nome-do-cliente-em-maiusculas.sql`:
+
+- **um gatilho em `contatos`** (`zorvin_nome_em_maiusculas`, antes de gravar)
+  passa `nome_zorvin` (o lápis de renomear) e `vantoro_nome` (o do cadastro)
+  para maiúsculas, sem os espaços das pontas; vazio vira nulo. Vale para quem
+  grava: o painel, a ponte, o conector;
+- **converte os de antes** (medido em 27/11: 13 nomes da equipe e 11 do
+  cadastro, de 1.659 contatos), só os que não estão em maiúsculas;
+- **o nome do WhatsApp (`contatos.nome`) não muda**, e é decisão: é o que o
+  cliente pôs no perfil, e a ponte o regrava a cada mensagem;
+- as colunas são lidas por `to_jsonb` (nasceram à mão), e o gatilho que
+  tropeçar deixa o contato ser gravado assim mesmo;
+- **a ponte compara o nome do Vantoro sem olhar maiúscula** (a ligação do
+  contato ao cadastro), senão regravaria a cada leitura.
+
+Prova: seção 157, num Postgres de verdade (9 conferências). A sabotagem que
+tira o `upper` do nome da equipe reprova 5.
+
 ### As mensagens da equipe, dia a dia — `POST /vantoro/mensagens-da-equipe` (script 074, 26/11)
 
 As tarefas de **subsídio** do Vantoro contam as **tentativas de contato** com
