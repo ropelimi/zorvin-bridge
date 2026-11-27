@@ -154,6 +154,10 @@ Variáveis de ambiente (no Render):
 - `CASO_PRAZO_MS` — quanto o Quazar espera o caso do Vantoro à noite e em quem
   espera (padrão 15 s). **Opcional**, para a bancada. Ver "O caso mais
   completo, e a noite lê o caso (script 073, 26/11)".
+- `ETIQUETAS_INTERVALO_MS` e `ETIQUETAS_PRIMEIRA_MS` — de quanto em quanto a
+  ponte traz do Vantoro as etiquetas da blindagem e do subsídio (padrão 30 min)
+  e quando é a primeira (1 min depois de subir). **Opcionais**, para a bancada.
+  Ver "As etiquetas que vêm do Vantoro (script 075, 27/11)".
 - `QUAZAR_DOCUMENTOS` — `desligado` tira do Quazar a leitura do documento do
   andamento pelo LegalMail (a ferramenta e as marcas no caso). **Opcional: sem
   ela, ele lê quando precisa**, até um por resposta; o teto do dia mora no
@@ -4965,6 +4969,52 @@ Prova: seção 135 (o 067 aplica e diz que a troca não tem DELETE sem WHERE;
 sem o 066 não faz nada; rodando a pasta de novo, a troca que fica é a do 067)
 e seção 137. **A sabotagem que tira o `where true` do 067 é pega por três
 conferências**, a da 137 entre elas.
+
+### As etiquetas que vêm do Vantoro (script 075, 27/11)
+
+Pedido do Rodrigo: as etiquetas "Blindagem completa", "Blindagem parcial" e
+"Blindagem pendente", e uma por tipo de tarefa de subsídio aberta, *"deve
+seguir o mesmo que o nome da tarefa"* ("SUBSÍDIO EMENDA", "SUBSÍDIO CCR"…),
+mantidas pelo Vantoro: *"não pode ser possível a equipe editar essas
+etiquetas, não deve ser permitido excluir ou incluir. As etiquetas devem
+aparecer apenas para serem filtradas."*
+
+| peça | o quê |
+|---|---|
+| o Vantoro (PR #595) | `GET /api/v1/clientes/etiquetas` (só a ponte): de cada cliente, `blindagem` (ou nulo), `subsidios` (os tipos das tarefas abertas que pedem contato, pelo nome sem a tentativa) e `telefones` |
+| `tags.automatica` | a marca da etiqueta que o Zorvin mantém sozinho (`blindagem:parcial`, `subsidio:SUBSIDIO EMENDA`); nula nas da equipe |
+| `zorvin_etiquetas_do_vantoro(p_clientes)` | troca as etiquetas de uma vez (só a ponte). A versão de referência |
+| a trava (dois gatilhos) | quem entrou no painel não renomeia, não muda a cor, não apaga, não cria, não põe nem tira a automática (42501). A cascata (a conversa apagada) passa |
+| `etiquetarPeloVantoro`, no `index.js` | de 30 em 30 minutos, a primeira 1 minuto depois de subir; a idade vem de `zorvin_etiquetas_marca` |
+| `/etiqueta/contato` | recusa a automática (409): a ponte grava com a chave de serviço, que passa pela trava do banco |
+
+- **Qual conversa recebe**: o contato ligado (`vantoro_cliente_id`) segue o
+  cadastro dele, e só ele; sem vínculo, o telefone (a chave do 066), e só o que
+  TODOS os cadastros com aquele telefone têm; grupo nunca.
+- **As do subsídio nascem e somem com o tipo**: o tipo que nenhum cliente tem
+  mais leva a etiqueta junto, e ela volta quando a tarefa voltar.
+- **A etiqueta da equipe com o mesmo nome** (sem olhar acento nem maiúscula,
+  `zorvin_chave_da_etiqueta`) é aproveitada, decidido pelo Rodrigo: passa a
+  ser automática, ganha o nome do Vantoro, e as conversas dela são trocadas
+  pelas da lista. Em 27/11: "Subsidio Emenda" (320 conversas), "Subsidio CCR"
+  (114) e "Subsídio Condenação" (9). "Subsidio CCR - Carapicuiba" e "- Embu das
+  Artes" continuam manuais.
+- **As manuais "Blindagem" (110 conversas) e "Blindagem Concluida" (12) são
+  apagadas na instalação**, uma vez (a semente
+  `etiquetas:apagar-blindagem-manual-075`), decidido pelo Rodrigo.
+- **A lista que encolhe mais da metade de uma vez** (de 20 ou mais) é recusada,
+  e as etiquetas de antes ficam. A falha não apaga nada.
+- **Sem Vantoro, nada.** Sem o 075, a tabela ou a função que falta para a rodada
+  até reiniciar. No log, os números e os nomes das etiquetas, nunca telefone.
+- **Medido no Vantoro em 27/11, só contando**: 8 tipos de subsídio abertos (o
+  maior, SUBSÍDIO CONDENAÇÃO, com 162 clientes); nenhum cliente com blindagem
+  completa ainda (nenhuma juntada marcada), então "Blindagem completa" começa
+  vazia.
+
+Provas: seção 155 (o 075 num Postgres de verdade, 35 conferências) e seção 156
+(a rodada e a rota, 12). **7 sabotagens e 7 pegas**: sem a unanimidade do
+telefone; sem a trava; sem a semente; sem aproveitar a da equipe; o vínculo
+cedendo ao telefone; sem apagar o tipo que some; a rota sem a recusa.
 
 ### Só quem espera resposta fica, e a equipe é avisada (script 068, 25/11)
 
